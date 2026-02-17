@@ -1,0 +1,40 @@
+{
+  "$schema": "../node_modules/@tauri-apps/capabilities-schema/schema.json",
+  "identifier": "default-capabilities",
+  "description": "Default capabilities for Subtitle Studio",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    
+    "fs:default",
+    "fs:allow-read-file",
+    "fs:allow-write-file",
+    "fs:allow-read-dir",
+    "fs:allow-create",
+    "fs:allow-remove",
+    "fs:allow-rename",
+    
+    "fs:scope-app",
+    "fs:scope-appconfig",
+    "fs:scope-appdata",
+    "fs:scope-audio",
+    "fs:scope-desktop",
+    "fs:scope-document",
+    "fs:scope-download",
+    "fs:scope-home",
+    "fs:scope-picture",
+    "fs:scope-public",
+    "fs:scope-temp",
+    "fs:scope-video",
+    
+    "shell:default",
+    "shell:allow-open",
+    "shell:allow-execute",
+    
+    "sql:default",
+    "sql:allow-load",
+    "sql:allow-execute",
+    "sql:allow-select",
+    "sql:allow-close"
+  ]
+}
