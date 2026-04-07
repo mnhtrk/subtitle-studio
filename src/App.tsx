@@ -11,6 +11,14 @@ export default function App() {
 	const [projectTreeWidth, setProjectTreeWidth] = useState(240); // Начальная ширина 240px (w-60)
 	const [isResizing, setIsResizing] = useState(false);
 	const [isVideoFolderOpen, setIsVideoFolderOpen] = useState(true);
+	const [aiAgentWidth, setAiAgentWidth] = useState(320); // Начальная ширина
+	const [isAiAgentResizing, setIsAiAgentResizing] = useState(false);
+
+	const [tablePanelWidth, setTablePanelWidth] = useState(800);
+  const [upperSectionHeight, setUpperSectionHeight] = useState(450);
+
+	// Стейт для ширин первых 4-х фиксированных колонок
+  const [colWidths, setColWidths] = useState([50, 120, 120, 100]);
 
 	const startResizing = useCallback(() => {
 		setIsResizing(true);
@@ -39,9 +47,81 @@ export default function App() {
 		};
 	}, [resize, stopResizing]);
 
+	const startAiAgentResizing = useCallback((mouseDownEvent: React.MouseEvent) => {
+  setIsAiAgentResizing(true);
+
+  const startWidth = aiAgentWidth;
+  const startX = mouseDownEvent.clientX;
+
+  const doDrag = (mouseMoveEvent: MouseEvent) => {
+    // Вычисляем новую ширину: начальная + разница координат
+    const newWidth = startWidth + (mouseMoveEvent.clientX - startX);
+    
+    // Ограничиваем минимальную и максимальную ширину
+    if (newWidth > 200 && newWidth < 600) {
+      setAiAgentWidth(newWidth);
+    }
+  };
+
+  const stopDrag = () => {
+    setIsAiAgentResizing(false);
+    window.removeEventListener('mousemove', doDrag);
+    window.removeEventListener('mouseup', stopDrag);
+  };
+
+  window.addEventListener('mousemove', doDrag);
+  window.addEventListener('mouseup', stopDrag);
+}, [aiAgentWidth]);
+
+	// Ресайз всей панели (Края: право и низ)
+  const startTablePanelResizing = useCallback((direction: 'right' | 'bottom', mouseDownEvent: React.MouseEvent) => {
+    const startWidth = tablePanelWidth;
+    const startHeight = upperSectionHeight;
+    const startX = mouseDownEvent.clientX;
+    const startY = mouseDownEvent.clientY;
+
+    const doDrag = (e: MouseEvent) => {
+      if (direction === 'right') {
+        const newWidth = startWidth + (e.clientX - startX);
+        if (newWidth > 450 && newWidth < window.innerWidth - 400) setTablePanelWidth(newWidth);
+      } else {
+        const newHeight = startHeight + (e.clientY - startY);
+        if (newHeight > 200 && newHeight < window.innerHeight - 150) setUpperSectionHeight(newHeight);
+      }
+    };
+
+    const stopDrag = () => {
+      window.removeEventListener('mousemove', doDrag);
+      window.removeEventListener('mouseup', stopDrag);
+    };
+    window.addEventListener('mousemove', doDrag);
+    window.addEventListener('mouseup', stopDrag);
+  }, [tablePanelWidth, upperSectionHeight]);
+
+  // Ресайз колонок таблицы
+  const startColResize = useCallback((index: number, mouseDownEvent: React.MouseEvent) => {
+    const startWidth = colWidths[index];
+    const startX = mouseDownEvent.clientX;
+
+    const doDrag = (e: MouseEvent) => {
+      const newWidth = Math.max(40, startWidth + (e.clientX - startX));
+      const newWidths = [...colWidths];
+      newWidths[index] = newWidth;
+      setColWidths(newWidths);
+    };
+
+    const stopDrag = () => {
+      window.removeEventListener('mousemove', doDrag);
+      window.removeEventListener('mouseup', stopDrag);
+    };
+    window.addEventListener('mousemove', doDrag);
+    window.addEventListener('mouseup', stopDrag);
+  }, [colWidths]);
+
+
   return (
     // Главный контейнер. Добавил min-h-0, чтобы разрешить сжатие
-    <div className="flex h-screen w-full bg-surface-bg text-text-primary overflow-hidden font-inter min-h-0">
+    <div className="flex h-screen w-full bg-surface-bg text-text-primary overflow-hidden font-inter min-h-0 select-none">
       
       {/* ЛЕВАЯ ПАНЕЛЬ (SIDEBAR) */}
 			<div className="w-[60px] border-r border-border-default flex flex-col items-center py-6 bg-surface-panel shrink-0 h-full overflow-y-auto no-scrollbar">
@@ -95,8 +175,8 @@ export default function App() {
 			>
 				{/* 1) Заголовок с градиентом и заглушками 16x16 */}
 				<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
-					<span className="text-[16px] font-bold tracking-[-0.01em] text-text-primary truncate font-inter pr-1">
-						VIMN_KALLYS_2025
+					<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
+						VIMN_KALLY_20
 					</span>
 					
 					<div className="flex items-center gap-[12px] shrink-0">
@@ -182,69 +262,212 @@ export default function App() {
 				/>
 			</div>
 
-      {/* ЦЕНТРАЛЬНАЯ ПАНЕЛЬ (AI-AGENT) */}
-      <div className="w-80 border-r border-border-default flex flex-col bg-white shrink-0">
-        <div className="p-3 h-[44px] border-b border-border-default flex justify-between items-center bg-surface-secondary">
-          <span className="text-h1 font-semibold text-primary-main">AI-agent</span>
-          <div className="text-primary-disabled text-xl cursor-pointer hover:text-primary-main">+</div>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-surface-bg/50">
-          <div className="bg-white border border-border-default p-3 rounded-lg shadow-sm text-body-reg ml-6">
-            Помоги понять контекст этой фразы...
-          </div>
-          <div className="text-body-reg text-text-primary pr-6">
-            Конечно! Эта идиома означает, что человек наконец-то вошел в ритм...
-          </div>
-        </div>
-        <div className="p-4 border-t border-border-default">
-          <div className="w-full h-10 px-4 bg-surface-bg rounded-full border border-border-default text-caption text-primary-disabled flex items-center">
-            Помоги, пожалуйста, перевести...
-          </div>
-        </div>
-      </div>
+      {/* ПАНЕЛЬ (AI-AGENT) - Теперь ресайзится */}
+			<div 
+				// w-80 (320px) заменяем на динамическую ширину из стейта
+				style={{ width: `${aiAgentWidth || 320}px` }} 
+				className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
+			>
+				{/* 1) Заголовок (идентичен Project Tree) */}
+				<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
+					<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
+						AI-agent
+					</span>
+					
+					<div className="flex items-center gap-[12px] shrink-0">
+						{/* Заглушка: Плюс (16x16) */}
+						<button title="Add" className="group w-4 h-4 flex items-center justify-center shrink-0">
+							<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+						</button>
+						
+						{/* Заглушка: Три точки (16x16) */}
+						<button title="Options" className="group w-4 h-4 flex items-center justify-center shrink-0">
+							<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+						</button>
+					</div>
+				</div>
+
+				{/* 2) Блок чата - Исправлена толщина обводки (убраны border-t/r/b) */}
+				<div className="flex-1 overflow-y-auto p-[12px] bg-surface-bg flex flex-col gap-4">
+					
+					{/* Сообщение пользователя (Справа) */}
+					<div className="self-end max-w-[90%] flex flex-col items-end">
+						<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
+							<p className="text-body-reg text-text-primary font-inter leading-tight">
+								Помоги понять контекст этой фразы: "She's really hitting her stride with this new project."
+							</p>
+						</div>
+					</div>
+
+					{/* Сообщение агента (Слева) */}
+					<div className="self-start max-w-[95%] flex flex-col items-start">
+						<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px] select-text">
+							<p className="text-body-reg text-text-primary font-inter leading-tight">
+								Конечно! Эта идиома означает, что человек вошел в ритм и начал работать эффективно. Вот варианты перевода:
+							</p>
+
+							{/* Встраиваемая реплика (Весь текст Caption) */}
+							<div className="mt-3 bg-[#E9ECF0] rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
+								{/* Верхняя строка: Стрелочка (16x16) и кнопки */}
+								<div className="flex items-center justify-between">
+									<div className="w-4 h-4 bg-text-primary/20 rounded-sm flex items-center justify-center cursor-pointer hover:bg-text-primary/30 transition-colors">
+										<div className="w-2 h-1 bg-text-primary/40 rounded-full" /> 
+									</div>
+									<div className="flex gap-[12px]">
+										<button className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors">Undo</button>
+										<button className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors">Keep</button>
+									</div>
+								</div>
+
+								{/* Метаданные: ID, Таймкод и Тонкая Линия 1px */}
+								<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+									<span className="whitespace-nowrap">#152</span>
+									<span className="whitespace-nowrap">[ 00:01:03 ]</span>
+									<div className="flex-1 h-[1px] bg-border-default" /> {/* Тонкая линия как в Project Tree */}
+								</div>
+
+								{/* Полоски реплик (Высота 22px, padding 4px, corner 2px) */}
+								<div className="flex flex-col gap-[4px]">
+									<div className="h-[22px] bg-[#f8d7da] rounded-[2px] px-[4px] flex items-center">
+										<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магикс!</span>
+									</div>
+									<div className="h-[22px] bg-[#d4edda] rounded-[2px] px-[4px] flex items-center">
+										<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магиксию!</span>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+
+					{/* Еще одно сообщение пользователя */}
+					<div className="self-end max-w-[90%]">
+						<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
+							<p className="text-body-reg text-text-primary font-inter leading-tight">
+								Измени во всех репликах слово Магикс на Магиксия.
+							</p>
+						</div>
+					</div>
+				</div>
+
+				{/* Нижнее поле ввода (Chat Input) */}
+				{/* Нижнее поле ввода (Chat Input) */}
+				<div className="p-3 bg-surface-bg shrink-0">
+					<div className="relative flex flex-col bg-surface-secondary border border-border-default rounded-[10px] group transition-all focus-within:border-primary-main/50 shadow-sm min-h-[96px]">
+						
+						{/* Textarea — добавлен pr-[56px], чтобы текст не затекал под кнопку */}
+						<textarea 
+							placeholder="Помоги, пожалуйста, перевести..."
+							className="w-full h-full p-3 pr-[56px] bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto no-scrollbar"
+							rows={3}
+						/>
+
+						{/* Кнопка отправки — теперь она никогда не перекроет текст */}
+						<div className="absolute right-3 bottom-3">
+							<button 
+								title="Send message" 
+								className="group w-[40px] h-[40px] flex items-center justify-center shrink-0"
+							>
+								<div className="w-[40px] h-[40px] bg-secondary-hover rounded-full group-hover:bg-primary-main transition-colors flex items-center justify-center">
+									<div className="w-4 h-4 bg-white/30 rounded-sm" />
+								</div>
+							</button>
+						</div>
+
+					</div>
+				</div>
+
+				{/* РЕСАЙЗЕР: Копия из Project Tree (Смещен на край) */}
+				<div 
+					onMouseDown={startAiAgentResizing} // Вам нужно добавить хэндлер в parent App
+					className={`absolute right-[-4px] top-0 w-[8px] h-full cursor-col-resize z-30 transition-colors ${
+						isAiAgentResizing ? 'bg-primary-main/20' : 'hover:bg-primary-main/10'
+					}`}
+				/>
+			</div>
 
       {/* ПРАВАЯ ЧАСТЬ (РЕДАКТОР И ПЛЕЕР) */}
       <div className="flex-1 flex flex-col min-w-0 bg-surface-bg">
         
         {/* Верх: Таблица и Видео */}
-        <div className="flex-[2] flex overflow-hidden border-b border-border-default min-h-0">
-          {/* Редактор субтитров */}
-          <div className="flex-1 flex flex-col bg-white overflow-hidden min-w-0">
-            <div className="h-[44px] border-b border-border-default flex items-center px-4 bg-surface-secondary shrink-0">
-              <span className="text-h1 font-semibold text-primary-main">Editor</span>
-            </div>
-            
-            <div className="flex-1 overflow-auto">
-              <table className="w-full border-collapse">
-                <thead className="sticky top-0 bg-surface-secondary border-b border-border-default z-10">
-                  <tr className="text-caption font-medium text-text-secondary uppercase">
-                    <th className="px-4 py-2 text-left w-12">#</th>
-                    <th className="px-4 py-2 text-left w-32">Start</th>
-                    <th className="px-4 py-2 text-left w-32">End</th>
-                    <th className="px-4 py-2 text-left">Text</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-secondary-main">
-                  {[1, 2, 3, 4, 5].map((i) => (
-                    <tr key={i} className="hover:bg-primary-surface/30 transition-colors group">
-                      <td className="px-4 py-2 text-table font-medium text-text-secondary">{i}</td>
-                      <td className="px-4 py-2 font-mono text-timecode text-primary-main">00:00:01,200</td>
-                      <td className="px-4 py-2 font-mono text-timecode text-primary-main">00:00:04,500</td>
-                      <td className="px-4 py-2 text-body-reg text-text-primary">
-                        <input 
-                          className="w-full bg-transparent outline-none border-none p-0 focus:ring-0" 
-                          defaultValue="Тестовая строка субтитров..."
-                        />
-                      </td>
+        {/* Верх: Таблица и Видео */}
+        <div 
+          style={{ height: `${upperSectionHeight}px` }}
+          className="flex overflow-hidden border-b border-border-default min-h-0 shrink-0"
+        >
+          <div 
+            style={{ width: `${tablePanelWidth}px` }}
+            className="flex flex-col bg-surface-secondary relative shrink-0 min-w-0"
+          >
+            <div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
+              <div className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary">
+                <table className="w-full border-collapse table-fixed">
+                  <thead className="sticky top-0 bg-surface-secondary z-20">
+                    <tr className="h-[25px]">
+                      {['#', 'Start time', 'End time', 'Duration'].map((label, idx) => (
+                        <th 
+                          key={idx} 
+                          style={{ width: `${colWidths[idx]}px` }}
+                          className="relative h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] select-none min-w-0"
+                        >
+                          <div className="truncate w-full">{label}</div>
+                          <div 
+                            onMouseDown={(e) => startColResize(idx, e)}
+                            className="absolute right-0 top-0 w-1 h-full cursor-col-resize hover:bg-primary-main/30 z-10" 
+                          />
+                        </th>
+                      ))}
+                      <th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] min-w-0">
+                        <div className="truncate w-full">Translation</div>
+                      </th>
+                      <th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] min-w-0">
+                        <div className="truncate w-full">Original text</div>
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  
+                  <tbody>
+                    {Array.from({ length: 25 }).map((_, i) => (
+                      <tr key={i} className="h-[25px] hover:bg-black/5 transition-colors group text-table">
+                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+                          <div className="truncate">{i + 1}</div>
+                        </td>
+                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+                          <div className="truncate">00:01:03,174</div>
+                        </td>
+                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+                          <div className="truncate">00:01:03,174</div>
+                        </td>
+                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+                          <div className="truncate">1,244</div>
+                        </td>
+                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+                          <div className="truncate">It's the biggest event of the year in Magix...</div>
+                        </td>
+                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+                          <div className="truncate">C'est le plus grand événement de l'année...</div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
+
+            {/* РЕСАЙЗЕРЫ ПАНЕЛИ */}
+            {/* Правый край — оставляем подсветку для удобства */}
+            <div 
+              onMouseDown={(e) => startTablePanelResizing('right', e)}
+              className="absolute right-0 top-0 w-1 h-full cursor-col-resize z-50 hover:bg-primary-main/20 transition-colors"
+            />
+            {/* Нижний край — УБРАНА подсветка hover, чтобы не было "полосы" */}
+            <div 
+              onMouseDown={(e) => startTablePanelResizing('bottom', e)}
+              className="absolute bottom-0 left-0 w-full h-1.5 cursor-row-resize z-50 bg-transparent"
+            />
           </div>
           
           {/* Видеоплеер */}
-          <div className="w-[380px] bg-black flex flex-col shadow-inner shrink-0 overflow-hidden">
+          <div className="flex-1 bg-black flex flex-col shadow-inner min-w-[300px] overflow-hidden">
             <div className="flex-1 flex items-center justify-center text-white/10 text-caption uppercase tracking-widest">
               Video Preview
             </div>
