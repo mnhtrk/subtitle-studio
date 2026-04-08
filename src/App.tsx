@@ -1,5 +1,8 @@
 import React, { useState, useCallback, useEffect } from 'react';
 
+import { getCurrentWindow } from '@tauri-apps/api/window';
+const appWindow = getCurrentWindow();
+
 import { 
   FilePlus2, 
   FolderPlus, 
@@ -20,6 +23,37 @@ export default function App() {
 
 	// Стейт для ширин первых 4-х фиксированных колонок
   const [colWidths, setColWidths] = useState([50, 120, 120, 100]);
+
+	const handleMinimize = async () => {
+		await appWindow.minimize();
+	};
+
+	const handleMaximize = async () => {
+		await appWindow.toggleMaximize();
+	};
+
+	const handleClose = async () => {
+		await appWindow.close();
+	};
+
+	const [activeMenu, setActiveMenu] = useState<string | null>(null);
+	// 2. Добавь эффект для закрытия меню при клике вне его
+	useEffect(() => {
+		const handleClickOutside = () => setActiveMenu(null);
+		if (activeMenu) {
+			window.addEventListener('click', handleClickOutside);
+		}
+		return () => window.removeEventListener('click', handleClickOutside);
+	}, [activeMenu]);
+
+	// Список пунктов меню для рендера
+	const menuItems = [
+		{ label: 'File', items: ['New', 'Open', 'Save', 'Exit'] },
+		{ label: 'Edit', items: ['Undo', 'Redo', 'Find'] },
+		{ label: 'Tools', items: ['Spell check', 'Batch convert'] },
+		{ label: 'Video', items: ['Open video file', 'Audio track'] },
+		{ label: 'Help', items: ['About', 'Updates'] },
+	];
 	
 
 	const startResizing = useCallback(() => {
@@ -124,506 +158,584 @@ export default function App() {
 
 
   return (
-    // Главный контейнер. Добавил min-h-0, чтобы разрешить сжатие
-    <div className="flex h-screen w-full bg-surface-bg text-text-primary overflow-hidden font-inter min-h-0 select-none">
-      
-      {/* ЛЕВАЯ ПАНЕЛЬ (SIDEBAR) */}
-			<div className="w-[60px] border-r border-border-default flex flex-col items-center py-6 bg-surface-panel shrink-0 h-full overflow-y-auto no-scrollbar">
-				{/* Контейнер без gap, чтобы управлять отступами мастера вручную */}
-				<div className="my-auto flex flex-col items-center">
-					
-					{/* Верхняя группа кнопок */}
-					<div className="flex flex-col items-center gap-[30px]">
-						<button title="Создать новый проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
-							<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-						</button>
-						
-						<button title="Открыть проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
-							<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-						</button>
-						
-						<button title="Сохранить проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
-							<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-						</button>
-					</div>
+    <div className="flex flex-col h-screen w-full overflow-hidden bg-surface-bg select-none">
+			{/* 1. TITLE BAR (Системная строка с перетаскиванием) */}
+			<div 
+				className="h-[30px] flex items-center justify-between shrink-0"
+				style={{ ['WebkitAppRegion' as any]: 'drag' }}
+			>
+				<div className="flex items-center px-2 gap-2">
+					<div className="w-4 h-4 bg-[#C42B1C] rounded-sm flex items-center justify-center text-[10px] text-white font-bold">SE</div>
+					<span className="text-[12px] text-text-primary font-inter">
+						{isVideoFolderOpen ? 'S1E01.mp4' : 'Untitled'} - subtitlestudio
+					</span>
+				</div>
 
-					{/* Кнопка мастера с уменьшенным визуальным отступом (22px вместо 30px) */}
+				<div className="flex items-center h-full" style={{ ['WebkitAppRegion' as any]: 'no-drag' }}>
 					<button 
-						title="Пошаговый мастер" 
-						className="w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-all shrink-0 my-[28px]"
+						onClick={() => appWindow.minimize()}
+						className="w-[46px] h-full flex items-center justify-center hover:bg-secondary-hover transition-colors"
 					>
-						<div className="w-7 h-7 bg-white/20 rounded-sm" />
+						<div className="w-2.5 h-[1px] bg-text-primary" />
 					</button>
-
-					{/* Нижняя группа кнопок */}
-					<div className="flex flex-col items-center gap-[30px]">
-						<button title="Экспорт" className="group w-7 h-7 flex items-center justify-center shrink-0">
-							<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-						</button>
-						
-						<button title="Глоссарий" className="group w-7 h-7 flex items-center justify-center shrink-0">
-							<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-						</button>
-
-						<button title="Поиск" className="group w-7 h-7 flex items-center justify-center shrink-0">
-							<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-						</button>
-					</div>
+					<button 
+						onClick={() => appWindow.toggleMaximize()}
+						className="w-[46px] h-full flex items-center justify-center hover:bg-secondary-hover transition-colors"
+					>
+						<div className="w-2.5 h-2.5 border border-text-primary" />
+					</button>
+					<button 
+						onClick={() => appWindow.close()}
+						className="w-[46px] h-full flex items-center justify-center hover:bg-[#E81123] group transition-colors"
+					>
+						<div className="relative w-3 h-3 flex items-center justify-center">
+							<div className="absolute w-full h-[1px] bg-text-primary group-hover:bg-white rotate-45" />
+							<div className="absolute w-full h-[1px] bg-text-primary group-hover:bg-white -rotate-45" />
+						</div>
+					</button>
 				</div>
 			</div>
 
-      {/* ПАНЕЛЬ: PROJECT TREE PANEL */}
-			<div 
-				style={{ width: `${projectTreeWidth}px` }} 
-				className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
-			>
-				{/* 1) Заголовок с градиентом и заглушками 16x16 */}
-				<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
-					<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
-						VIMN_KALLY_20
-					</span>
-					
-					<div className="flex items-center gap-[12px] shrink-0">
-						{/* Заглушка: Новый файл (16x16) */}
-						<button title="New File" className="group w-4 h-4 flex items-center justify-center shrink-0">
-							<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+			{/* 2. MENU BAR (Пункты меню — теперь их 5) */}
+			<div className="h-[28px] flex items-center px-1 gap-0.5 bg-surface-bg border-b border-border-default shrink-0 relative z-[100]">
+				{menuItems.map((menu) => (
+					<div key={menu.label} className="relative">
+						<button 
+							onClick={(e) => {
+								e.stopPropagation(); // Чтобы не срабатывал клик по window
+								setActiveMenu(activeMenu === menu.label ? null : menu.label);
+							}}
+							className={`px-3 h-[22px] flex items-center text-[12px] font-inter rounded-sm transition-colors 
+								${activeMenu === menu.label 
+									? 'bg-primary-main text-white' 
+									: 'text-text-primary hover:bg-secondary-hover'}`}
+						>
+							{menu.label}
 						</button>
-						
-						{/* Заглушка: Новая папка (16x16) */}
-						<button title="New Folder" className="group w-4 h-4 flex items-center justify-center shrink-0">
-							<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-						</button>
-					</div>
-				</div>
 
-				{/* 2) Список файлов (Project Tree) */}
-				<div className="flex-1 overflow-y-auto p-3 bg-surface-bg">
-					<div className="flex flex-col gap-[8px]"> {/* Строгий вертикальный ритм 8px */}
-						
-						{/* Элемент: .config */}
-						<div className="flex items-center gap-[8px] cursor-pointer group h-4">
-							<ChevronRight size={12} className="text-text-primary/70 shrink-0" />
-							<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-								.config
-							</span>
-						</div>
-
-						{/* Элемент: video (Раскрытая папка) */}
-						<div className="flex flex-col gap-[8px]">
-							<div 
-								className="flex items-center gap-[8px] cursor-pointer h-4"
-								onClick={() => setIsVideoFolderOpen(!isVideoFolderOpen)}
-							>
-								{isVideoFolderOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
-								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-									video
-								</span>
+						{/* Выпадающий список */}
+						{activeMenu === menu.label && (
+							<div className="absolute left-0 top-[24px] min-w-[160px] bg-surface-secondary border border-border-default shadow-lg py-1 flex flex-col z-[110]">
+								{menu.items.map((subItem) => (
+									<button
+										key={subItem}
+										className="px-3 h-[28px] flex items-center text-[12px] font-inter text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors"
+										onClick={() => {
+											console.log(`Action: ${subItem}`);
+											setActiveMenu(null);
+										}}
+									>
+										{subItem}
+									</button>
+								))}
 							</div>
-
-							{/* Содержимое папки video */}
-							{isVideoFolderOpen && (
-								<div className="flex gap-[11px] ml-[5px]">
-									{/* Линия иерархии */}
-									<div className="w-[1px] bg-border-default shrink-0" />
-									
-									{/* Список файлов внутри: только gap-8, без padding у элементов */}
-									<div className="flex flex-col gap-[8px] flex-1">
-										{['S1E01.mp4', 'S1E02.mp4', 'S1E03.mp4', 'S1E04.mp4'].map((file) => (
-											<div key={file} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
-												<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-													{file}
-												</span>
-											</div>
-										))}
-									</div>
-								</div>
-							)}
-						</div>
-
-						{/* Элемент: subtitles */}
-						<div className="flex items-center gap-[8px] cursor-pointer group h-4">
-							<ChevronRight size={12} className="text-text-primary/70 shrink-0" />
-							<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-								subtitles
-							</span>
-						</div>
-
-						<div className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
-							<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-								vimn_license_idkidk.pdf
-							</span>
-						</div>
-
+						)}
 					</div>
-				</div>
-
-				{/* РЕСАЙЗЕР: Смещен на край для удобства захвата */}
-				<div 
-					onMouseDown={startResizing}
-					className={`absolute right-[-4px] top-0 w-[8px] h-full cursor-col-resize z-30 transition-colors ${
-						isResizing ? 'bg-primary-main/20' : 'hover:bg-primary-main/10'
-					}`}
-				/>
+				))}
 			</div>
 
-      {/* ПАНЕЛЬ (AI-AGENT) - Теперь ресайзится */}
-			<div 
-				// w-80 (320px) заменяем на динамическую ширину из стейта
-				style={{ width: `${aiAgentWidth || 320}px` }} 
-				className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
-			>
-				{/* 1) Заголовок (идентичен Project Tree) */}
-				<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
-					<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
-						AI-agent
-					</span>
-					
-					<div className="flex items-center gap-[12px] shrink-0">
-						{/* Заглушка: Плюс (16x16) */}
-						<button title="Add" className="group w-4 h-4 flex items-center justify-center shrink-0">
-							<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-						</button>
+			{/* ОСНОВНОЙ КОНТЕНТ (тот div, что был корнем раньше) */}
+			<div className="flex h-screen w-full bg-surface-bg text-text-primary overflow-hidden font-inter min-h-0 select-none">
+      
+				{/* ЛЕВАЯ ПАНЕЛЬ (SIDEBAR) */}
+				<div className="w-[60px] border-r border-border-default flex flex-col items-center py-6 bg-surface-panel shrink-0 h-full overflow-y-auto no-scrollbar">
+					{/* Контейнер без gap, чтобы управлять отступами мастера вручную */}
+					<div className="my-auto flex flex-col items-center">
 						
-						{/* Заглушка: Три точки (16x16) */}
-						<button title="Options" className="group w-4 h-4 flex items-center justify-center shrink-0">
-							<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-						</button>
-					</div>
-				</div>
-
-				{/* 2) Блок чата - Исправлена толщина обводки (убраны border-t/r/b) */}
-				<div className="flex-1 overflow-y-auto p-[12px] bg-surface-bg flex flex-col gap-4">
-					
-					{/* Сообщение пользователя (Справа) */}
-					<div className="self-end max-w-[90%] flex flex-col items-end">
-						<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
-							<p className="text-body-reg text-text-primary font-inter leading-tight">
-								Помоги понять контекст этой фразы: "She's really hitting her stride with this new project."
-							</p>
-						</div>
-					</div>
-
-					{/* Сообщение агента (Слева) */}
-					<div className="self-start max-w-[95%] flex flex-col items-start">
-						<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px] select-text">
-							<p className="text-body-reg text-text-primary font-inter leading-tight">
-								Конечно! Эта идиома означает, что человек вошел в ритм и начал работать эффективно. Вот варианты перевода:
-							</p>
-
-							{/* Встраиваемая реплика (Весь текст Caption) */}
-							<div className="mt-3 bg-[#E9ECF0] rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
-								{/* Верхняя строка: Стрелочка (16x16) и кнопки */}
-								<div className="flex items-center justify-between">
-									<div className="w-4 h-4 bg-text-primary/20 rounded-sm flex items-center justify-center cursor-pointer hover:bg-text-primary/30 transition-colors">
-										<div className="w-2 h-1 bg-text-primary/40 rounded-full" /> 
-									</div>
-									<div className="flex gap-[12px]">
-										<button className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors">Undo</button>
-										<button className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors">Keep</button>
-									</div>
-								</div>
-
-								{/* Метаданные: ID, Таймкод и Тонкая Линия 1px */}
-								<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
-									<span className="whitespace-nowrap">#152</span>
-									<span className="whitespace-nowrap">[ 00:01:03 ]</span>
-									<div className="flex-1 h-[1px] bg-border-default" /> {/* Тонкая линия как в Project Tree */}
-								</div>
-
-								{/* Полоски реплик (Высота 22px, padding 4px, corner 2px) */}
-								<div className="flex flex-col gap-[4px]">
-									<div className="h-[22px] bg-[#f8d7da] rounded-[2px] px-[4px] flex items-center">
-										<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магикс!</span>
-									</div>
-									<div className="h-[22px] bg-[#d4edda] rounded-[2px] px-[4px] flex items-center">
-										<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магиксию!</span>
-									</div>
-								</div>
-							</div>
-						</div>
-					</div>
-
-					{/* Еще одно сообщение пользователя */}
-					<div className="self-end max-w-[90%]">
-						<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
-							<p className="text-body-reg text-text-primary font-inter leading-tight">
-								Измени во всех репликах слово Магикс на Магиксия.
-							</p>
-						</div>
-					</div>
-				</div>
-
-				{/* Нижнее поле ввода (Chat Input) */}
-				<div className="p-3 bg-surface-bg shrink-0">
-					<div className="relative flex flex-col bg-surface-secondary border border-border-default rounded-[10px] group transition-all focus-within:border-primary-main/50 shadow-sm min-h-[96px]">
-						
-						{/* Textarea — добавлен pr-[56px], чтобы текст не затекал под кнопку */}
-						<textarea 
-							placeholder="Помоги, пожалуйста, перевести..."
-							className="w-full h-full p-3 pr-[56px] bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto no-scrollbar"
-							rows={3}
-						/>
-
-						{/* Кнопка отправки — теперь она никогда не перекроет текст */}
-						<div className="absolute right-3 bottom-3">
-							<button 
-								title="Send message" 
-								className="group w-[40px] h-[40px] flex items-center justify-center shrink-0"
-							>
-								<div className="w-[40px] h-[40px] bg-secondary-hover rounded-full group-hover:bg-primary-main transition-colors flex items-center justify-center">
-									<div className="w-4 h-4 bg-white/30 rounded-sm" />
-								</div>
+						{/* Верхняя группа кнопок */}
+						<div className="flex flex-col items-center gap-[30px]">
+							<button title="Создать новый проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							</button>
+							
+							<button title="Открыть проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							</button>
+							
+							<button title="Сохранить проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 						</div>
 
+						{/* Кнопка мастера с уменьшенным визуальным отступом (22px вместо 30px) */}
+						<button 
+							title="Пошаговый мастер" 
+							className="w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-all shrink-0 my-[28px]"
+						>
+							<div className="w-7 h-7 bg-white/20 rounded-sm" />
+						</button>
+
+						{/* Нижняя группа кнопок */}
+						<div className="flex flex-col items-center gap-[30px]">
+							<button title="Экспорт" className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							</button>
+							
+							<button title="Глоссарий" className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							</button>
+
+							<button title="Поиск" className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							</button>
+						</div>
 					</div>
 				</div>
 
-				{/* РЕСАЙЗЕР: Копия из Project Tree (Смещен на край) */}
+				{/* ПАНЕЛЬ: PROJECT TREE PANEL */}
 				<div 
-					onMouseDown={startAiAgentResizing} // Вам нужно добавить хэндлер в parent App
-					className={`absolute right-[-4px] top-0 w-[8px] h-full cursor-col-resize z-30 transition-colors ${
-						isAiAgentResizing ? 'bg-primary-main/20' : 'hover:bg-primary-main/10'
-					}`}
-				/>
-			</div>
-
-      {/* ПРАВАЯ ЧАСТЬ (РЕДАКТОР И ПЛЕЕР) */}
-      <div className="flex-1 flex flex-col min-w-0 bg-surface-bg">
-        
-        {/* Верх: Таблица и Видео */}
-        <div 
-          style={{ height: `${upperSectionHeight}px` }}
-          className="flex overflow-hidden border-b border-border-default min-h-0 shrink-0"
-        >
-          {/* ЛЕВАЯ КОЛОНКА: Таблица + Панель редактирования */}
-          <div 
-            style={{ width: `${tablePanelWidth}px` }}
-            className="flex flex-col bg-surface-secondary relative shrink-0 min-w-0 border-r border-border-default"
-          >
-            {/* 1. СЕКЦИЯ С ТАБЛИЦЕЙ */}
-            <div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
-              <div className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary">
-                <table className="w-full border-collapse table-fixed">
-                  <thead className="sticky top-0 bg-surface-secondary z-20">
-                    <tr className="h-[25px]">
-                      {['#', 'Start time', 'End time', 'Duration'].map((label, idx) => (
-                        <th 
-                          key={idx} 
-                          style={{ width: `${colWidths[idx]}px` }}
-                          className="relative h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] select-none min-w-0"
-                        >
-                          <div className="truncate w-full">{label}</div>
-                          <div 
-                            onMouseDown={(e) => startColResize(idx, e)}
-                            className="absolute right-0 top-0 w-1 h-full cursor-col-resize hover:bg-primary-main/30 z-10" 
-                          />
-                        </th>
-                      ))}
-                      <th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] min-w-0">
-                        <div className="truncate w-full">Translation</div>
-                      </th>
-                      <th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] min-w-0">
-                        <div className="truncate w-full">Original text</div>
-                      </th>
-                    </tr>
-                  </thead>
-                  
-                  <tbody>
-                    {Array.from({ length: 25 }).map((_, i) => (
-                      <tr key={i} className="h-[25px] hover:bg-black/5 transition-colors group text-table">
-                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-                          <div className="truncate">{i + 1}</div>
-                        </td>
-                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-                          <div className="truncate">00:01:03,174</div>
-                        </td>
-                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-                          <div className="truncate">00:01:03,174</div>
-                        </td>
-                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-                          <div className="truncate">1,244</div>
-                        </td>
-                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
-                          <div className="truncate">It's the biggest event of the year in Magix...</div>
-                        </td>
-                        <td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
-                          <div className="truncate">C'est le plus grand événement de l'année...</div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* 2. НОВАЯ ПАНЕЛЬ РЕДАКТИРОВАНИЯ (Subtitle Edit) */}
-            <div className="h-[180px] bg-surface-panel border-t border-border-default p-[12px] flex gap-1 shrink-0 min-w-0 overflow-hidden">
-              
-              {/* Колонна 1: Таймкоды и кнопки управления */}
-              <div className="w-fit flex flex-col shrink-0 min-w-0">
-                {/* Инпуты в один ряд */}
-                <div className="flex gap-[4px]">
-                  <div className="flex flex-col gap-[4px]">
-                    <label className="text-caption text-text-primary">Start time</label>
-                    <input 
-                      type="text" 
-                      defaultValue="00:01:03,174"
-                      className="w-[100px] h-[24px] bg-[#FDFDFD] border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
-                    />
-                  </div>
-                  <div className="flex flex-col gap-[4px]">
-                    <label className="text-caption text-text-primary">Duration</label>
-                    <input 
-                      type="text" 
-                      defaultValue="1,244"
-                      className="w-[76px] h-[24px] bg-[#FDFDFD] border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
-                    />
-                  </div>
-                </div>
-                
-                {/* Блок кнопок */}
-                <div className="mt-[16px] flex flex-col gap-[4px] w-[124px]">
-                  <div className="flex gap-[4px] w-full">
-										<button className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover  text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center">
-											&lt; Prev
-										</button>
-										<button className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center">
-											Next &gt;
-										</button>
-									</div>
-                  <button className="w-full h-[24px] py-[4px] bg-primary-main hover:bg-primary-hover text-white text-caption rounded-sm transition-colors">
-                    Ask agent
-                  </button>
-                </div>
-              </div>
-
-              {/* Колонна 2: Translation */}
-              <div className="flex-1 flex flex-col gap-[4px] min-w-0 ml-[12px]">
-                <label className="text-caption text-text-primary">Translation</label>
-                <div className="flex-1 min-h-0 relative">
-                  <textarea 
-                    className="text-h1-heading w-full h-full bg-[#FDFDFD] border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
-                    placeholder="Translation..."
-                    defaultValue="It's the biggest event of the year in Magix..."
-                  />
-                </div>
-                {/* Вертикальная статистика */}
-                <div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
-                  <span className="truncate">Total length: 42</span>
-                  <span className="truncate">Chars/sec: 12.4</span>
-                </div>
-              </div>
-
-              {/* Колонна 3: Original Text */}
-              <div className="flex-1 flex flex-col gap-[4px] min-w-0">
-                <label className="text-caption text-text-primary">Original text</label>
-                <div className="flex-1 min-h-0 relative">
-                  <textarea 
-                    className="text-h1-heading w-full h-full bg-[#FDFDFD] border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
-                    placeholder="Original text..."
-                    defaultValue="C'est le plus grand événement de l'année..."
-                  />
-                </div>
-                {/* Вертикальная статистика */}
-                <div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
-                  <span className="truncate">Total length: 38</span>
-                  <span className="truncate">Chars/sec: 11.2</span>
-                </div>
-              </div>
-            </div>
-
-            {/* РЕСАЙЗЕРЫ ПАНЕЛИ */}
-            <div 
-              onMouseDown={(e) => startTablePanelResizing('right', e)}
-              className="absolute right-0 top-0 w-1 h-full cursor-col-resize z-50 hover:bg-primary-main/20 transition-colors"
-            />
-            <div 
-              onMouseDown={(e) => startTablePanelResizing('bottom', e)}
-              className="absolute bottom-0 left-0 w-full h-1.5 cursor-row-resize z-50 bg-transparent"
-            />
-          </div>
-          
-          {/* Видеоплеер */}
-
-					<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[300px] overflow-hidden select-none">
-						{/* Область видео с субтитрами */}
-						<div className="flex-1 relative flex flex-col items-center justify-center group">
-							{/* Имитация видео-кадра */}
-							<div className="w-full h-full bg-[#000000] flex items-center justify-center">
-								{/* Заглушка изображения из макета (image_db0f7d) */}
-								<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
-									Video Preview
-								</div>
-							</div>
+					style={{ width: `${projectTreeWidth}px` }} 
+					className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
+				>
+					{/* 1) Заголовок с градиентом и заглушками 16x16 */}
+					<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
+						<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
+							VIMN_KALLY_20
+						</span>
+						
+						<div className="flex items-center gap-[12px] shrink-0">
+							{/* Заглушка: Новый файл (16x16) */}
+							<button title="New File" className="group w-4 h-4 flex items-center justify-center shrink-0">
+								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							</button>
 							
-							{/* Слой субтитров (как на image_db0f7d) */}
-							<div className="absolute bottom-12 w-full text-center px-10">
-								<span className="text-white text-[18px] font-medium drop-shadow-md leading-tight">
-									Kali, if you get an autograph, I'll...
+							{/* Заглушка: Новая папка (16x16) */}
+							<button title="New Folder" className="group w-4 h-4 flex items-center justify-center shrink-0">
+								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							</button>
+						</div>
+					</div>
+
+					{/* 2) Список файлов (Project Tree) */}
+					<div className="flex-1 overflow-y-auto p-3 bg-surface-bg">
+						<div className="flex flex-col gap-[8px]"> {/* Строгий вертикальный ритм 8px */}
+							
+							{/* Элемент: .config */}
+							<div className="flex items-center gap-[8px] cursor-pointer group h-4">
+								<ChevronRight size={12} className="text-text-primary/70 shrink-0" />
+								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+									.config
 								</span>
+							</div>
+
+							{/* Элемент: video (Раскрытая папка) */}
+							<div className="flex flex-col gap-[8px]">
+								<div 
+									className="flex items-center gap-[8px] cursor-pointer h-4"
+									onClick={() => setIsVideoFolderOpen(!isVideoFolderOpen)}
+								>
+									{isVideoFolderOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+									<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+										video
+									</span>
+								</div>
+
+								{/* Содержимое папки video */}
+								{isVideoFolderOpen && (
+									<div className="flex gap-[11px] ml-[5px]">
+										{/* Линия иерархии */}
+										<div className="w-[1px] bg-border-default shrink-0" />
+										
+										{/* Список файлов внутри: только gap-8, без padding у элементов */}
+										<div className="flex flex-col gap-[8px] flex-1">
+											{['S1E01.mp4', 'S1E02.mp4', 'S1E03.mp4', 'S1E04.mp4'].map((file) => (
+												<div key={file} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
+													<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+														{file}
+													</span>
+												</div>
+											))}
+										</div>
+									</div>
+								)}
+							</div>
+
+							{/* Элемент: subtitles */}
+							<div className="flex items-center gap-[8px] cursor-pointer group h-4">
+								<ChevronRight size={12} className="text-text-primary/70 shrink-0" />
+								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+									subtitles
+								</span>
+							</div>
+
+							<div className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
+								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+									vimn_license_idkidk.pdf
+								</span>
+							</div>
+
+						</div>
+					</div>
+
+					{/* РЕСАЙЗЕР: Смещен на край для удобства захвата */}
+					<div 
+						onMouseDown={startResizing}
+						className={`absolute right-[-4px] top-0 w-[8px] h-full cursor-col-resize z-30 transition-colors ${
+							isResizing ? 'bg-primary-main/20' : 'hover:bg-primary-main/10'
+						}`}
+					/>
+				</div>
+
+				{/* ПАНЕЛЬ (AI-AGENT) - Теперь ресайзится */}
+				<div 
+					// w-80 (320px) заменяем на динамическую ширину из стейта
+					style={{ width: `${aiAgentWidth || 320}px` }} 
+					className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
+				>
+					{/* 1) Заголовок (идентичен Project Tree) */}
+					<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
+						<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
+							AI-agent
+						</span>
+						
+						<div className="flex items-center gap-[12px] shrink-0">
+							{/* Заглушка: Плюс (16x16) */}
+							<button title="Add" className="group w-4 h-4 flex items-center justify-center shrink-0">
+								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							</button>
+							
+							{/* Заглушка: Три точки (16x16) */}
+							<button title="Options" className="group w-4 h-4 flex items-center justify-center shrink-0">
+								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							</button>
+						</div>
+					</div>
+
+					{/* 2) Блок чата - Исправлена толщина обводки (убраны border-t/r/b) */}
+					<div className="flex-1 overflow-y-auto p-[12px] bg-surface-bg flex flex-col gap-4">
+						
+						{/* Сообщение пользователя (Справа) */}
+						<div className="self-end max-w-[90%] flex flex-col items-end">
+							<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
+								<p className="text-body-reg text-text-primary font-inter leading-tight">
+									Помоги понять контекст этой фразы: "She's really hitting her stride with this new project."
+								</p>
 							</div>
 						</div>
 
-						{/* Панель управления (точь-в-точь как на image_db0f7d) */}
-						<div className="h-[68px] bg-white border-t border-border-default flex flex-col shrink-0">
-							
-							{/* 1. Линия прогресса (Seek Bar) */}
-							<div className="px-3 pt-2">
-								<div className="relative w-full h-[3px] bg-[#E5E7EB] rounded-full cursor-pointer group">
-									{/* Пройденный путь */}
-									<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] rounded-full w-[45%]" />
-									{/* Ползунок (Thumb) */}
-									<div className="absolute left-[45%] top-1/2 -translate-y-1/2 w-3 h-3 bg-white border border-border-default rounded-full shadow-sm opacity-0 group-hover:opacity-100 transition-opacity" />
-								</div>
-							</div>
+						{/* Сообщение агента (Слева) */}
+						<div className="self-start max-w-[95%] flex flex-col items-start">
+							<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px] select-text">
+								<p className="text-body-reg text-text-primary font-inter leading-tight">
+									Конечно! Эта идиома означает, что человек вошел в ритм и начал работать эффективно. Вот варианты перевода:
+								</p>
 
-							{/* 2. Кнопки и таймкоды */}
-							<div className="flex-1 flex items-center justify-between px-3">
-								{/* Левая группа: Play, Stop, Volume */}
-								<div className="flex items-center gap-[12px]">
-									{/* Play */}
-									<button className="w-6 h-6 flex items-center justify-center group">
-										<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-									</button>
-									{/* Stop */}
-									<button className="w-6 h-6 flex items-center justify-center group">
-										<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-									</button>
-									{/* Volume */}
-									<button className="w-6 h-6 flex items-center justify-center group">
-										<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-									</button>
-									{/* Slider Volume */}
-									<div className="w-16 h-[2px] bg-[#E5E7EB] rounded-full relative">
-										<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] w-1/2 rounded-full" />
+								{/* Встраиваемая реплика (Весь текст Caption) */}
+								<div className="mt-3 bg-[#E9ECF0] rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
+									{/* Верхняя строка: Стрелочка (16x16) и кнопки */}
+									<div className="flex items-center justify-between">
+										<div className="w-4 h-4 bg-text-primary/20 rounded-sm flex items-center justify-center cursor-pointer hover:bg-text-primary/30 transition-colors">
+											<div className="w-2 h-1 bg-text-primary/40 rounded-full" /> 
+										</div>
+										<div className="flex gap-[12px]">
+											<button className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors">Undo</button>
+											<button className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors">Keep</button>
+										</div>
+									</div>
+
+									{/* Метаданные: ID, Таймкод и Тонкая Линия 1px */}
+									<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+										<span className="whitespace-nowrap">#152</span>
+										<span className="whitespace-nowrap">[ 00:01:03 ]</span>
+										<div className="flex-1 h-[1px] bg-border-default" /> {/* Тонкая линия как в Project Tree */}
+									</div>
+
+									{/* Полоски реплик (Высота 22px, padding 4px, corner 2px) */}
+									<div className="flex flex-col gap-[4px]">
+										<div className="h-[22px] bg-[#f8d7da] rounded-[2px] px-[4px] flex items-center">
+											<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магикс!</span>
+										</div>
+										<div className="h-[22px] bg-[#d4edda] rounded-[2px] px-[4px] flex items-center">
+											<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магиксию!</span>
+										</div>
 									</div>
 								</div>
+							</div>
+						</div>
 
-								{/* Правая группа: Таймкоды */}
-								<div className="flex items-center gap-1 text-[12px] font-mono text-text-primary/80">
-									<span>00:01:22,165</span>
-									<span className="text-text-secondary/40">/</span>
-									<span className="text-text-secondary">00:23:03,306</span>
-								</div>
+						{/* Еще одно сообщение пользователя */}
+						<div className="self-end max-w-[90%]">
+							<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
+								<p className="text-body-reg text-text-primary font-inter leading-tight">
+									Измени во всех репликах слово Магикс на Магиксия.
+								</p>
 							</div>
 						</div>
 					</div>
 
-        </div>
+					{/* Нижнее поле ввода (Chat Input) */}
+					<div className="p-3 bg-surface-bg shrink-0">
+						<div className="relative flex flex-col bg-surface-secondary border border-border-default rounded-[10px] group transition-all focus-within:border-primary-main/50 shadow-sm min-h-[96px]">
+							
+							{/* Textarea — добавлен pr-[56px], чтобы текст не затекал под кнопку */}
+							<textarea 
+								placeholder="Помоги, пожалуйста, перевести..."
+								className="w-full h-full p-3 pr-[56px] bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto no-scrollbar"
+								rows={3}
+							/>
 
-        {/* Низ: Таймлайн (Audio Wave) */}
-        {/* Заменил h-60 на flex-1 с ограничением, чтобы окно могло уменьшаться */}
-        <div className="flex-1 min-h-[120px] max-h-60 bg-white p-4 shrink-0 border-t border-border-default">
-          <div className="w-full h-full bg-primary-surface/30 border border-border-default rounded flex items-center justify-center relative overflow-hidden group">
-             <div className="absolute inset-0 flex items-center justify-center opacity-10 group-hover:opacity-20 transition-opacity">
-                <div className="w-full h-8 bg-primary-main rounded-full blur-xl"></div>
-             </div>
-             <span className="text-primary-main font-semibold text-caption uppercase tracking-widest">Audio Timeline Zone</span>
-          </div>
-        </div>
+							{/* Кнопка отправки — теперь она никогда не перекроет текст */}
+							<div className="absolute right-3 bottom-3">
+								<button 
+									title="Send message" 
+									className="group w-[40px] h-[40px] flex items-center justify-center shrink-0"
+								>
+									<div className="w-[40px] h-[40px] bg-secondary-hover rounded-full group-hover:bg-primary-main transition-colors flex items-center justify-center">
+										<div className="w-4 h-4 bg-white/30 rounded-sm" />
+									</div>
+								</button>
+							</div>
 
-      </div>
-    </div>
+						</div>
+					</div>
+
+					{/* РЕСАЙЗЕР: Копия из Project Tree (Смещен на край) */}
+					<div 
+						onMouseDown={startAiAgentResizing} // Вам нужно добавить хэндлер в parent App
+						className={`absolute right-[-4px] top-0 w-[8px] h-full cursor-col-resize z-30 transition-colors ${
+							isAiAgentResizing ? 'bg-primary-main/20' : 'hover:bg-primary-main/10'
+						}`}
+					/>
+				</div>
+
+				{/* ПРАВАЯ ЧАСТЬ (РЕДАКТОР И ПЛЕЕР) */}
+				<div className="flex-1 flex flex-col min-w-0 bg-surface-bg">
+					
+					{/* Верх: Таблица и Видео */}
+					<div 
+						style={{ height: `${upperSectionHeight}px` }}
+						className="flex overflow-hidden border-b border-border-default min-h-0 shrink-0"
+					>
+						{/* ЛЕВАЯ КОЛОНКА: Таблица + Панель редактирования */}
+						<div 
+							style={{ width: `${tablePanelWidth}px` }}
+							className="flex flex-col bg-surface-secondary relative shrink-0 min-w-0 border-r border-border-default"
+						>
+							{/* 1. СЕКЦИЯ С ТАБЛИЦЕЙ */}
+							<div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
+								<div className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary">
+									<table className="w-full border-collapse table-fixed">
+										<thead className="sticky top-0 bg-surface-secondary z-20">
+											<tr className="h-[25px]">
+												{['#', 'Start time', 'End time', 'Duration'].map((label, idx) => (
+													<th 
+														key={idx} 
+														style={{ width: `${colWidths[idx]}px` }}
+														className="relative h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] select-none min-w-0"
+													>
+														<div className="truncate w-full">{label}</div>
+														<div 
+															onMouseDown={(e) => startColResize(idx, e)}
+															className="absolute right-0 top-0 w-1 h-full cursor-col-resize hover:bg-primary-main/30 z-10" 
+														/>
+													</th>
+												))}
+												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] min-w-0">
+													<div className="truncate w-full">Translation</div>
+												</th>
+												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] min-w-0">
+													<div className="truncate w-full">Original text</div>
+												</th>
+											</tr>
+										</thead>
+										
+										<tbody>
+											{Array.from({ length: 25 }).map((_, i) => (
+												<tr key={i} className="h-[25px] hover:bg-black/5 transition-colors group text-table">
+													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+														<div className="truncate">{i + 1}</div>
+													</td>
+													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+														<div className="truncate">00:01:03,174</div>
+													</td>
+													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+														<div className="truncate">00:01:03,174</div>
+													</td>
+													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+														<div className="truncate">1,244</div>
+													</td>
+													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+														<div className="truncate">It's the biggest event of the year in Magix...</div>
+													</td>
+													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+														<div className="truncate">C'est le plus grand événement de l'année...</div>
+													</td>
+												</tr>
+											))}
+										</tbody>
+									</table>
+								</div>
+							</div>
+
+							{/* 2. НОВАЯ ПАНЕЛЬ РЕДАКТИРОВАНИЯ (Subtitle Edit) */}
+							<div className="h-[180px] bg-surface-panel border-t border-border-default p-[12px] flex gap-1 shrink-0 min-w-0 overflow-hidden">
+								
+								{/* Колонна 1: Таймкоды и кнопки управления */}
+								<div className="w-fit flex flex-col shrink-0 min-w-0">
+									{/* Инпуты в один ряд */}
+									<div className="flex gap-[4px]">
+										<div className="flex flex-col gap-[4px]">
+											<label className="text-caption text-text-primary">Start time</label>
+											<input 
+												type="text" 
+												defaultValue="00:01:03,174"
+												className="w-[100px] h-[24px] bg-[#FDFDFD] border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
+											/>
+										</div>
+										<div className="flex flex-col gap-[4px]">
+											<label className="text-caption text-text-primary">Duration</label>
+											<input 
+												type="text" 
+												defaultValue="1,244"
+												className="w-[76px] h-[24px] bg-[#FDFDFD] border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
+											/>
+										</div>
+									</div>
+									
+									{/* Блок кнопок */}
+									<div className="mt-[16px] flex flex-col gap-[4px] w-[124px]">
+										<div className="flex gap-[4px] w-full">
+											<button className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover  text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center">
+												&lt; Prev
+											</button>
+											<button className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center">
+												Next &gt;
+											</button>
+										</div>
+										<button className="w-full h-[24px] py-[4px] bg-primary-main hover:bg-primary-hover text-white text-caption rounded-sm transition-colors">
+											Ask agent
+										</button>
+									</div>
+								</div>
+
+								{/* Колонна 2: Translation */}
+								<div className="flex-1 flex flex-col gap-[4px] min-w-0 ml-[12px]">
+									<label className="text-caption text-text-primary">Translation</label>
+									<div className="flex-1 min-h-0 relative">
+										<textarea 
+											className="text-h1-heading w-full h-full bg-[#FDFDFD] border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
+											placeholder="Translation..."
+											defaultValue="It's the biggest event of the year in Magix..."
+										/>
+									</div>
+									{/* Вертикальная статистика */}
+									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
+										<span className="truncate">Total length: 42</span>
+										<span className="truncate">Chars/sec: 12.4</span>
+									</div>
+								</div>
+
+								{/* Колонна 3: Original Text */}
+								<div className="flex-1 flex flex-col gap-[4px] min-w-0">
+									<label className="text-caption text-text-primary">Original text</label>
+									<div className="flex-1 min-h-0 relative">
+										<textarea 
+											className="text-h1-heading w-full h-full bg-[#FDFDFD] border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
+											placeholder="Original text..."
+											defaultValue="C'est le plus grand événement de l'année..."
+										/>
+									</div>
+									{/* Вертикальная статистика */}
+									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
+										<span className="truncate">Total length: 38</span>
+										<span className="truncate">Chars/sec: 11.2</span>
+									</div>
+								</div>
+							</div>
+
+							{/* РЕСАЙЗЕРЫ ПАНЕЛИ */}
+							<div 
+								onMouseDown={(e) => startTablePanelResizing('right', e)}
+								className="absolute right-0 top-0 w-1 h-full cursor-col-resize z-50 hover:bg-primary-main/20 transition-colors"
+							/>
+							<div 
+								onMouseDown={(e) => startTablePanelResizing('bottom', e)}
+								className="absolute bottom-0 left-0 w-full h-1.5 cursor-row-resize z-50 bg-transparent"
+							/>
+						</div>
+						
+						{/* Видеоплеер */}
+
+						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[300px] overflow-hidden select-none">
+							{/* Область видео с субтитрами */}
+							<div className="flex-1 relative flex flex-col items-center justify-center group">
+								{/* Имитация видео-кадра */}
+								<div className="w-full h-full bg-[#000000] flex items-center justify-center">
+									{/* Заглушка изображения из макета (image_db0f7d) */}
+									<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
+										Video Preview
+									</div>
+								</div>
+								
+								{/* Слой субтитров (как на image_db0f7d) */}
+								<div className="absolute bottom-12 w-full text-center px-10">
+									<span className="text-white text-[18px] font-medium drop-shadow-md leading-tight">
+										Kali, if you get an autograph, I'll...
+									</span>
+								</div>
+							</div>
+
+							{/* Панель управления (точь-в-точь как на image_db0f7d) */}
+							<div className="h-[68px] bg-white border-t border-border-default flex flex-col shrink-0">
+								
+								{/* 1. Линия прогресса (Seek Bar) */}
+								<div className="px-3 pt-2">
+									<div className="relative w-full h-[3px] bg-[#E5E7EB] rounded-full cursor-pointer group">
+										{/* Пройденный путь */}
+										<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] rounded-full w-[45%]" />
+										{/* Ползунок (Thumb) */}
+										<div className="absolute left-[45%] top-1/2 -translate-y-1/2 w-3 h-3 bg-white border border-border-default rounded-full shadow-sm opacity-0 group-hover:opacity-100 transition-opacity" />
+									</div>
+								</div>
+
+								{/* 2. Кнопки и таймкоды */}
+								<div className="flex-1 flex items-center justify-between px-3">
+									{/* Левая группа: Play, Stop, Volume */}
+									<div className="flex items-center gap-[12px]">
+										{/* Play */}
+										<button className="w-6 h-6 flex items-center justify-center group">
+											<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+										</button>
+										{/* Stop */}
+										<button className="w-6 h-6 flex items-center justify-center group">
+											<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+										</button>
+										{/* Volume */}
+										<button className="w-6 h-6 flex items-center justify-center group">
+											<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+										</button>
+										{/* Slider Volume */}
+										<div className="w-16 h-[2px] bg-[#E5E7EB] rounded-full relative">
+											<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] w-1/2 rounded-full" />
+										</div>
+									</div>
+
+									{/* Правая группа: Таймкоды */}
+									<div className="flex items-center gap-1 text-[12px] font-mono text-text-primary/80">
+										<span>00:01:22,165</span>
+										<span className="text-text-secondary/40">/</span>
+										<span className="text-text-secondary">00:23:03,306</span>
+									</div>
+								</div>
+							</div>
+						</div>
+
+					</div>
+
+					{/* Низ: Таймлайн (Audio Wave) */}
+					{/* Заменил h-60 на flex-1 с ограничением, чтобы окно могло уменьшаться */}
+					<div className="flex-1 min-h-[120px] max-h-60 bg-white p-4 shrink-0 border-t border-border-default">
+						<div className="w-full h-full bg-primary-surface/30 border border-border-default rounded flex items-center justify-center relative overflow-hidden group">
+							<div className="absolute inset-0 flex items-center justify-center opacity-10 group-hover:opacity-20 transition-opacity">
+									<div className="w-full h-8 bg-primary-main rounded-full blur-xl"></div>
+							</div>
+							<span className="text-primary-main font-semibold text-caption uppercase tracking-widest">Audio Timeline Zone</span>
+						</div>
+					</div>
+
+				</div>
+			</div>
+		</div>	
+    
   );
 }
