@@ -350,7 +350,6 @@ export default function App() {
 				</div>
 
 				{/* Нижнее поле ввода (Chat Input) */}
-				{/* Нижнее поле ввода (Chat Input) */}
 				<div className="p-3 bg-surface-bg shrink-0">
 					<div className="relative flex flex-col bg-surface-secondary border border-border-default rounded-[10px] group transition-all focus-within:border-primary-main/50 shadow-sm min-h-[96px]">
 						
@@ -389,15 +388,16 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0 bg-surface-bg">
         
         {/* Верх: Таблица и Видео */}
-        {/* Верх: Таблица и Видео */}
         <div 
           style={{ height: `${upperSectionHeight}px` }}
           className="flex overflow-hidden border-b border-border-default min-h-0 shrink-0"
         >
+          {/* ЛЕВАЯ КОЛОНКА: Таблица + Панель редактирования */}
           <div 
             style={{ width: `${tablePanelWidth}px` }}
-            className="flex flex-col bg-surface-secondary relative shrink-0 min-w-0"
+            className="flex flex-col bg-surface-secondary relative shrink-0 min-w-0 border-r border-border-default"
           >
+            {/* 1. СЕКЦИЯ С ТАБЛИЦЕЙ */}
             <div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
               <div className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary">
                 <table className="w-full border-collapse table-fixed">
@@ -453,13 +453,87 @@ export default function App() {
               </div>
             </div>
 
+            {/* 2. НОВАЯ ПАНЕЛЬ РЕДАКТИРОВАНИЯ (Subtitle Edit) */}
+            <div className="h-[180px] bg-surface-panel border-t border-border-default p-[12px] flex gap-1 shrink-0 min-w-0 overflow-hidden">
+              
+              {/* Колонна 1: Таймкоды и кнопки управления */}
+              <div className="w-fit flex flex-col shrink-0 min-w-0">
+                {/* Инпуты в один ряд */}
+                <div className="flex gap-[4px]">
+                  <div className="flex flex-col gap-[4px]">
+                    <label className="text-caption text-text-primary">Start time</label>
+                    <input 
+                      type="text" 
+                      defaultValue="00:01:03,174"
+                      className="w-[100px] h-[24px] bg-[#FDFDFD] border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-[4px]">
+                    <label className="text-caption text-text-primary">Duration</label>
+                    <input 
+                      type="text" 
+                      defaultValue="1,244"
+                      className="w-[76px] h-[24px] bg-[#FDFDFD] border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
+                    />
+                  </div>
+                </div>
+                
+                {/* Блок кнопок */}
+                <div className="mt-[16px] flex flex-col gap-[4px] w-[124px]">
+                  <div className="flex gap-[4px] w-full">
+										<button className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover  text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center">
+											&lt; Prev
+										</button>
+										<button className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center">
+											Next &gt;
+										</button>
+									</div>
+                  <button className="w-full h-[24px] py-[4px] bg-primary-main hover:bg-primary-hover text-white text-caption rounded-sm transition-colors">
+                    Ask agent
+                  </button>
+                </div>
+              </div>
+
+              {/* Колонна 2: Translation */}
+              <div className="flex-1 flex flex-col gap-[4px] min-w-0 ml-[12px]">
+                <label className="text-caption text-text-primary">Translation</label>
+                <div className="flex-1 min-h-0 relative">
+                  <textarea 
+                    className="text-h1-heading w-full h-full bg-[#FDFDFD] border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
+                    placeholder="Translation..."
+                    defaultValue="It's the biggest event of the year in Magix..."
+                  />
+                </div>
+                {/* Вертикальная статистика */}
+                <div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
+                  <span className="truncate">Total length: 42</span>
+                  <span className="truncate">Chars/sec: 12.4</span>
+                </div>
+              </div>
+
+              {/* Колонна 3: Original Text */}
+              <div className="flex-1 flex flex-col gap-[4px] min-w-0">
+                <label className="text-caption text-text-primary">Original text</label>
+                <div className="flex-1 min-h-0 relative">
+                  <textarea 
+                    className="text-h1-heading w-full h-full bg-[#FDFDFD] border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
+                    placeholder="Original text..."
+                    defaultValue="C'est le plus grand événement de l'année..."
+                  />
+                </div>
+                {/* Вертикальная статистика */}
+                <div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
+                  <span className="truncate">Total length: 38</span>
+                  <span className="truncate">Chars/sec: 11.2</span>
+                </div>
+              </div>
+            </div>
+
             {/* РЕСАЙЗЕРЫ ПАНЕЛИ */}
-            {/* Правый край — оставляем подсветку для удобства */}
             <div 
               onMouseDown={(e) => startTablePanelResizing('right', e)}
               className="absolute right-0 top-0 w-1 h-full cursor-col-resize z-50 hover:bg-primary-main/20 transition-colors"
             />
-            {/* Нижний край — УБРАНА подсветка hover, чтобы не было "полосы" */}
             <div 
               onMouseDown={(e) => startTablePanelResizing('bottom', e)}
               className="absolute bottom-0 left-0 w-full h-1.5 cursor-row-resize z-50 bg-transparent"
