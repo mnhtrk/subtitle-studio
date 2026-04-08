@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
+
 import { 
   FilePlus2, 
   FolderPlus, 
@@ -19,6 +20,7 @@ export default function App() {
 
 	// Стейт для ширин первых 4-х фиксированных колонок
   const [colWidths, setColWidths] = useState([50, 120, 120, 100]);
+	
 
 	const startResizing = useCallback(() => {
 		setIsResizing(true);
@@ -117,6 +119,8 @@ export default function App() {
     window.addEventListener('mousemove', doDrag);
     window.addEventListener('mouseup', stopDrag);
   }, [colWidths]);
+
+	
 
 
   return (
@@ -541,16 +545,71 @@ export default function App() {
           </div>
           
           {/* Видеоплеер */}
-          <div className="flex-1 bg-black flex flex-col shadow-inner min-w-[300px] overflow-hidden">
-            <div className="flex-1 flex items-center justify-center text-white/10 text-caption uppercase tracking-widest">
-              Video Preview
-            </div>
-            <div className="h-12 bg-white border-t border-border-default flex items-center px-4 gap-4 shrink-0">
-               <div className="w-6 h-6 bg-secondary-main rounded-full"></div>
-               <div className="flex-1 h-1 bg-secondary-disabled rounded"></div>
-               <span className="text-timecode font-mono text-primary-main">00:01:22</span>
-            </div>
-          </div>
+
+					<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[300px] overflow-hidden select-none">
+						{/* Область видео с субтитрами */}
+						<div className="flex-1 relative flex flex-col items-center justify-center group">
+							{/* Имитация видео-кадра */}
+							<div className="w-full h-full bg-[#000000] flex items-center justify-center">
+								{/* Заглушка изображения из макета (image_db0f7d) */}
+								<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
+									Video Preview
+								</div>
+							</div>
+							
+							{/* Слой субтитров (как на image_db0f7d) */}
+							<div className="absolute bottom-12 w-full text-center px-10">
+								<span className="text-white text-[18px] font-medium drop-shadow-md leading-tight">
+									Kali, if you get an autograph, I'll...
+								</span>
+							</div>
+						</div>
+
+						{/* Панель управления (точь-в-точь как на image_db0f7d) */}
+						<div className="h-[68px] bg-white border-t border-border-default flex flex-col shrink-0">
+							
+							{/* 1. Линия прогресса (Seek Bar) */}
+							<div className="px-3 pt-2">
+								<div className="relative w-full h-[3px] bg-[#E5E7EB] rounded-full cursor-pointer group">
+									{/* Пройденный путь */}
+									<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] rounded-full w-[45%]" />
+									{/* Ползунок (Thumb) */}
+									<div className="absolute left-[45%] top-1/2 -translate-y-1/2 w-3 h-3 bg-white border border-border-default rounded-full shadow-sm opacity-0 group-hover:opacity-100 transition-opacity" />
+								</div>
+							</div>
+
+							{/* 2. Кнопки и таймкоды */}
+							<div className="flex-1 flex items-center justify-between px-3">
+								{/* Левая группа: Play, Stop, Volume */}
+								<div className="flex items-center gap-[12px]">
+									{/* Play */}
+									<button className="w-6 h-6 flex items-center justify-center group">
+										<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+									</button>
+									{/* Stop */}
+									<button className="w-6 h-6 flex items-center justify-center group">
+										<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+									</button>
+									{/* Volume */}
+									<button className="w-6 h-6 flex items-center justify-center group">
+										<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+									</button>
+									{/* Slider Volume */}
+									<div className="w-16 h-[2px] bg-[#E5E7EB] rounded-full relative">
+										<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] w-1/2 rounded-full" />
+									</div>
+								</div>
+
+								{/* Правая группа: Таймкоды */}
+								<div className="flex items-center gap-1 text-[12px] font-mono text-text-primary/80">
+									<span>00:01:22,165</span>
+									<span className="text-text-secondary/40">/</span>
+									<span className="text-text-secondary">00:23:03,306</span>
+								</div>
+							</div>
+						</div>
+					</div>
+
         </div>
 
         {/* Низ: Таймлайн (Audio Wave) */}
