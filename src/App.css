@@ -81,7 +81,7 @@
 }
 
 .subtitle-table-scroll::-webkit-scrollbar-track {
-  background: transparent; /* Делаем дорожку прозрачной, чтобы она не сливалась с бордером */
+  background: transparent;
 }
 
 .subtitle-table-scroll::-webkit-scrollbar-thumb {

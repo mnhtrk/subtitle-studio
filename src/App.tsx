@@ -1,5 +1,4 @@
 import React, { useState, useCallback, useEffect } from 'react';
-
 import { getCurrentWindow } from '@tauri-apps/api/window';
 const appWindow = getCurrentWindow();
 
@@ -9,6 +8,14 @@ import {
   ChevronRight, 
   ChevronDown 
 } from 'lucide-react';
+
+const LIMITS = {
+  SIDEBAR: 60,
+  PROJECT_TREE: 150,
+  AI_AGENT: 200,
+  TABLE: 350,
+  VIDEO: 400,
+};
 
 export default function App() {
 
@@ -20,6 +27,8 @@ export default function App() {
 
 	const [tablePanelWidth, setTablePanelWidth] = useState(800);
   const [upperSectionHeight, setUpperSectionHeight] = useState(450);
+
+	
 
 	// Стейт для ширин первых 4-х фиксированных колонок
   const [colWidths, setColWidths] = useState([50, 120, 120, 100]);
@@ -117,14 +126,24 @@ export default function App() {
     const startY = mouseDownEvent.clientY;
 
     const doDrag = (e: MouseEvent) => {
-      if (direction === 'right') {
-        const newWidth = startWidth + (e.clientX - startX);
-        if (newWidth > 450 && newWidth < window.innerWidth - 400) setTablePanelWidth(newWidth);
-      } else {
-        const newHeight = startHeight + (e.clientY - startY);
-        if (newHeight > 200 && newHeight < window.innerHeight - 150) setUpperSectionHeight(newHeight);
-      }
-    };
+			if (direction === 'right') {
+				const newWidth = startWidth + (e.clientX - startX);
+				
+				// 1. Минимальная ширина самой таблицы (чтобы кнопки редактирования не сжимались в кашу)
+				const minTableWidth = 400; 
+
+				// 2. Максимальная ширина (чтобы не выдавить плеер, оставляем ему минимум 390px)
+				const maxAllowedWidth = window.innerWidth - (60 + projectTreeWidth + aiAgentWidth + 390);
+
+				// Применяем оба условия
+				if (newWidth >= minTableWidth && newWidth <= maxAllowedWidth) {
+					setTablePanelWidth(newWidth);
+				}
+			} else {
+				const newHeight = startHeight + (e.clientY - startY);
+				if (newHeight > 200 && newHeight < window.innerHeight - 150) setUpperSectionHeight(newHeight);
+			}
+		};
 
     const stopDrag = () => {
       window.removeEventListener('mousemove', doDrag);
@@ -156,21 +175,70 @@ export default function App() {
 
 	
 
+	
+
 
   return (
     <div className="flex flex-col h-screen w-full overflow-hidden bg-surface-bg select-none">
-			{/* 1. TITLE BAR (Системная строка с перетаскиванием) */}
+			{/* 1. COMBINED HEADER (Title Bar + Menu Bar) */}
 			<div 
-				className="h-[30px] flex items-center justify-between shrink-0"
-				style={{ ['WebkitAppRegion' as any]: 'drag' }}
+				className="h-[32px] flex items-center justify-between shrink-0 bg-surface-bg border-b border-border-default select-none relative z-[100]"
+				style={{ ['WebkitAppRegion' as any]: 'drag' }} // Вся строка по умолчанию тягабельная
 			>
-				<div className="flex items-center px-2 gap-2">
-					<div className="w-4 h-4 bg-[#C42B1C] rounded-sm flex items-center justify-center text-[10px] text-white font-bold">SE</div>
-					<span className="text-[12px] text-text-primary font-inter">
+				
+				{/* ЛЕВАЯ ЧАСТЬ: Лого и Меню */}
+				<div className="flex items-center px-2 gap-1" style={{ ['WebkitAppRegion' as any]: 'no-drag' }}>
+					{/* Логотип */}
+					<div className="w-4 h-4 bg-[#C42B1C] rounded-sm flex items-center justify-center text-[10px] text-white font-bold shrink-0 mr-1">
+						SE
+					</div>
+
+					{/* Пункты меню */}
+					<div className="flex items-center gap-0.5">
+						{menuItems.map((menu) => (
+							<div key={menu.label} className="relative">
+								<button 
+									onClick={(e) => {
+										e.stopPropagation();
+										setActiveMenu(activeMenu === menu.label ? null : menu.label);
+									}}
+									className={`px-2 h-[24px] flex items-center text-[12px] font-inter rounded-sm transition-colors 
+										${activeMenu === menu.label 
+											? 'bg-primary-main text-white' 
+											: 'text-text-primary hover:bg-secondary-hover'}`}
+								>
+									{menu.label}
+								</button>
+
+								{/* Выпадающий список */}
+								{activeMenu === menu.label && (
+									<div className="rounded-[8px] absolute left-0 top-[26px] min-w-[160px] bg-surface-secondary border border-border-default shadow-lg py-1 flex flex-col z-[110]">
+										{menu.items.map((subItem) => (
+											<button
+												key={subItem}
+												className="px-3 h-[28px] flex items-center text-[12px] font-inter text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors"
+												onClick={() => {
+													setActiveMenu(null);
+												}}
+											>
+												{subItem}
+											</button>
+										))}
+									</div>
+								)}
+							</div>
+						))}
+					</div>
+				</div>
+
+				{/* ЦЕНТРАЛЬНАЯ ЧАСТЬ: Название проекта (Drag-зона) */}
+				<div className="flex-1 flex justify-center items-center h-full overflow-hidden px-4">
+					<span className="text-[11px] text-text-primary font-inter truncate">
 						{isVideoFolderOpen ? 'S1E01.mp4' : 'Untitled'} - subtitlestudio
 					</span>
 				</div>
 
+				{/* ПРАВАЯ ЧАСТЬ: Системные кнопки */}
 				<div className="flex items-center h-full" style={{ ['WebkitAppRegion' as any]: 'no-drag' }}>
 					<button 
 						onClick={() => appWindow.minimize()}
@@ -194,44 +262,6 @@ export default function App() {
 						</div>
 					</button>
 				</div>
-			</div>
-
-			{/* 2. MENU BAR (Пункты меню — теперь их 5) */}
-			<div className="h-[28px] flex items-center px-1 gap-0.5 bg-surface-bg border-b border-border-default shrink-0 relative z-[100]">
-				{menuItems.map((menu) => (
-					<div key={menu.label} className="relative">
-						<button 
-							onClick={(e) => {
-								e.stopPropagation(); // Чтобы не срабатывал клик по window
-								setActiveMenu(activeMenu === menu.label ? null : menu.label);
-							}}
-							className={`px-3 h-[22px] flex items-center text-[12px] font-inter rounded-sm transition-colors 
-								${activeMenu === menu.label 
-									? 'bg-primary-main text-white' 
-									: 'text-text-primary hover:bg-secondary-hover'}`}
-						>
-							{menu.label}
-						</button>
-
-						{/* Выпадающий список */}
-						{activeMenu === menu.label && (
-							<div className="absolute left-0 top-[24px] min-w-[160px] bg-surface-secondary border border-border-default shadow-lg py-1 flex flex-col z-[110]">
-								{menu.items.map((subItem) => (
-									<button
-										key={subItem}
-										className="px-3 h-[28px] flex items-center text-[12px] font-inter text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors"
-										onClick={() => {
-											console.log(`Action: ${subItem}`);
-											setActiveMenu(null);
-										}}
-									>
-										{subItem}
-									</button>
-								))}
-							</div>
-						)}
-					</div>
-				))}
 			</div>
 
 			{/* ОСНОВНОЙ КОНТЕНТ (тот div, что был корнем раньше) */}
@@ -499,7 +529,7 @@ export default function App() {
 				</div>
 
 				{/* ПРАВАЯ ЧАСТЬ (РЕДАКТОР И ПЛЕЕР) */}
-				<div className="flex-1 flex flex-col min-w-0 bg-surface-bg">
+				<div className="flex-1 flex flex-col min-w-0 bg-surface-bg overflow-hidden">
 					
 					{/* Верх: Таблица и Видео */}
 					<div 
@@ -509,7 +539,7 @@ export default function App() {
 						{/* ЛЕВАЯ КОЛОНКА: Таблица + Панель редактирования */}
 						<div 
 							style={{ width: `${tablePanelWidth}px` }}
-							className="flex flex-col bg-surface-secondary relative shrink-0 min-w-0 border-r border-border-default"
+							className="flex flex-col bg-surface-secondary relative shrink-0 min-w-[300px] border-r border-border-default overflow-hidden"
 						>
 							{/* 1. СЕКЦИЯ С ТАБЛИЦЕЙ */}
 							<div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -566,6 +596,12 @@ export default function App() {
 									</table>
 								</div>
 							</div>
+
+							{/* РЕСАЙЗЕРЫ ПАНЕЛИ */}
+							<div 
+									onMouseDown={(e) => startTablePanelResizing('right', e)}
+									className="absolute right-[-2px] top-0 w-[5px] h-full cursor-col-resize z-50 hover:bg-primary-main/40 transition-colors"
+							/>
 
 							{/* 2. НОВАЯ ПАНЕЛЬ РЕДАКТИРОВАНИЯ (Subtitle Edit) */}
 							<div className="h-[180px] bg-surface-panel border-t border-border-default p-[12px] flex gap-1 shrink-0 min-w-0 overflow-hidden">
@@ -643,93 +679,190 @@ export default function App() {
 								</div>
 							</div>
 
-							{/* РЕСАЙЗЕРЫ ПАНЕЛИ */}
-							<div 
-								onMouseDown={(e) => startTablePanelResizing('right', e)}
-								className="absolute right-0 top-0 w-1 h-full cursor-col-resize z-50 hover:bg-primary-main/20 transition-colors"
-							/>
-							<div 
-								onMouseDown={(e) => startTablePanelResizing('bottom', e)}
-								className="absolute bottom-0 left-0 w-full h-1.5 cursor-row-resize z-50 bg-transparent"
-							/>
+							
 						</div>
 						
 						{/* Видеоплеер */}
 
-						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[300px] overflow-hidden select-none">
-							{/* Область видео с субтитрами */}
-							<div className="flex-1 relative flex flex-col items-center justify-center group">
-								{/* Имитация видео-кадра */}
-								<div className="w-full h-full bg-[#000000] flex items-center justify-center">
-									{/* Заглушка изображения из макета (image_db0f7d) */}
-									<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
-										Video Preview
-									</div>
-								</div>
+						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-0 overflow-hidden select-none">
 								
-								{/* Слой субтитров (как на image_db0f7d) */}
-								<div className="absolute bottom-12 w-full text-center px-10">
-									<span className="text-white text-[18px] font-medium drop-shadow-md leading-tight">
-										Kali, if you get an autograph, I'll...
-									</span>
-								</div>
-							</div>
-
-							{/* Панель управления (точь-в-точь как на image_db0f7d) */}
-							<div className="h-[68px] bg-white border-t border-border-default flex flex-col shrink-0">
-								
-								{/* 1. Линия прогресса (Seek Bar) */}
-								<div className="px-3 pt-2">
-									<div className="relative w-full h-[3px] bg-[#E5E7EB] rounded-full cursor-pointer group">
-										{/* Пройденный путь */}
-										<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] rounded-full w-[45%]" />
-										{/* Ползунок (Thumb) */}
-										<div className="absolute left-[45%] top-1/2 -translate-y-1/2 w-3 h-3 bg-white border border-border-default rounded-full shadow-sm opacity-0 group-hover:opacity-100 transition-opacity" />
-									</div>
-								</div>
-
-								{/* 2. Кнопки и таймкоды */}
-								<div className="flex-1 flex items-center justify-between px-3">
-									{/* Левая группа: Play, Stop, Volume */}
-									<div className="flex items-center gap-[12px]">
-										{/* Play */}
-										<button className="w-6 h-6 flex items-center justify-center group">
-											<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-										</button>
-										{/* Stop */}
-										<button className="w-6 h-6 flex items-center justify-center group">
-											<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-										</button>
-										{/* Volume */}
-										<button className="w-6 h-6 flex items-center justify-center group">
-											<div className="w-6 h-6 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
-										</button>
-										{/* Slider Volume */}
-										<div className="w-16 h-[2px] bg-[#E5E7EB] rounded-full relative">
-											<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] w-1/2 rounded-full" />
+								{/* Область видео */}
+								<div className="flex-1 relative flex flex-col items-center justify-center group bg-[#000000]">
+										<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
+												Video Preview
 										</div>
-									</div>
-
-									{/* Правая группа: Таймкоды */}
-									<div className="flex items-center gap-1 text-[12px] font-mono text-text-primary/80">
-										<span>00:01:22,165</span>
-										<span className="text-text-secondary/40">/</span>
-										<span className="text-text-secondary">00:23:03,306</span>
-									</div>
+										<div className="absolute bottom-12 w-full text-center px-10">
+												<span className="text-white text-[20px] font-bold drop-shadow-md leading-[20px] tracking-[-0.01em] font-inter">
+														Kali, if you get an autograph, I'll...
+												</span>
+										</div>
 								</div>
-							</div>
+
+								{/* Панель управления */}
+								<div className="bg-surface-panel border-t border-border-default flex flex-col shrink-0 p-3 m-0 gap-[24px]">
+										{/* Seek Bar */}
+										<div className="w-full">
+												<div className="relative w-full h-[4px] bg-border-default cursor-pointer group">
+														<div className="absolute left-0 top-0 h-full bg-[#9FA3B0] w-[45%]" />
+														<div className="absolute left-[45%] top-1/2 -translate-y-1/2 w-3 h-4 bg-white border border-border-default rounded-full shadow-sm opacity-0 group-hover:opacity-100 transition-opacity z-10" />
+												</div>
+										</div>
+
+										{/* Контролы — теперь они защищены от выталкивания за экран */}
+										<div className="flex items-center justify-between w-full flex-nowrap">
+												<div className="flex items-center gap-[12px] shrink-0">
+														<button className="w-6 h-6 bg-secondary-hover rounded-md shrink-0" />
+														<button className="w-6 h-6 bg-secondary-hover rounded-md shrink-0" />
+														<button className="w-6 h-6 bg-secondary-hover rounded-sm shrink-0" />
+														
+														{/* Слайдер громкости */}
+														<div className="w-16 h-[2px] bg-[#E5E7EB] relative shrink-0">
+																<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] w-1/2" />
+														</div>
+												</div>
+
+												{/* Таймкоды */}
+												<div className="flex items-center gap-1 text-[12px] text-body-med text-text-primary shrink-0 ml-4">
+														<span>00:01:22,165</span>
+														<span className="text-text-secondary/40">/</span>
+														<span className="text-text-secondary">00:23:03,306</span>
+												</div>
+										</div>
+								</div>
+								
 						</div>
 
 					</div>
+					
 
 					{/* Низ: Таймлайн (Audio Wave) */}
-					{/* Заменил h-60 на flex-1 с ограничением, чтобы окно могло уменьшаться */}
-					<div className="flex-1 min-h-[120px] max-h-60 bg-white p-4 shrink-0 border-t border-border-default">
-						<div className="w-full h-full bg-primary-surface/30 border border-border-default rounded flex items-center justify-center relative overflow-hidden group">
-							<div className="absolute inset-0 flex items-center justify-center opacity-10 group-hover:opacity-20 transition-opacity">
-									<div className="w-full h-8 bg-primary-main rounded-full blur-xl"></div>
+					<div 
+						className="flex-1 min-h-0 bg-surface-bg flex flex-col relative"
+						style={{ height: `calc(100vh - ${upperSectionHeight}px - 32px)` }} // Оставшееся место после хедера и верхней части
+					>
+						{/* РЕСАЙЗЕР: Сверху панели таймлайна */}
+						<div 
+							onMouseDown={(e) => startTablePanelResizing('bottom', e)}
+							className="absolute top-[-2px] left-0 w-full h-[4px] cursor-row-resize z-50 hover:bg-primary-main/40 transition-colors"
+						/>
+
+						<div className="flex flex-1 min-h-0">
+							{/* ЛЕВАЯ ПАНЕЛЬ С КНОПКАМИ */}
+							<div className="w-[100px] border-r border-border-default flex flex-col gap-[4px] p-2 bg-surface-panel shrink-0">
+								{['Insert', 'Set start', 'Set end'].map((label) => (
+									<button 
+										key={label}
+										className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+									>
+										{label}
+									</button>
+								))}
 							</div>
-							<span className="text-primary-main font-semibold text-caption uppercase tracking-widest">Audio Timeline Zone</span>
+
+							{/* ОСНОВНАЯ ЗОНА ТАЙМЛАЙНА */}
+							<div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+								
+								{/* Контейнер с волной и субтитрами */}
+								<div className="flex-1 relative bg-[#121212] m-3 rounded-md border border-black overflow-hidden shadow-inner group">
+									
+									{/* Сетка (Grid) */}
+									<div className="absolute inset-0 opacity-10" 
+										style={{ 
+											backgroundImage: `linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)`,
+											backgroundSize: '20px 20px'
+										}} 
+									/>
+
+									{/* Псевдо-вейвформа (имитация через CSS-mask или фон) */}
+									<div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-32 opacity-80"
+										style={{
+											backgroundColor: '#A3E635',
+											maskImage: 'url("data:image/svg+xml,%3Csvg width=\'100%27 height=\'100%25%27 viewBox=\'0 0 1000 100\' preserveAspectRatio=\'none\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cpath d=\'M0 50 L10 20 L20 80 L30 40 L40 60 L50 10 L60 90 L70 30 L80 70 L90 20 L100 50 L110 10 L120 90 L130 30 L140 80 L150 40 L160 60 L170 10 L180 90 L190 30 L200 50 L210 10 L220 90 L230 30 L240 80 L250 40 L260 60 L270 10 L280 90 L290 30 L300 50 L310 10 L320 90 L330 30 L340 80 L350 40 L360 60 L370 10 L380 90 L390 30 L400 50 L410 10 L420 90 L430 30 L440 80 L450 40 L460 60 L470 10 L480 90 L490 30 L500 50 L510 10 L520 90 L530 30 L540 80 L550 40 L560 60 L570 10 L580 90 L590 30 L600 50 L610 10 L620 90 L630 30 L640 80 L650 40 L660 60 L670 10 L680 90 L690 30 L700 50 L710 10 L720 90 L730 30 L740 80 L750 40 L760 60 L770 10 L780 90 L790 30 L800 50 L810 10 L820 90 L830 30 L840 80 L850 40 L860 60 L870 10 L880 90 L890 30 L900 50 L910 10 L920 90 L930 30 L940 80 L950 40 L960 60 L970 10 L980 90 L990 30 L1000 50\' stroke=\'black\' fill=\'none\'/%3E%3C/svg%3E")',
+											WebkitMaskImage: 'url("data:image/svg+xml,%3Csvg width=\'1000\' height=\'100\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Crect width=\'100%25\' height=\'100%25\' fill=\'white\'/%3E%3C/svg%3E")', // Здесь можно подставить реальный SVG вейвформы
+										}}
+									>
+										{/* Упрощенная визуализация волны полосками */}
+										<div className="flex items-center gap-[1px] h-full px-2">
+											{Array.from({ length: 120 }).map((_, i) => (
+												<div 
+													key={i} 
+													className="bg-[#A3E635] w-[3px] rounded-full" 
+													style={{ height: `${Math.random() * 60 + 20}%` }}
+												/>
+											))}
+										</div>
+									</div>
+
+									{/* СУБТИТРЫ НА ТАЙМЛАЙНЕ */}
+									<div className="absolute inset-0 flex items-stretch">
+										{/* Субтитр 1 */}
+										<div className="absolute left-[2%] w-[25%] h-full border-x border-[#A3E635] bg-white/5 backdrop-blur-[1px] p-2 flex flex-col justify-between">
+											<span className="text-[11px] text-white font-medium truncate">That's our new home!</span>
+											<div className="flex gap-2 text-[10px] text-white/50 font-mono">
+												<span>#232</span>
+												<span>1,738</span>
+											</div>
+										</div>
+
+										{/* Субтитр 2 */}
+										<div className="absolute left-[35%] w-[35%] h-full border-x border-[#A3E635] bg-white/10 backdrop-blur-[1px] p-2 flex flex-col justify-between">
+											<span className="text-[11px] text-white font-medium truncate">Kali, if you get an autograph, I'll...</span>
+											<div className="flex gap-2 text-[10px] text-white/50 font-mono">
+												<span>#232</span>
+												<span>1,520</span>
+											</div>
+										</div>
+
+										{/* Субтитр 3 */}
+										<div className="absolute left-[75%] w-[23%] h-full border-x border-[#A3E635] bg-white/5 backdrop-blur-[1px] p-2 flex flex-col justify-between">
+											<span className="text-[11px] text-white font-medium truncate">That's our new home!</span>
+											<div className="flex gap-2 text-[10px] text-white/50 font-mono">
+												<span>#232</span>
+												<span>1,738</span>
+											</div>
+										</div>
+									</div>
+								</div>
+
+								{/* НИЖНЯЯ ПАНЕЛЬ: ZOOM И СКРОЛЛ */}
+								<div className="h-[32px] p-3 flex items-center gap-6 bg-surface-panel border-t border-border-default">
+									
+									{/* Zoom Controls */}
+									{/* Zoom Controls */}
+									<div className="flex items-center gap-2">
+										{/* Zoom Out Button */}
+										<button className="group w-[22px] h-[22px] flex items-center justify-center shrink-0">
+											<div className="w-[22px] h-[22px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+										</button>
+
+										{/* Custom Zoom Select */}
+										<div className="relative flex items-center h-[22px]">
+											<select className="appearance-none h-full bg-surface-bg border border-border-default rounded-[4px] pl-2 pr-7 text-[12px] leading-none text-text-primary font-medium outline-none cursor-pointer hover:border-primary-main transition-colors m-0">
+												<option>90%</option>
+												<option>100%</option>
+												<option>120%</option>
+											</select>
+											{/* Кастомная стрелочка */}
+											<div className="absolute right-2 pointer-events-none flex items-center">
+												<svg width="8" height="5" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
+													<path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+												</svg>
+											</div>
+										</div>
+
+										{/* Zoom In Button */}
+										<button className="group w-[22px] h-[22px] flex items-center justify-center shrink-0">
+											<div className="w-[22px] h-[22px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+										</button>
+									</div>
+
+									{/* Полоса прокрутки (имитация) */}
+									<div className="flex-1 h-[4px] bg-border-default rounded-full relative overflow-hidden">
+										<div className="absolute left-0 top-0 h-full w-[40%] bg-[#9FA3B0] rounded-full" />
+									</div>
+								</div>
+
+							</div>
 						</div>
 					</div>
 
