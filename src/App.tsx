@@ -19,20 +19,20 @@ const LIMITS = {
 
 export default function App() {
 
-	const [projectTreeWidth, setProjectTreeWidth] = useState(240); // Начальная ширина 240px (w-60)
-	const [isResizing, setIsResizing] = useState(false);
-	const [isVideoFolderOpen, setIsVideoFolderOpen] = useState(true);
-	const [aiAgentWidth, setAiAgentWidth] = useState(320); // Начальная ширина
-	const [isAiAgentResizing, setIsAiAgentResizing] = useState(false);
+	// начальные размеры и статусы
+	const [projectTreeWidth, setProjectTreeWidth] = useState(240); // начальная ширина иерархия файлов
+	const [isResizing, setIsResizing] = useState(false); //проверка тянушки
+	const [isVideoFolderOpen, setIsVideoFolderOpen] = useState(true); //проверка открытой папки
+	const [aiAgentWidth, setAiAgentWidth] = useState(320); // Начальная ширина панели с агентом
+	const [isAiAgentResizing, setIsAiAgentResizing] = useState(false); //проверка тянушки агента
 
-	const [tablePanelWidth, setTablePanelWidth] = useState(800);
-  const [upperSectionHeight, setUpperSectionHeight] = useState(450);
-
-	
+	const [tablePanelWidth, setTablePanelWidth] = useState(800); //размер таблицы
+  const [upperSectionHeight, setUpperSectionHeight] = useState(450); //высота панели таблицы и плеера
 
 	// Стейт для ширин первых 4-х фиксированных колонок
   const [colWidths, setColWidths] = useState([50, 120, 120, 100]);
 
+	// системные функции для управления окном через таури
 	const handleMinimize = async () => {
 		await appWindow.minimize();
 	};
@@ -45,8 +45,10 @@ export default function App() {
 		await appWindow.close();
 	};
 
+	// состояние для выпадающих списков верхнего меню
 	const [activeMenu, setActiveMenu] = useState<string | null>(null);
-	// 2. Добавь эффект для закрытия меню при клике вне его
+
+	// Добавить эффект для закрытия меню при клике вне его
 	useEffect(() => {
 		const handleClickOutside = () => setActiveMenu(null);
 		if (activeMenu) {
@@ -55,7 +57,7 @@ export default function App() {
 		return () => window.removeEventListener('click', handleClickOutside);
 	}, [activeMenu]);
 
-	// Список пунктов меню для рендера
+	// Список пунктов меню наверху
 	const menuItems = [
 		{ label: 'File', items: ['New', 'Open', 'Save', 'Exit'] },
 		{ label: 'Edit', items: ['Undo', 'Redo', 'Find'] },
@@ -65,6 +67,7 @@ export default function App() {
 	];
 	
 
+	// режим изменения размера
 	const startResizing = useCallback(() => {
 		setIsResizing(true);
 	}, []);
@@ -73,9 +76,9 @@ export default function App() {
 		setIsResizing(false);
 	}, []);
 
+	// высчитываем ширину дерева проекта при движении мышки с учетом бокового меню
 	const resize = useCallback((mouseMoveEvent: MouseEvent) => {
 		if (isResizing) {
-			// Вычитаем ширину сайдбара (60px), чтобы расчет был точнее
 			const newWidth = mouseMoveEvent.clientX - 60;
 			if (newWidth > 150 && newWidth < 450) {
 				setProjectTreeWidth(newWidth);
@@ -83,6 +86,7 @@ export default function App() {
 		}
 	}, [isResizing]);
 
+	// вешаем глобальные слушатели на мышку для работы ресайза
 	useEffect(() => {
 		window.addEventListener("mousemove", resize);
 		window.addEventListener("mouseup", stopResizing);
@@ -92,33 +96,35 @@ export default function App() {
 		};
 	}, [resize, stopResizing]);
 
+	// логика изменения ширины панели аи агента через прямое управление событиями
 	const startAiAgentResizing = useCallback((mouseDownEvent: React.MouseEvent) => {
-  setIsAiAgentResizing(true);
+		setIsAiAgentResizing(true);
 
-  const startWidth = aiAgentWidth;
-  const startX = mouseDownEvent.clientX;
+		const startWidth = aiAgentWidth;
+		const startX = mouseDownEvent.clientX;
+		
 
-  const doDrag = (mouseMoveEvent: MouseEvent) => {
-    // Вычисляем новую ширину: начальная + разница координат
-    const newWidth = startWidth + (mouseMoveEvent.clientX - startX);
-    
-    // Ограничиваем минимальную и максимальную ширину
-    if (newWidth > 200 && newWidth < 600) {
-      setAiAgentWidth(newWidth);
-    }
-  };
+		const doDrag = (mouseMoveEvent: MouseEvent) => {
+			// Вычисляем новую ширину: начальная + разница координат
+			const newWidth = startWidth + (mouseMoveEvent.clientX - startX);
+			
+			// Ограничиваем минимальную и максимальную ширину
+			if (newWidth > 200 && newWidth < 600) {
+				setAiAgentWidth(newWidth);
+			}
+		};
 
-  const stopDrag = () => {
-    setIsAiAgentResizing(false);
-    window.removeEventListener('mousemove', doDrag);
-    window.removeEventListener('mouseup', stopDrag);
-  };
+		const stopDrag = () => {
+			setIsAiAgentResizing(false);
+			window.removeEventListener('mousemove', doDrag);
+			window.removeEventListener('mouseup', stopDrag);
+		};
 
-  window.addEventListener('mousemove', doDrag);
-  window.addEventListener('mouseup', stopDrag);
-}, [aiAgentWidth]);
+		window.addEventListener('mousemove', doDrag);
+		window.addEventListener('mouseup', stopDrag);
+	}, [aiAgentWidth]);
 
-	// Ресайз всей панели (Края: право и низ)
+	// Ресайз всей панели
   const startTablePanelResizing = useCallback((direction: 'right' | 'bottom', mouseDownEvent: React.MouseEvent) => {
     const startWidth = tablePanelWidth;
     const startHeight = upperSectionHeight;
@@ -129,13 +135,10 @@ export default function App() {
 			if (direction === 'right') {
 				const newWidth = startWidth + (e.clientX - startX);
 				
-				// 1. Минимальная ширина самой таблицы (чтобы кнопки редактирования не сжимались в кашу)
 				const minTableWidth = 400; 
 
-				// 2. Максимальная ширина (чтобы не выдавить плеер, оставляем ему минимум 390px)
 				const maxAllowedWidth = window.innerWidth - (60 + projectTreeWidth + aiAgentWidth + 390);
 
-				// Применяем оба условия
 				if (newWidth >= minTableWidth && newWidth <= maxAllowedWidth) {
 					setTablePanelWidth(newWidth);
 				}
@@ -173,20 +176,16 @@ export default function App() {
     window.addEventListener('mouseup', stopDrag);
   }, [colWidths]);
 
-	
-
-	
-
 
   return (
     <div className="flex flex-col h-screen w-full overflow-hidden bg-surface-bg select-none">
-			{/* 1. COMBINED HEADER (Title Bar + Menu Bar) */}
+			{/* Верхнее меню, название проекта, 3 кнопки */}
 			<div 
 				className="h-[32px] flex items-center justify-between shrink-0 bg-surface-bg border-b border-border-default select-none relative z-[100]"
 				style={{ ['WebkitAppRegion' as any]: 'drag' }} // Вся строка по умолчанию тягабельная
 			>
 				
-				{/* ЛЕВАЯ ЧАСТЬ: Лого и Меню */}
+				{/* ЛЕВАЯ ЧАСТЬ Лого и Меню */}
 				<div className="flex items-center px-2 gap-1" style={{ ['WebkitAppRegion' as any]: 'no-drag' }}>
 					{/* Логотип */}
 					<div className="w-4 h-4 bg-[#C42B1C] rounded-sm flex items-center justify-center text-[10px] text-white font-bold shrink-0 mr-1">
@@ -231,14 +230,14 @@ export default function App() {
 					</div>
 				</div>
 
-				{/* ЦЕНТРАЛЬНАЯ ЧАСТЬ: Название проекта (Drag-зона) */}
+				{/* ЦЕНТРАЛЬНАЯ ЧАСТЬ Название проекта */}
 				<div className="flex-1 flex justify-center items-center h-full overflow-hidden px-4">
 					<span className="text-[11px] text-text-primary font-inter truncate">
 						{isVideoFolderOpen ? 'S1E01.mp4' : 'Untitled'} - subtitlestudio
 					</span>
 				</div>
 
-				{/* ПРАВАЯ ЧАСТЬ: Системные кнопки */}
+				{/* ПРАВАЯ ЧАСТЬ Системные кнопки */}
 				<div className="flex items-center h-full" style={{ ['WebkitAppRegion' as any]: 'no-drag' }}>
 					<button 
 						onClick={() => appWindow.minimize()}
@@ -264,12 +263,11 @@ export default function App() {
 				</div>
 			</div>
 
-			{/* ОСНОВНОЙ КОНТЕНТ (тот div, что был корнем раньше) */}
+			{/* ОСНОВНОЙ КОНТЕНТ */}
 			<div className="flex h-screen w-full bg-surface-bg text-text-primary overflow-hidden font-inter min-h-0 select-none">
       
-				{/* ЛЕВАЯ ПАНЕЛЬ (SIDEBAR) */}
+				{/* ЛЕВАЯ ПАНЕЛЬ (САЙДБАР) */}
 				<div className="w-[60px] border-r border-border-default flex flex-col items-center py-6 bg-surface-panel shrink-0 h-full overflow-y-auto no-scrollbar">
-					{/* Контейнер без gap, чтобы управлять отступами мастера вручную */}
 					<div className="my-auto flex flex-col items-center">
 						
 						{/* Верхняя группа кнопок */}
@@ -287,7 +285,7 @@ export default function App() {
 							</button>
 						</div>
 
-						{/* Кнопка мастера с уменьшенным визуальным отступом (22px вместо 30px) */}
+						{/* Кнопка мастера в круге */}
 						<button 
 							title="Пошаговый мастер" 
 							className="w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-all shrink-0 my-[28px]"
@@ -312,35 +310,33 @@ export default function App() {
 					</div>
 				</div>
 
-				{/* ПАНЕЛЬ: PROJECT TREE PANEL */}
+				{/* ПАНЕЛЬ ИЕРАРХИЯ ПРОЕКТА */}
 				<div 
 					style={{ width: `${projectTreeWidth}px` }} 
 					className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
 				>
-					{/* 1) Заголовок с градиентом и заглушками 16x16 */}
+					{/* Заголовок */}
 					<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
 						<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
 							VIMN_KALLY_20
 						</span>
 						
 						<div className="flex items-center gap-[12px] shrink-0">
-							{/* Заглушка: Новый файл (16x16) */}
+
 							<button title="New File" className="group w-4 h-4 flex items-center justify-center shrink-0">
 								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 							
-							{/* Заглушка: Новая папка (16x16) */}
 							<button title="New Folder" className="group w-4 h-4 flex items-center justify-center shrink-0">
 								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 						</div>
 					</div>
 
-					{/* 2) Список файлов (Project Tree) */}
+					{/* Список файлов */}
 					<div className="flex-1 overflow-y-auto p-3 bg-surface-bg">
 						<div className="flex flex-col gap-[8px]"> {/* Строгий вертикальный ритм 8px */}
-							
-							{/* Элемент: .config */}
+						
 							<div className="flex items-center gap-[8px] cursor-pointer group h-4">
 								<ChevronRight size={12} className="text-text-primary/70 shrink-0" />
 								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
@@ -348,7 +344,6 @@ export default function App() {
 								</span>
 							</div>
 
-							{/* Элемент: video (Раскрытая папка) */}
 							<div className="flex flex-col gap-[8px]">
 								<div 
 									className="flex items-center gap-[8px] cursor-pointer h-4"
@@ -360,13 +355,10 @@ export default function App() {
 									</span>
 								</div>
 
-								{/* Содержимое папки video */}
 								{isVideoFolderOpen && (
 									<div className="flex gap-[11px] ml-[5px]">
-										{/* Линия иерархии */}
 										<div className="w-[1px] bg-border-default shrink-0" />
 										
-										{/* Список файлов внутри: только gap-8, без padding у элементов */}
 										<div className="flex flex-col gap-[8px] flex-1">
 											{['S1E01.mp4', 'S1E02.mp4', 'S1E03.mp4', 'S1E04.mp4'].map((file) => (
 												<div key={file} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
@@ -380,7 +372,6 @@ export default function App() {
 								)}
 							</div>
 
-							{/* Элемент: subtitles */}
 							<div className="flex items-center gap-[8px] cursor-pointer group h-4">
 								<ChevronRight size={12} className="text-text-primary/70 shrink-0" />
 								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
@@ -397,7 +388,7 @@ export default function App() {
 						</div>
 					</div>
 
-					{/* РЕСАЙЗЕР: Смещен на край для удобства захвата */}
+					{/* РЕСАЙЗЕР */}
 					<div 
 						onMouseDown={startResizing}
 						className={`absolute right-[-4px] top-0 w-[8px] h-full cursor-col-resize z-30 transition-colors ${
@@ -406,35 +397,32 @@ export default function App() {
 					/>
 				</div>
 
-				{/* ПАНЕЛЬ (AI-AGENT) - Теперь ресайзится */}
+				{/* ПАНЕЛЬ ИИ-АГЕНТА */}
 				<div 
-					// w-80 (320px) заменяем на динамическую ширину из стейта
 					style={{ width: `${aiAgentWidth || 320}px` }} 
 					className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
 				>
-					{/* 1) Заголовок (идентичен Project Tree) */}
+					{/* Заголовок */}
 					<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
 						<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
 							AI-agent
 						</span>
 						
 						<div className="flex items-center gap-[12px] shrink-0">
-							{/* Заглушка: Плюс (16x16) */}
 							<button title="Add" className="group w-4 h-4 flex items-center justify-center shrink-0">
 								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 							
-							{/* Заглушка: Три точки (16x16) */}
 							<button title="Options" className="group w-4 h-4 flex items-center justify-center shrink-0">
 								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 						</div>
 					</div>
 
-					{/* 2) Блок чата - Исправлена толщина обводки (убраны border-t/r/b) */}
+					{/* Блок чата */}
 					<div className="flex-1 overflow-y-auto p-[12px] bg-surface-bg flex flex-col gap-4">
 						
-						{/* Сообщение пользователя (Справа) */}
+						{/* Сообщение пользователя Справа */}
 						<div className="self-end max-w-[90%] flex flex-col items-end">
 							<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
 								<p className="text-body-reg text-text-primary font-inter leading-tight">
@@ -443,16 +431,15 @@ export default function App() {
 							</div>
 						</div>
 
-						{/* Сообщение агента (Слева) */}
+						{/* Сообщение агента Слева */}
 						<div className="self-start max-w-[95%] flex flex-col items-start">
 							<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px] select-text">
 								<p className="text-body-reg text-text-primary font-inter leading-tight">
 									Конечно! Эта идиома означает, что человек вошел в ритм и начал работать эффективно. Вот варианты перевода:
 								</p>
 
-								{/* Встраиваемая реплика (Весь текст Caption) */}
+								{/* Встраиваемая реплика */}
 								<div className="mt-3 bg-[#E9ECF0] rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
-									{/* Верхняя строка: Стрелочка (16x16) и кнопки */}
 									<div className="flex items-center justify-between">
 										<div className="w-4 h-4 bg-text-primary/20 rounded-sm flex items-center justify-center cursor-pointer hover:bg-text-primary/30 transition-colors">
 											<div className="w-2 h-1 bg-text-primary/40 rounded-full" /> 
@@ -463,14 +450,13 @@ export default function App() {
 										</div>
 									</div>
 
-									{/* Метаданные: ID, Таймкод и Тонкая Линия 1px */}
+									{/* Метаданные ID, Таймкод и Тонкая Линия */}
 									<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
 										<span className="whitespace-nowrap">#152</span>
 										<span className="whitespace-nowrap">[ 00:01:03 ]</span>
 										<div className="flex-1 h-[1px] bg-border-default" /> {/* Тонкая линия как в Project Tree */}
 									</div>
 
-									{/* Полоски реплик (Высота 22px, padding 4px, corner 2px) */}
 									<div className="flex flex-col gap-[4px]">
 										<div className="h-[22px] bg-[#f8d7da] rounded-[2px] px-[4px] flex items-center">
 											<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магикс!</span>
@@ -483,7 +469,6 @@ export default function App() {
 							</div>
 						</div>
 
-						{/* Еще одно сообщение пользователя */}
 						<div className="self-end max-w-[90%]">
 							<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
 								<p className="text-body-reg text-text-primary font-inter leading-tight">
@@ -493,18 +478,17 @@ export default function App() {
 						</div>
 					</div>
 
-					{/* Нижнее поле ввода (Chat Input) */}
+					{/* Нижнее поле ввода */}
 					<div className="p-3 bg-surface-bg shrink-0">
 						<div className="relative flex flex-col bg-surface-secondary border border-border-default rounded-[10px] group transition-all focus-within:border-primary-main/50 shadow-sm min-h-[96px]">
 							
-							{/* Textarea — добавлен pr-[56px], чтобы текст не затекал под кнопку */}
 							<textarea 
 								placeholder="Помоги, пожалуйста, перевести..."
 								className="w-full h-full p-3 pr-[56px] bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto no-scrollbar"
 								rows={3}
 							/>
 
-							{/* Кнопка отправки — теперь она никогда не перекроет текст */}
+							{/* Кнопка отправки */}
 							<div className="absolute right-3 bottom-3">
 								<button 
 									title="Send message" 
@@ -519,7 +503,7 @@ export default function App() {
 						</div>
 					</div>
 
-					{/* РЕСАЙЗЕР: Копия из Project Tree (Смещен на край) */}
+					{/* РЕСАЙЗЕР */}
 					<div 
 						onMouseDown={startAiAgentResizing} // Вам нужно добавить хэндлер в parent App
 						className={`absolute right-[-4px] top-0 w-[8px] h-full cursor-col-resize z-30 transition-colors ${
@@ -531,17 +515,17 @@ export default function App() {
 				{/* ПРАВАЯ ЧАСТЬ (РЕДАКТОР И ПЛЕЕР) */}
 				<div className="flex-1 flex flex-col min-w-0 bg-surface-bg overflow-hidden">
 					
-					{/* Верх: Таблица и Видео */}
+					{/* Верх Таблица и Видео */}
 					<div 
 						style={{ height: `${upperSectionHeight}px` }}
 						className="flex overflow-hidden border-b border-border-default min-h-0 shrink-0"
 					>
-						{/* ЛЕВАЯ КОЛОНКА: Таблица + Панель редактирования */}
+						{/* ЛЕВАЯ КОЛОНКА Таблица + Панель редактирования одного субтитра */}
 						<div 
 							style={{ width: `${tablePanelWidth}px` }}
 							className="flex flex-col bg-surface-secondary relative shrink-0 min-w-[300px] border-r border-border-default overflow-hidden"
 						>
-							{/* 1. СЕКЦИЯ С ТАБЛИЦЕЙ */}
+							{/* СЕКЦИЯ С ТАБЛИЦЕЙ */}
 							<div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
 								<div className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary">
 									<table className="w-full border-collapse table-fixed">
@@ -597,16 +581,16 @@ export default function App() {
 								</div>
 							</div>
 
-							{/* РЕСАЙЗЕРЫ ПАНЕЛИ */}
+							{/* РЕСАЙЗЕРЫ */}
 							<div 
 									onMouseDown={(e) => startTablePanelResizing('right', e)}
 									className="absolute right-[-2px] top-0 w-[5px] h-full cursor-col-resize z-50 hover:bg-primary-main/40 transition-colors"
 							/>
 
-							{/* 2. НОВАЯ ПАНЕЛЬ РЕДАКТИРОВАНИЯ (Subtitle Edit) */}
+							{/* ПАНЕЛЬ РЕДАКТИРОВАНИЯ ОДИНОЧНОГО СУБТИТРА */}
 							<div className="h-[180px] bg-surface-panel border-t border-border-default p-[12px] flex gap-1 shrink-0 min-w-0 overflow-hidden">
 								
-								{/* Колонна 1: Таймкоды и кнопки управления */}
+								{/* Колонна 1 Таймкоды и кнопки управления */}
 								<div className="w-fit flex flex-col shrink-0 min-w-0">
 									{/* Инпуты в один ряд */}
 									<div className="flex gap-[4px]">
@@ -644,7 +628,7 @@ export default function App() {
 									</div>
 								</div>
 
-								{/* Колонна 2: Translation */}
+								{/* Колонна 2 Translation */}
 								<div className="flex-1 flex flex-col gap-[4px] min-w-0 ml-[12px]">
 									<label className="text-caption text-text-primary">Translation</label>
 									<div className="flex-1 min-h-0 relative">
@@ -661,7 +645,7 @@ export default function App() {
 									</div>
 								</div>
 
-								{/* Колонна 3: Original Text */}
+								{/* Колонна 3 Original Text */}
 								<div className="flex-1 flex flex-col gap-[4px] min-w-0">
 									<label className="text-caption text-text-primary">Original text</label>
 									<div className="flex-1 min-h-0 relative">
@@ -682,8 +666,7 @@ export default function App() {
 							
 						</div>
 						
-						{/* Видеоплеер */}
-
+						{/* ПАНЕЛЬ ВИДЕОПЛЕЕР */}
 						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-0 overflow-hidden select-none">
 								
 								{/* Область видео */}
@@ -700,7 +683,6 @@ export default function App() {
 
 								{/* Панель управления */}
 								<div className="bg-surface-panel border-t border-border-default flex flex-col shrink-0 p-3 m-0 gap-[24px]">
-										{/* Seek Bar */}
 										<div className="w-full">
 												<div className="relative w-full h-[4px] bg-border-default cursor-pointer group">
 														<div className="absolute left-0 top-0 h-full bg-[#9FA3B0] w-[45%]" />
@@ -708,7 +690,7 @@ export default function App() {
 												</div>
 										</div>
 
-										{/* Контролы — теперь они защищены от выталкивания за экран */}
+										{/* Контролы */}
 										<div className="flex items-center justify-between w-full flex-nowrap">
 												<div className="flex items-center gap-[12px] shrink-0">
 														<button className="w-6 h-6 bg-secondary-hover rounded-md shrink-0" />
@@ -735,19 +717,19 @@ export default function App() {
 					</div>
 					
 
-					{/* Низ: Таймлайн (Audio Wave) */}
+					{/*ТАЙМЛАЙН */}
 					<div 
 						className="flex-1 min-h-0 bg-surface-bg flex flex-col relative"
 						style={{ height: `calc(100vh - ${upperSectionHeight}px - 32px)` }} // Оставшееся место после хедера и верхней части
 					>
-						{/* РЕСАЙЗЕР: Сверху панели таймлайна */}
+						{/* РЕСАЙЗЕР */}
 						<div 
 							onMouseDown={(e) => startTablePanelResizing('bottom', e)}
 							className="absolute top-[-2px] left-0 w-full h-[4px] cursor-row-resize z-50 hover:bg-primary-main/40 transition-colors"
 						/>
 
 						<div className="flex flex-1 min-h-0">
-							{/* ЛЕВАЯ ПАНЕЛЬ С КНОПКАМИ */}
+							{/* Левая панель с кнопками */}
 							<div className="w-[100px] border-r border-border-default flex flex-col gap-[4px] p-2 bg-surface-panel shrink-0">
 								{['Insert', 'Set start', 'Set end'].map((label) => (
 									<button 
@@ -759,13 +741,13 @@ export default function App() {
 								))}
 							</div>
 
-							{/* ОСНОВНАЯ ЗОНА ТАЙМЛАЙНА */}
+							{/* основная зона таймлайна */}
 							<div className="flex-1 flex flex-col min-w-0 overflow-hidden">
 								
 								{/* Контейнер с волной и субтитрами */}
 								<div className="flex-1 relative bg-[#121212] m-3 rounded-md border border-black overflow-hidden shadow-inner group">
 									
-									{/* Сетка (Grid) */}
+									{/* Сетка */}
 									<div className="absolute inset-0 opacity-10" 
 										style={{ 
 											backgroundImage: `linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)`,
@@ -793,7 +775,7 @@ export default function App() {
 										</div>
 									</div>
 
-									{/* СУБТИТРЫ НА ТАЙМЛАЙНЕ */}
+									{/* Субтитры на таймлайне */}
 									<div className="absolute inset-0 flex items-stretch">
 										{/* Субтитр 1 */}
 										<div className="absolute left-[2%] w-[25%] h-full border-x border-[#A3E635] bg-white/5 backdrop-blur-[1px] p-2 flex flex-col justify-between">
@@ -824,25 +806,24 @@ export default function App() {
 									</div>
 								</div>
 
-								{/* НИЖНЯЯ ПАНЕЛЬ: ZOOM И СКРОЛЛ */}
+								{/* Нижняя панель с зумом и скролл баром */}
 								<div className="h-[32px] p-3 flex items-center gap-6 bg-surface-panel border-t border-border-default">
 									
-									{/* Zoom Controls */}
-									{/* Zoom Controls */}
+									{/* зум кнопки */}
 									<div className="flex items-center gap-2">
-										{/* Zoom Out Button */}
+										{/* зум аут */}
 										<button className="group w-[22px] h-[22px] flex items-center justify-center shrink-0">
 											<div className="w-[22px] h-[22px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 										</button>
 
-										{/* Custom Zoom Select */}
+										{/* выпадающее */}
 										<div className="relative flex items-center h-[22px]">
 											<select className="appearance-none h-full bg-surface-bg border border-border-default rounded-[4px] pl-2 pr-7 text-[12px] leading-none text-text-primary font-medium outline-none cursor-pointer hover:border-primary-main transition-colors m-0">
 												<option>90%</option>
 												<option>100%</option>
 												<option>120%</option>
 											</select>
-											{/* Кастомная стрелочка */}
+
 											<div className="absolute right-2 pointer-events-none flex items-center">
 												<svg width="8" height="5" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
 													<path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -850,13 +831,13 @@ export default function App() {
 											</div>
 										</div>
 
-										{/* Zoom In Button */}
+										{/* зум аут */}
 										<button className="group w-[22px] h-[22px] flex items-center justify-center shrink-0">
 											<div className="w-[22px] h-[22px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 										</button>
 									</div>
 
-									{/* Полоса прокрутки (имитация) */}
+									{/* Полоса прокрутки */}
 									<div className="flex-1 h-[4px] bg-border-default rounded-full relative overflow-hidden">
 										<div className="absolute left-0 top-0 h-full w-[40%] bg-[#9FA3B0] rounded-full" />
 									</div>
