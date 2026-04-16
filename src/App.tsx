@@ -12,8 +12,8 @@ import {
 const LIMITS = {
   SIDEBAR: 60,
   PROJECT_TREE: 150,
-  AI_AGENT: 200,
-  TABLE: 350,
+  AI_AGENT: 280,
+  TABLE: 300,
   VIDEO: 400,
 };
 
@@ -169,7 +169,7 @@ export default function App() {
 			
 			// Ограничиваем минимальную и максимальную ширину
 			const max = windowSize.width - (projectTreeWidth + 500);
-			if (newWidth > 200 && newWidth < max) {
+			if (newWidth > LIMITS.AI_AGENT && newWidth < max){
 				setAiAgentWidth(newWidth);
 			}
 		};
@@ -461,7 +461,7 @@ export default function App() {
 
 				{/* ПАНЕЛЬ ИИ-АГЕНТА */}
 				<div 
-					style={{ width: `${aiAgentWidth || 320}px` }} 
+					style={{ width: `${aiAgentWidth || 320}px`, minWidth: `${LIMITS.AI_AGENT}px` }} 
 					className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
 				>
 					{/* Заголовок */}
@@ -591,6 +591,13 @@ export default function App() {
 							<div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
 								<div className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary">
 									<table className="w-full border-collapse table-fixed">
+									<colgroup>
+										{colWidths.map((w, i) => (
+											<col key={i} style={{ width: w }} />
+										))}
+										<col style={{ width: 'auto', minWidth: 50 }} />
+										<col style={{ width: 'auto', minWidth: 50 }} />
+									</colgroup>
 										<thead className="sticky top-0 bg-surface-secondary z-20">
 											<tr className="h-[25px]">
 												{['#', 'Start time', 'End time', 'Duration'].map((label, idx) => (
