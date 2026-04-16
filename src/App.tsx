@@ -11,8 +11,8 @@ import {
 
 const LIMITS = {
   SIDEBAR: 60,
-  PROJECT_TREE: 150,
-  AI_AGENT: 280,
+  PROJECT_TREE: { MIN: 150, MAX: 200 },
+  AI_AGENT: { MIN: 280, MAX: 400 },
   TABLE: 300,
   VIDEO: 400,
 };
@@ -63,6 +63,7 @@ export default function App() {
 
 	// Стейт для ширин первых 4-х фиксированных колонок
   const [colWidths, setColWidths] = useState([50, 120, 120, 100]);
+	
 
 	// системные функции для управления окном через таури
 	const handleMinimize = async () => {
@@ -112,12 +113,13 @@ export default function App() {
 	const resize = useCallback((mouseMoveEvent: MouseEvent) => {
 		if (isResizing) {
 			const newWidth = mouseMoveEvent.clientX - 60;
-			const max = windowSize.width - (aiAgentWidth + 500);
-			if (newWidth > 150 && newWidth < max) {
+			const maxDynamic = windowSize.width - (aiAgentWidth + LIMITS.TABLE + LIMITS.VIDEO + LIMITS.SIDEBAR);
+			const max = Math.min(LIMITS.PROJECT_TREE.MAX, maxDynamic);
+			if (newWidth > LIMITS.PROJECT_TREE.MIN && newWidth < max) {
 				setProjectTreeWidth(newWidth);
 			}
 		}
-	}, [isResizing]);
+	}, [isResizing, windowSize, aiAgentWidth]);
 
 	// вешаем глобальные слушатели на мышку для работы ресайза
 	useEffect(() => {
@@ -164,12 +166,10 @@ export default function App() {
 		
 
 		const doDrag = (mouseMoveEvent: MouseEvent) => {
-			// Вычисляем новую ширину: начальная + разница координат
 			const newWidth = startWidth + (mouseMoveEvent.clientX - startX);
-			
-			// Ограничиваем минимальную и максимальную ширину
-			const max = windowSize.width - (projectTreeWidth + 500);
-			if (newWidth > LIMITS.AI_AGENT && newWidth < max){
+			const maxDynamic = windowSize.width - (LIMITS.SIDEBAR + projectTreeWidth + LIMITS.TABLE + LIMITS.VIDEO);
+			const max = Math.min(LIMITS.AI_AGENT.MAX, maxDynamic);
+			if (newWidth > LIMITS.AI_AGENT.MIN && newWidth < max) {
 				setAiAgentWidth(newWidth);
 			}
 		};
@@ -374,7 +374,7 @@ export default function App() {
 
 				{/* ПАНЕЛЬ ИЕРАРХИЯ ПРОЕКТА */}
 				<div 
-					style={{ width: `${projectTreeWidth}px` }} 
+					style={{ width: `${projectTreeWidth}px`, maxWidth: `${LIMITS.PROJECT_TREE.MAX}px` }}
 					className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
 				>
 					{/* Заголовок */}
@@ -461,7 +461,11 @@ export default function App() {
 
 				{/* ПАНЕЛЬ ИИ-АГЕНТА */}
 				<div 
-					style={{ width: `${aiAgentWidth || 320}px`, minWidth: `${LIMITS.AI_AGENT}px` }} 
+					style={{ 
+						width: `${aiAgentWidth || 320}px`, 
+						minWidth: `${LIMITS.AI_AGENT.MIN}px`,
+						maxWidth: `${LIMITS.AI_AGENT.MAX}px`
+					}}
 					className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
 				>
 					{/* Заголовок */}
