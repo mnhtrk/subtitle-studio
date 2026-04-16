@@ -19,6 +19,38 @@ const LIMITS = {
 
 export default function App() {
 
+	const [windowSize, setWindowSize] = useState({
+		width: window.innerWidth,
+		height: window.innerHeight
+	});
+
+	useEffect(() => {
+		const handleResize = () => {
+			setWindowSize({
+				width: window.innerWidth,
+				height: window.innerHeight
+			});
+		};
+
+		window.addEventListener('resize', handleResize);
+
+		return () => window.removeEventListener('resize', handleResize);
+	}, []);
+
+	useEffect(() => {
+		const unlisten = appWindow.listen('tauri://resize', () => {
+			setWindowSize({
+				width: window.innerWidth,
+				height: window.innerHeight
+			});
+		});
+
+		return () => {
+			unlisten.then(f => f());
+		};
+	}, []);
+
+
 	// начальные размеры и статусы
 	const [projectTreeWidth, setProjectTreeWidth] = useState(240); // начальная ширина иерархия файлов
 	const [isResizing, setIsResizing] = useState(false); //проверка тянушки
@@ -80,7 +112,8 @@ export default function App() {
 	const resize = useCallback((mouseMoveEvent: MouseEvent) => {
 		if (isResizing) {
 			const newWidth = mouseMoveEvent.clientX - 60;
-			if (newWidth > 150 && newWidth < 450) {
+			const max = windowSize.width - (aiAgentWidth + 500);
+			if (newWidth > 150 && newWidth < max) {
 				setProjectTreeWidth(newWidth);
 			}
 		}
@@ -96,6 +129,32 @@ export default function App() {
 		};
 	}, [resize, stopResizing]);
 
+	useEffect(() => {
+		const totalFixed = 60 + projectTreeWidth + aiAgentWidth;
+
+		// 👉 сколько реально можно дать таблице, чтобы видео не сломалось
+		const maxTable = windowSize.width - totalFixed - LIMITS.VIDEO;
+
+		// 👉 если таблица слишком большая — ужимаем
+		if (tablePanelWidth > maxTable) {
+			setTablePanelWidth(Math.max(300, maxTable));
+		}
+
+		// 👉 если наоборот таблица ок, но видео уже меньше минимума — тоже ужимаем таблицу
+		const currentVideoWidth = windowSize.width - totalFixed - tablePanelWidth;
+
+		if (currentVideoWidth < LIMITS.VIDEO) {
+			const fixedTable = windowSize.width - totalFixed - LIMITS.VIDEO;
+			setTablePanelWidth(Math.max(300, fixedTable));
+		}
+
+		// высота
+		if (upperSectionHeight > windowSize.height - 150) {
+			setUpperSectionHeight(windowSize.height - 150);
+		}
+
+	}, [windowSize, tablePanelWidth, projectTreeWidth, aiAgentWidth]);
+
 	// логика изменения ширины панели аи агента через прямое управление событиями
 	const startAiAgentResizing = useCallback((mouseDownEvent: React.MouseEvent) => {
 		setIsAiAgentResizing(true);
@@ -109,7 +168,8 @@ export default function App() {
 			const newWidth = startWidth + (mouseMoveEvent.clientX - startX);
 			
 			// Ограничиваем минимальную и максимальную ширину
-			if (newWidth > 200 && newWidth < 600) {
+			const max = windowSize.width - (projectTreeWidth + 500);
+			if (newWidth > 200 && newWidth < max) {
 				setAiAgentWidth(newWidth);
 			}
 		};
@@ -137,7 +197,9 @@ export default function App() {
 				
 				const minTableWidth = 400; 
 
-				const maxAllowedWidth = window.innerWidth - (60 + projectTreeWidth + aiAgentWidth + 390);
+				const maxAllowedWidth = windowSize.width 
+				- (60 + projectTreeWidth + aiAgentWidth) 
+				- LIMITS.VIDEO;
 
 				if (newWidth >= minTableWidth && newWidth <= maxAllowedWidth) {
 					setTablePanelWidth(newWidth);
@@ -154,7 +216,7 @@ export default function App() {
     };
     window.addEventListener('mousemove', doDrag);
     window.addEventListener('mouseup', stopDrag);
-  }, [tablePanelWidth, upperSectionHeight]);
+		}, [tablePanelWidth, upperSectionHeight, windowSize, projectTreeWidth, aiAgentWidth]);
 
   // Ресайз колонок таблицы
   const startColResize = useCallback((index: number, mouseDownEvent: React.MouseEvent) => {
@@ -667,7 +729,7 @@ export default function App() {
 						</div>
 						
 						{/* ПАНЕЛЬ ВИДЕОПЛЕЕР */}
-						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-0 overflow-hidden select-none">
+						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[400px] overflow-hidden select-none">
 								
 								{/* Область видео */}
 								<div className="flex-1 relative flex flex-col items-center justify-center group bg-[#000000]">
