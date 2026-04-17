@@ -11,7 +11,7 @@ import {
 
 const LIMITS = {
   SIDEBAR: 60,
-  PROJECT_TREE: { MIN: 150, MAX: 200 },
+  PROJECT_TREE: { MIN: 150, MAX: 250 },
   AI_AGENT: { MIN: 280, MAX: 400 },
   TABLE: 300,
   VIDEO: 400,
@@ -90,13 +90,33 @@ export default function App() {
 		return () => window.removeEventListener('click', handleClickOutside);
 	}, [activeMenu]);
 
+	const [isDarkTheme, setIsDarkTheme] = useState(() => {
+		const saved = localStorage.getItem('theme');
+		return saved === 'dark';
+	});
+
+	useEffect(() => {
+		document.documentElement.classList.toggle('dark', isDarkTheme);
+		localStorage.setItem('theme', isDarkTheme ? 'dark' : 'light');
+	}, [isDarkTheme]);
+
 	// Список пунктов меню наверху
 	const menuItems = [
-		{ label: 'File', items: ['New', 'Open', 'Save', 'Exit'] },
-		{ label: 'Edit', items: ['Undo', 'Redo', 'Find'] },
-		{ label: 'Tools', items: ['Spell check', 'Batch convert'] },
-		{ label: 'Video', items: ['Open video file', 'Audio track'] },
-		{ label: 'Help', items: ['About', 'Updates'] },
+		{ label: 'File', items: [{ label: 'New' }, { label: 'Open' }, { label: 'Save' }, { label: 'Exit' }] },
+		{ label: 'Edit', items: [{ label: 'Undo' }, { label: 'Redo' }, { label: 'Find' }] },
+		{ label: 'Tools', items: [{ label: 'Spell check' }, { label: 'Batch convert' }] },
+		{ label: 'Video', items: [{ label: 'Open video file' }, { label: 'Audio track' }] },
+		{
+			label: 'Help',
+			items: [
+				{ label: 'About' },
+				{ label: 'Updates' },
+				{
+					label: isDarkTheme ? 'Switch to light theme' : 'Switch to dark theme',
+					action: () => setIsDarkTheme(prev => !prev),
+				},
+			],
+		},
 	];
 	
 
@@ -239,6 +259,8 @@ export default function App() {
   }, [colWidths]);
 
 
+
+
   return (
     <div className="flex flex-col h-screen w-full overflow-hidden bg-surface-bg select-none">
 			{/* Верхнее меню, название проекта, 3 кнопки */}
@@ -275,16 +297,17 @@ export default function App() {
 								{activeMenu === menu.label && (
 									<div className="rounded-[8px] absolute left-0 top-[26px] min-w-[160px] bg-surface-secondary border border-border-default shadow-lg py-1 flex flex-col z-[110]">
 										{menu.items.map((subItem) => (
-											<button
-												key={subItem}
-												className="px-3 h-[28px] flex items-center text-[12px] font-inter text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors"
-												onClick={() => {
-													setActiveMenu(null);
-												}}
-											>
-												{subItem}
-											</button>
-										))}
+										<button
+											key={subItem.label}
+											className="px-3 h-[28px] flex items-center text-[12px] font-inter text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors"
+											onClick={() => {
+												subItem.action?.();
+												setActiveMenu(null);
+											}}
+										>
+											{subItem.label}
+										</button>
+									))}
 									</div>
 								)}
 							</div>
@@ -318,8 +341,8 @@ export default function App() {
 						className="w-[46px] h-full flex items-center justify-center hover:bg-[#E81123] group transition-colors"
 					>
 						<div className="relative w-3 h-3 flex items-center justify-center">
-							<div className="absolute w-full h-[1px] bg-text-primary group-hover:bg-white rotate-45" />
-							<div className="absolute w-full h-[1px] bg-text-primary group-hover:bg-white -rotate-45" />
+							<div className="absolute w-full h-[1px] bg-text-primary group-hover:bg-surface-secondary rotate-45" />
+							<div className="absolute w-full h-[1px] bg-text-primary group-hover:bg-surface-secondary -rotate-45" />
 						</div>
 					</button>
 				</div>
@@ -352,7 +375,7 @@ export default function App() {
 							title="Пошаговый мастер" 
 							className="w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-all shrink-0 my-[28px]"
 						>
-							<div className="w-7 h-7 bg-white/20 rounded-sm" />
+							<div className="w-7 h-7 bg-surface-secondary/20 rounded-sm" />
 						</button>
 
 						{/* Нижняя группа кнопок */}
@@ -505,7 +528,7 @@ export default function App() {
 								</p>
 
 								{/* Встраиваемая реплика */}
-								<div className="mt-3 bg-[#E9ECF0] rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
+								<div className="mt-3 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
 									<div className="flex items-center justify-between">
 										<div className="w-4 h-4 bg-text-primary/20 rounded-sm flex items-center justify-center cursor-pointer hover:bg-text-primary/30 transition-colors">
 											<div className="w-2 h-1 bg-text-primary/40 rounded-full" /> 
@@ -524,10 +547,10 @@ export default function App() {
 									</div>
 
 									<div className="flex flex-col gap-[4px]">
-										<div className="h-[22px] bg-[#f8d7da] rounded-[2px] px-[4px] flex items-center">
+										<div className="h-[22px] bg-inline-error rounded-[2px] px-[4px] flex items-center">
 											<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магикс!</span>
 										</div>
-										<div className="h-[22px] bg-[#d4edda] rounded-[2px] px-[4px] flex items-center">
+										<div className="h-[22px] bg-inline-success rounded-[2px] px-[4px] flex items-center">
 											<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магиксию!</span>
 										</div>
 									</div>
@@ -561,7 +584,7 @@ export default function App() {
 									className="group w-[40px] h-[40px] flex items-center justify-center shrink-0"
 								>
 									<div className="w-[40px] h-[40px] bg-secondary-hover rounded-full group-hover:bg-primary-main transition-colors flex items-center justify-center">
-										<div className="w-4 h-4 bg-white/30 rounded-sm" />
+										<div className="w-4 h-4 bg-surface-secondary/30 rounded-sm" />
 									</div>
 								</button>
 							</div>
@@ -594,7 +617,7 @@ export default function App() {
 							{/* СЕКЦИЯ С ТАБЛИЦЕЙ */}
 							<div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
 								<div className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary">
-									<table className="w-full border-collapse table-fixed">
+									<table className="w-full border-collapse table-fixed bg-surface-secondary">
 									<colgroup>
 										{colWidths.map((w, i) => (
 											<col key={i} style={{ width: w }} />
@@ -608,7 +631,7 @@ export default function App() {
 													<th 
 														key={idx} 
 														style={{ width: `${colWidths[idx]}px` }}
-														className="relative h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] select-none min-w-0"
+														className="relative h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default select-none min-w-0"
 													>
 														<div className="truncate w-full">{label}</div>
 														<div 
@@ -617,10 +640,10 @@ export default function App() {
 														/>
 													</th>
 												))}
-												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] min-w-0">
+												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
 													<div className="truncate w-full">Translation</div>
 												</th>
-												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-[#F0F0F0] min-w-0">
+												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
 													<div className="truncate w-full">Original text</div>
 												</th>
 											</tr>
@@ -629,22 +652,22 @@ export default function App() {
 										<tbody>
 											{Array.from({ length: 25 }).map((_, i) => (
 												<tr key={i} className="h-[25px] hover:bg-black/5 transition-colors group text-table">
-													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
 														<div className="truncate">{i + 1}</div>
 													</td>
-													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
 														<div className="truncate">00:01:03,174</div>
 													</td>
-													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
 														<div className="truncate">00:01:03,174</div>
 													</td>
-													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
+													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
 														<div className="truncate">1,244</div>
 													</td>
-													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
 														<div className="truncate">It's the biggest event of the year in Magix...</div>
 													</td>
-													<td className="py-1 px-2 border-b border-[#F0F0F0] whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
 														<div className="truncate">C'est le plus grand événement de l'année...</div>
 													</td>
 												</tr>
@@ -672,7 +695,7 @@ export default function App() {
 											<input 
 												type="text" 
 												defaultValue="00:01:03,174"
-												className="w-[100px] h-[24px] bg-[#FDFDFD] border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
+												className="w-[100px] h-[24px] bg-surface-secondary border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
 											/>
 										</div>
 										<div className="flex flex-col gap-[4px]">
@@ -680,7 +703,7 @@ export default function App() {
 											<input 
 												type="text" 
 												defaultValue="1,244"
-												className="w-[76px] h-[24px] bg-[#FDFDFD] border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
+												className="w-[76px] h-[24px] bg-surface-secondary border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
 											/>
 										</div>
 									</div>
@@ -706,7 +729,7 @@ export default function App() {
 									<label className="text-caption text-text-primary">Translation</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
-											className="text-h1-heading w-full h-full bg-[#FDFDFD] border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
+											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
 											placeholder="Translation..."
 											defaultValue="It's the biggest event of the year in Magix..."
 										/>
@@ -723,7 +746,7 @@ export default function App() {
 									<label className="text-caption text-text-primary">Original text</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
-											className="text-h1-heading w-full h-full bg-[#FDFDFD] border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
+											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
 											placeholder="Original text..."
 											defaultValue="C'est le plus grand événement de l'année..."
 										/>
@@ -759,7 +782,7 @@ export default function App() {
 										<div className="w-full">
 												<div className="relative w-full h-[4px] bg-border-default cursor-pointer group">
 														<div className="absolute left-0 top-0 h-full bg-[#9FA3B0] w-[45%]" />
-														<div className="absolute left-[45%] top-1/2 -translate-y-1/2 w-3 h-4 bg-white border border-border-default rounded-full shadow-sm opacity-0 group-hover:opacity-100 transition-opacity z-10" />
+														<div className="absolute left-[45%] top-1/2 -translate-y-1/2 w-3 h-4 bg-surface-secondary border border-border-default rounded-full shadow-sm opacity-0 group-hover:opacity-100 transition-opacity z-10" />
 												</div>
 										</div>
 
@@ -771,8 +794,8 @@ export default function App() {
 														<button className="w-6 h-6 bg-secondary-hover rounded-sm shrink-0" />
 														
 														{/* Слайдер громкости */}
-														<div className="w-16 h-[2px] bg-[#E5E7EB] relative shrink-0">
-																<div className="absolute left-0 top-0 h-full bg-[#A3AAB5] w-1/2" />
+														<div className="w-16 h-[2px] bg-border-default relative shrink-0">
+																<div className="absolute left-0 top-0 h-full bg-primary-disabled w-1/2" />
 														</div>
 												</div>
 
@@ -851,7 +874,7 @@ export default function App() {
 									{/* Субтитры на таймлайне */}
 									<div className="absolute inset-0 flex items-stretch">
 										{/* Субтитр 1 */}
-										<div className="absolute left-[2%] w-[25%] h-full border-x border-[#A3E635] bg-white/5 backdrop-blur-[1px] p-2 flex flex-col justify-between">
+										<div className="absolute left-[2%] w-[25%] h-full border-x border-[#A3E635] bg-surface-secondary/5 backdrop-blur-[1px] p-2 flex flex-col justify-between">
 											<span className="text-[11px] text-white font-medium truncate">That's our new home!</span>
 											<div className="flex gap-2 text-[10px] text-white/50 font-mono">
 												<span>#232</span>
@@ -860,7 +883,7 @@ export default function App() {
 										</div>
 
 										{/* Субтитр 2 */}
-										<div className="absolute left-[35%] w-[35%] h-full border-x border-[#A3E635] bg-white/10 backdrop-blur-[1px] p-2 flex flex-col justify-between">
+										<div className="absolute left-[35%] w-[35%] h-full border-x border-[#A3E635] bg-surface-secondary/10 backdrop-blur-[1px] p-2 flex flex-col justify-between">
 											<span className="text-[11px] text-white font-medium truncate">Kali, if you get an autograph, I'll...</span>
 											<div className="flex gap-2 text-[10px] text-white/50 font-mono">
 												<span>#232</span>
@@ -869,7 +892,7 @@ export default function App() {
 										</div>
 
 										{/* Субтитр 3 */}
-										<div className="absolute left-[75%] w-[23%] h-full border-x border-[#A3E635] bg-white/5 backdrop-blur-[1px] p-2 flex flex-col justify-between">
+										<div className="absolute left-[75%] w-[23%] h-full border-x border-[#A3E635] bg-surface-secondary/5 backdrop-blur-[1px] p-2 flex flex-col justify-between">
 											<span className="text-[11px] text-white font-medium truncate">That's our new home!</span>
 											<div className="flex gap-2 text-[10px] text-white/50 font-mono">
 												<span>#232</span>
@@ -912,7 +935,7 @@ export default function App() {
 
 									{/* Полоса прокрутки */}
 									<div className="flex-1 h-[4px] bg-border-default rounded-full relative overflow-hidden">
-										<div className="absolute left-0 top-0 h-full w-[40%] bg-[#9FA3B0] rounded-full" />
+										<div className="absolute left-0 top-0 h-full w-[40%] bg-primary-disabled rounded-full" />
 									</div>
 								</div>
 
