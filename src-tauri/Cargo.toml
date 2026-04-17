@@ -21,3 +21,6 @@ sha2 = "0.10"
 uuid = { version = "1.7", features = ["v4"] }
 chrono = "0.4"
 keyring = "2.3"
+tokio-util = "0.7"
+regex = "1.10"
+zip = "0.6"
