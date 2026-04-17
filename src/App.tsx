@@ -1,5 +1,11 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+
+import { WelcomeModal } from './components/modals/WelcomeModal';
+import { NewProjectModal } from './components/modals/NewProjectModal';
+
+import { GlossaryModal } from './components/modals/GlossaryModal';
+
 const appWindow = getCurrentWindow();
 
 import { 
@@ -63,7 +69,33 @@ export default function App() {
 
 	// Стейт для ширин первых 4-х фиксированных колонок
   const [colWidths, setColWidths] = useState([50, 120, 120, 100]);
-	
+
+	// состояние для выпадающих списков верхнего меню
+	const [activeMenu, setActiveMenu] = useState<string | null>(null);
+
+	type ModalType =
+		| null
+		| 'welcome'
+		| 'newProject'
+		| 'wizardStep1'
+		| 'wizardStep2'
+		| 'wizardStep3'
+		| 'wizardStep4'
+		| 'wizardStep5'
+		| 'wizardStep6'
+		| 'wizardStep7'
+		| 'glossary'
+		| 'export'
+		| 'find'
+		| 'spellcheck';
+
+const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'glossary' | null>('welcome');
+	const openNewProject = () => setActiveModal('createProject');
+
+	useEffect(() => {
+		setActiveModal('welcome');
+	}, []);
+
 
 	// системные функции для управления окном через таури
 	const handleMinimize = async () => {
@@ -78,8 +110,7 @@ export default function App() {
 		await appWindow.close();
 	};
 
-	// состояние для выпадающих списков верхнего меню
-	const [activeMenu, setActiveMenu] = useState<string | null>(null);
+	
 
 	// Добавить эффект для закрытия меню при клике вне его
 	useEffect(() => {
@@ -102,7 +133,7 @@ export default function App() {
 
 	// Список пунктов меню наверху
 	const menuItems = [
-		{ label: 'File', items: [{ label: 'New' }, { label: 'Open' }, { label: 'Save' }, { label: 'Exit' }] },
+		{ label: 'File', items: [{ label: 'New Project', action: () => setActiveModal('createProject') }, { label: 'Open Project' }, { label: 'Save' }, { label: 'Exit' }] },
 		{ label: 'Edit', items: [{ label: 'Undo' }, { label: 'Redo' }, { label: 'Find' }] },
 		{ label: 'Tools', items: [{ label: 'Spell check' }, { label: 'Batch convert' }] },
 		{ label: 'Video', items: [{ label: 'Open video file' }, { label: 'Audio track' }] },
@@ -357,8 +388,12 @@ export default function App() {
 						
 						{/* Верхняя группа кнопок */}
 						<div className="flex flex-col items-center gap-[30px]">
-							<button title="Создать новый проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
-								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							<button 
+									title="Создать новый проект" 
+									onClick={() => setActiveModal('createProject')} // <-- Добавь это
+									className="group w-7 h-7 flex items-center justify-center shrink-0"
+							>
+									<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 							
 							<button title="Открыть проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
@@ -384,7 +419,11 @@ export default function App() {
 								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 							
-							<button title="Глоссарий" className="group w-7 h-7 flex items-center justify-center shrink-0">
+							<button 
+								title="Глоссарий" 
+								onClick={() => setActiveModal('glossary')} // Открываем глоссарий
+								className="group w-7 h-7 flex items-center justify-center shrink-0"
+							>
 								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 
@@ -945,6 +984,37 @@ export default function App() {
 
 				</div>
 			</div>
+
+			{/* POPUPS LAYER */}
+			{activeModal && (
+				<div className="fixed inset-0 z-[999] flex items-center justify-center pointer-events-none">
+					
+					{/* Контейнер конкретного окна */}
+					<div className="pointer-events-auto">
+						
+						{activeModal === 'welcome' && (
+							<WelcomeModal 
+								onClose={() => setActiveModal(null)} 
+								onNewProject={() => setActiveModal('createProject')} 
+							/>
+						)}
+
+						{activeModal === 'createProject' && (
+							<NewProjectModal 
+								onClose={() => setActiveModal(null)} 
+							/>
+						)}
+
+						{activeModal === 'glossary' && (
+							<GlossaryModal onClose={() => setActiveModal(null)} />
+						)}
+
+						
+
+					</div>
+				</div>
+			)}
+
 		</div>	
     
   );

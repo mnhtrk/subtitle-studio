@@ -171,3 +171,12 @@
   background: var(--color-primary-main);
   opacity: 0.5;
 }
+
+@font-face {
+  font-family: 'FlagEmoji';
+  src: local('Twemoji Mozilla'), local('Noto Color Emoji'), local('Segoe UI Emoji');
+}
+
+.flag-font {
+  font-family: 'FlagEmoji', sans-serif;
+}
