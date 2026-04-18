@@ -6,7 +6,9 @@
 mod commands;
 mod cache;
 mod project;
-mod types;  // ← Добавлен импорт модуля типов
+mod types;
+mod utils;
+mod subtitle_parser; 
 
 use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
@@ -47,6 +49,20 @@ fn main() {
             commands::project::update_glossary,
             commands::project::add_glossary_entry,
             commands::project::update_subtitle_segment,
+            commands::media::extract_audio_from_video,
+            commands::media::get_media_info,
+            commands::files::remove_file_from_project,
+            commands::project::create_empty_segments,
+            commands::project::get_project_statistics,
+            commands::project::find_and_replace_in_subtitles,
+            commands::audio::generate_waveform,
+            commands::files::import_existing_subtitles,
+            commands::sync::sync_subtitles_with_video,
+            commands::quality::check_translation_quality,
+            commands::ai::auto_generate_glossary,
+            commands::files::backup_project,
+            commands::notifications::show_notification,
+            commands::notifications::log_message,
         ])
         
         .setup(|app| {

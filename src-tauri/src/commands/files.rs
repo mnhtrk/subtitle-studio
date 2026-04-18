@@ -3,7 +3,11 @@ use std::path::Path;
 use std::fs;
 use crate::project::{Project, ProjectFile, ProjectType, SubtitleSegment};
 use crate::cache::Cache;
-use crate::types::RecentProject;  // ← Импорт из общего модуля
+use crate::types::RecentProject;
+use crate::subtitle_parser;
+use zip::{ZipWriter, write::FileOptions};
+use std::io::Write;
+use serde::{Deserialize, Serialize};
 
 #[tauri::command]
 pub async fn open_project(
@@ -263,4 +267,220 @@ fn format_time_simple(seconds: f64) -> String {
     let minutes = (seconds / 60.0) as u32;
     let secs = (seconds % 60.0) as u32;
     format!("{:02}:{:02}", minutes, secs)
+}
+
+#[tauri::command]
+pub async fn remove_file_from_project(
+    project_path: String,
+    file_id: String,
+    delete_physical_file: bool,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let project_path_buf = Path::new(&project_path);
+    let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
+    
+    // Находим файл для удаления (клонируем данные перед мутабельным заимствованием)
+    let file_to_remove = if let Some(file_index) = project.files.iter().position(|f| f.id == file_id) {
+        Some(project.files[file_index].clone()) // ← Клонируем структуру файла
+    } else {
+        None
+    };
+    
+    if let Some(file) = file_to_remove {
+        // Удаляем физический файл если требуется
+        if delete_physical_file {
+            let full_file_path = Path::new(&project.path).join(&file.path);
+            if full_file_path.exists() {
+                fs::remove_file(&full_file_path)
+                    .map_err(|e| format!("Ошибка удаления файла {}: {}", full_file_path.display(), e))?;
+                println!("🗑️ Физический файл удалён: {}", full_file_path.display());
+            }
+        }
+        
+        // Удаляем запись из проекта
+        if let Some(file_index) = project.files.iter().position(|f| f.id == file_id) {
+            project.files.remove(file_index);
+            project.updated_at = chrono::Utc::now().to_rfc3339();
+            
+            // Сохраняем проект
+            project.save_to_file(&app_handle)?;
+            println!("🗑️ Файл '{}' удалён из проекта", file.name);
+            
+            Ok(())
+        } else {
+            Err("Файл не найден в проекте".to_string())
+        }
+    } else {
+        Err("Файл не найден в проекте".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn import_existing_subtitles(
+    subtitle_path: String,
+    format: Option<String>,
+    project_path: String,
+    file_id: String,
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<SubtitleSegment>, String> {
+    println!("📥 Импорт существующих субтитров: {}", subtitle_path);
+    
+    let subtitle_path_buf = Path::new(&subtitle_path);
+    if !subtitle_path_buf.exists() {
+        return Err(format!("Файл субтитров не найден: {}", subtitle_path));
+    }
+    
+    // Определяем формат
+    let detected_format = if let Some(fmt) = format {
+        match fmt.to_lowercase().as_str() {
+            "srt" => subtitle_parser::SubtitleFormat::SRT,
+            "vtt" => subtitle_parser::SubtitleFormat::VTT,
+            "ass" => subtitle_parser::SubtitleFormat::ASS,
+            "ssa" => subtitle_parser::SubtitleFormat::SSA,
+            _ => return Err(format!("Неподдерживаемый формат: {}", fmt)),
+        }
+    } else {
+        subtitle_parser::detect_format(subtitle_path_buf)?
+    };
+    
+    // Читаем содержимое файла
+    let content = fs::read_to_string(subtitle_path_buf)
+        .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
+    
+    // Парсим субтитры
+    let segments = subtitle_parser::parse_subtitles(&content, detected_format)?;
+    
+    if segments.is_empty() {
+        return Err("Не удалось распарсить субтитры".to_string());
+    }
+    
+    println!("✅ Импортировано {} сегментов", segments.len());
+    
+    // Обновляем файл в проекте
+    let project_path_buf = Path::new(&project_path);
+    let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
+    
+    if let Some(file) = project.files.iter_mut().find(|f| f.id == file_id) {
+        file.subtitle_segments = Some(segments.clone());
+        file.updated_at = chrono::Utc::now().to_rfc3339();
+        project.updated_at = chrono::Utc::now().to_rfc3339();
+        
+        project.save_to_file(&app_handle)?;
+        println!("💾 Субтитры сохранены в проект");
+    }
+    
+    Ok(segments)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupOptions {
+    pub include_media: bool,
+    pub compression: bool,
+    pub backup_name: Option<String>,
+}
+
+#[tauri::command]
+pub async fn backup_project(
+    project_path: String,
+    backup_path: String,
+    options: Option<BackupOptions>,
+    _app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    println!("💾 Создание резервной копии проекта: {}", project_path);
+    
+    let project_path_buf = Path::new(&project_path);
+    if !project_path_buf.exists() {
+        return Err(format!("Папка проекта не найдена: {}", project_path));
+    }
+    
+    let opts = options.unwrap_or(BackupOptions {
+        include_media: true,
+        compression: true,
+        backup_name: None,
+    });
+    
+    // Создаём директорию для резервной копии если её нет
+    let backup_dir = Path::new(&backup_path);
+    std::fs::create_dir_all(backup_dir)
+        .map_err(|e| format!("Ошибка создания директории резервной копии: {}", e))?;
+    
+    // Генерируем имя файла резервной копии
+    let project_name = project_path_buf.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    
+    let backup_name = opts.backup_name.unwrap_or_else(|| {
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        format!("{}_backup_{}.zip", project_name, timestamp)
+    });
+    
+    let backup_file_path = backup_dir.join(&backup_name);
+    let backup_file = std::fs::File::create(&backup_file_path)
+        .map_err(|e| format!("Ошибка создания файла резервной копии: {}", e))?;
+    
+    // Создаём ZIP архив
+    let mut zip = zip::ZipWriter::new(backup_file);
+    let zip_opts = if opts.compression {
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+    } else {
+        zip::write::FileOptions::default()
+    };
+    
+    // Рекурсивно добавляем файлы в архив
+    add_directory_to_zip(&mut zip, project_path_buf, project_path_buf, &zip_opts, opts.include_media)
+        .map_err(|e| format!("Ошибка создания архива: {}", e))?;
+    
+    zip.finish()
+        .map_err(|e| format!("Ошибка завершения архива: {}", e))?;
+    
+    let backup_path_str = backup_file_path.to_string_lossy().to_string();
+    println!("✅ Резервная копия создана: {}", backup_path_str);
+    
+    Ok(backup_path_str)
+}
+
+fn add_directory_to_zip(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    root_path: &Path,
+    current_path: &Path,
+    options: &zip::write::FileOptions,
+    include_media: bool,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(current_path)
+        .map_err(|e| format!("Ошибка чтения директории {}: {}", current_path.display(), e))?;
+    
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Ошибка чтения записи: {}", e))?;
+        let path = entry.path();
+        
+        if path.is_file() {
+            // Проверяем, нужно ли включать медиа файлы
+            if !include_media {
+                let ext = path.extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                
+                if matches!(ext.as_str(), "mp4" | "mkv" | "mov" | "avi" | "mp3" | "wav") {
+                    continue; // Пропускаем медиа файлы
+                }
+            }
+            
+            let relative_path = path.strip_prefix(root_path)
+                .map_err(|e| format!("Ошибка получения относительного пути: {}", e))?;
+            
+            let file_data = std::fs::read(&path)
+                .map_err(|e| format!("Ошибка чтения файла {}: {}", path.display(), e))?;
+            
+            zip.start_file(relative_path.to_string_lossy(), *options)
+                .map_err(|e| format!("Ошибка добавления файла в архив: {}", e))?;
+            
+            zip.write_all(&file_data)
+                .map_err(|e| format!("Ошибка записи данных в архив: {}", e))?;
+        } else if path.is_dir() {
+            add_directory_to_zip(zip, root_path, &path, options, include_media)?;
+        }
+    }
+    
+    Ok(())
 }

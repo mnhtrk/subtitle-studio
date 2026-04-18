@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
-use crate::project::{SubtitleSegment, GlossaryEntry};
 
-// Типы для команды AI
+// УДАЛЯЕМ неиспользуемые импорты
+// use crate::project::{SubtitleSegment, GlossaryEntry};
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TranslationResult {
     pub id: u32,
     pub translated_text: String,
 }
 
-// Типы для команды файлов
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RecentProject {
     pub path: String,
@@ -16,7 +16,6 @@ pub struct RecentProject {
     pub last_opened: String,
 }
 
-// Типы для команды проекта
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectStructure {
     pub project: crate::project::Project,
