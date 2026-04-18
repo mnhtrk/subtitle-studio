@@ -3,7 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { WelcomeModal } from './components/modals/WelcomeModal';
 import { NewProjectModal } from './components/modals/NewProjectModal';
-
+import { ExportModal } from './components/modals/ExportModal';
 import { GlossaryModal } from './components/modals/GlossaryModal';
 
 const appWindow = getCurrentWindow();
@@ -89,7 +89,7 @@ export default function App() {
 		| 'find'
 		| 'spellcheck';
 
-const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'glossary' | null>('welcome');
+const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'glossary' | 'export' | null>('welcome');
 	const openNewProject = () => setActiveModal('createProject');
 
 	useEffect(() => {
@@ -415,7 +415,7 @@ const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'gl
 
 						{/* Нижняя группа кнопок */}
 						<div className="flex flex-col items-center gap-[30px]">
-							<button title="Экспорт" className="group w-7 h-7 flex items-center justify-center shrink-0">
+							<button title="Экспорт" onClick={() => setActiveModal('export')} className="group w-7 h-7 flex items-center justify-center shrink-0">
 								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 							
@@ -1007,6 +1007,10 @@ const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'gl
 
 						{activeModal === 'glossary' && (
 							<GlossaryModal onClose={() => setActiveModal(null)} />
+						)}
+
+						{activeModal === 'export' && (
+							<ExportModal onClose={() => setActiveModal(null)} />
 						)}
 
 						

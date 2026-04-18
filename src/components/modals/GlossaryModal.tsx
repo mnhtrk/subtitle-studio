@@ -11,17 +11,14 @@ interface GlossaryModalProps {
 }
 
 export const GlossaryModal: React.FC<GlossaryModalProps> = ({ onClose }) => {
-  // Инициализируем 8 пустых строк для заполнения
   const [rows, setRows] = useState<GlossaryRow[]>(
     Array(8).fill(null).map(() => ({ original: '', translated: '', context: '' }))
   );
 
-  // Функция обновления конкретной ячейки
   const handleUpdate = (index: number, field: keyof GlossaryRow, value: string) => {
     const newRows = [...rows];
     newRows[index][field] = value;
 
-    // Если пользователь начал писать в самой последней строке, автоматически добавляем еще одну пустую
     if (index === rows.length - 1 && value !== '') {
       newRows.push({ original: '', translated: '', context: '' });
     }
@@ -33,17 +30,14 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({ onClose }) => {
     <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
       <div className="pointer-events-auto w-[840px] h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
         
-        {/* Хедер модалки */}
         <div className="flex justify-end h-5 mb-2"> 
           <div className="flex items-center gap-2">
-             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-secondary cursor-pointer hover:opacity-70 transition-opacity"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
              <button onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
              </button>
           </div>
         </div>
 
-        {/* Заголовки */}
         <div className="flex flex-col mb-8">
           <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[32px] text-text-primary mb-2">
             Glossary
@@ -53,7 +47,6 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({ onClose }) => {
           </p>
         </div>
 
-        {/* Таблица */}
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden border border-border-default rounded-[8px] bg-secondary-main">
           <div className="flex-1 overflow-y-auto subtitle-table-scroll no-scrollbar">
             <table className="w-full border-collapse table-fixed">
@@ -72,7 +65,8 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({ onClose }) => {
                         type="text"
                         value={row.original}
                         onChange={(e) => handleUpdate(i, 'original', e.target.value)}
-                        className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-primary placeholder:opacity-30"
+                        // Заменили opacity-30 на text-text-secondary
+                        className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-primary placeholder:text-text-secondary/60"
                         placeholder="Type term..."
                       />
                     </td>
@@ -81,7 +75,8 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({ onClose }) => {
                         type="text"
                         value={row.translated}
                         onChange={(e) => handleUpdate(i, 'translated', e.target.value)}
-                        className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-primary placeholder:opacity-30"
+                        // Заменили opacity-30 на text-text-secondary
+                        className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-primary placeholder:text-text-secondary/60"
                         placeholder="Translation..."
                       />
                     </td>
@@ -90,7 +85,8 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({ onClose }) => {
                         type="text"
                         value={row.context}
                         onChange={(e) => handleUpdate(i, 'context', e.target.value)}
-                        className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-secondary placeholder:opacity-30"
+                        // Заменили opacity-30 на text-text-secondary
+                        className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-secondary placeholder:text-text-secondary/60"
                         placeholder="Optional context..."
                       />
                     </td>
@@ -101,7 +97,6 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({ onClose }) => {
           </div>
         </div>
 
-        {/* Футер */}
         <div className="flex justify-end mt-8">
           <button className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm">
             Save changes
