@@ -3,6 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { WelcomeModal } from './components/modals/WelcomeModal';
 import { NewProjectModal } from './components/modals/NewProjectModal';
+import { WizardModal } from './components/modals/WizardModal';
 import { ExportModal } from './components/modals/ExportModal';
 import { GlossaryModal } from './components/modals/GlossaryModal';
 
@@ -89,7 +90,8 @@ export default function App() {
 		| 'find'
 		| 'spellcheck';
 
-const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'glossary' | 'export' | null>('welcome');
+	const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | null>('welcome');
+	const openWizard = () => setActiveModal('wizard');
 	const openNewProject = () => setActiveModal('createProject');
 
 	useEffect(() => {
@@ -407,10 +409,11 @@ const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'gl
 
 						{/* Кнопка мастера в круге */}
 						<button 
-							title="Пошаговый мастер" 
-							className="w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-all shrink-0 my-[28px]"
+								onClick={openWizard} // Добавили клик
+								title="Пошаговый мастер" 
+								className="w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-all shrink-0 my-[28px]"
 						>
-							<div className="w-7 h-7 bg-surface-secondary/20 rounded-sm" />
+								<div className="w-7 h-7 bg-surface-secondary/20 rounded-sm" />
 						</button>
 
 						{/* Нижняя группа кнопок */}
@@ -1005,6 +1008,8 @@ const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'gl
 							/>
 						)}
 
+						{activeModal === 'wizard' && <WizardModal onClose={() => setActiveModal(null)} />}
+
 						{activeModal === 'glossary' && (
 							<GlossaryModal onClose={() => setActiveModal(null)} />
 						)}
@@ -1012,6 +1017,8 @@ const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'gl
 						{activeModal === 'export' && (
 							<ExportModal onClose={() => setActiveModal(null)} />
 						)}
+
+
 
 						
 

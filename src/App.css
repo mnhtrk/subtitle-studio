@@ -29,6 +29,8 @@
 
 	--color-inline-error: rgba(202, 0, 0, 0.15);
 	--color-inline-success: rgba(50, 215, 0, 0.15);
+
+	--color-progress-bar: #9FA3B0;
 	
 
   --font-inter: "Inter", sans-serif;
@@ -90,6 +92,8 @@
 
   --color-error-main: #ff6b7a;
   --color-success-main: #47c77a;
+
+	--color-progress-bar: #556074;
 
 	
 
