@@ -33,6 +33,7 @@
     "sql:allow-close",
 
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "dialog:allow-message"
   ]
 }

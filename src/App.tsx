@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { open } from '@tauri-apps/plugin-dialog';
+import { ask, open, message } from '@tauri-apps/plugin-dialog';
 import { 
   ChevronRight, 
   ChevronDown 
@@ -17,6 +17,11 @@ import { GlossaryModal } from './components/modals/GlossaryModal';
 const appWindow = getCurrentWindow();
 
 import { projectService, ProjectData, ProjectFile, SubtitleSegment } from './services/projectService';
+import {
+	deleteSegmentById,
+	insertEmptySegment,
+	splitSegmentAt
+} from './utils/subtitleSegmentsLocal';
 
 function formatSrtTime(seconds: number): string {
 	if (!Number.isFinite(seconds)) return '00:00:00,000';
@@ -38,6 +43,14 @@ function parseSrtTime(t: string): number | null {
 	const s = parseInt(m[3], 10);
 	const ms = parseInt(m[4].padEnd(3, '0').slice(0, 3), 10);
 	return h * 3600 + mi * 60 + s + ms / 1000;
+}
+
+function sanitizeSrtTimeInput(raw: string): string {
+	return raw.replace(/[^0-9:,.]/g, '');
+}
+
+function sanitizeDurationInput(raw: string): string {
+	return raw.replace(/[^0-9.,]/g, '');
 }
 
 function joinProjectPath(base: string, ...parts: string[]): string {
@@ -347,10 +360,9 @@ export default function App() {
 		t0: number;
 	} | null>(null);
 	const segmentBodyDragMovedRef = useRef(false);
+	const timelineRangeSelectDragRef = useRef<{ t0: number } | null>(null);
 	const undoSegmentsStackRef = useRef<SubtitleSegment[][]>([]);
 	const redoSegmentsStackRef = useRef<SubtitleSegment[][]>([]);
-	/** Все записи на диск строго по очереди: иначе при быстром Ctrl+Z save завершаются не по порядку и insert читает устаревший project.json */
-	const projectMutationChainRef = useRef<Promise<unknown>>(Promise.resolve());
 
 	const [videoDuration, setVideoDuration] = useState(0);
 	const [currentPlaybackTime, setCurrentPlaybackTime] = useState(0);
@@ -366,6 +378,23 @@ export default function App() {
 	const [segEditorOriginal, setSegEditorOriginal] = useState('');
 	const [segEditorStart, setSegEditorStart] = useState('');
 	const [segEditorDuration, setSegEditorDuration] = useState('');
+	/** Выделение ЛКМ на треке: превью при перетаскивании */
+	const [timelineRangePreview, setTimelineRangePreview] = useState<{ a: number; b: number } | null>(
+		null
+	);
+	/** Зафиксированный интервал для Insert (пустой субтитр на [start, end]) */
+	const [timelineInsertRange, setTimelineInsertRange] = useState<{
+		start: number;
+		end: number;
+	} | null>(null);
+
+	const projectDirtyRef = useRef(false);
+	const markProjectDirty = useCallback(() => {
+		projectDirtyRef.current = true;
+	}, []);
+	const clearProjectDirty = useCallback(() => {
+		projectDirtyRef.current = false;
+	}, []);
 
 	const activeVideoFile = useMemo(() => {
 		if (!currentProject) return null;
@@ -456,11 +485,6 @@ export default function App() {
 		return out;
 	}, [currentProject, projectDiskFiles]);
 
-	const selectedSegment =
-		selectedSegmentIndex >= 0 && generatedSegments[selectedSegmentIndex]
-			? generatedSegments[selectedSegmentIndex]
-			: null;
-
 	const editorSegmentSig = useMemo(() => {
 		const s =
 			selectedSegmentIndex >= 0 && selectedSegmentIndex < generatedSegments.length
@@ -488,26 +512,58 @@ export default function App() {
 		setSegEditorDuration(seg.duration.toFixed(3));
 	}, [editorSegmentSig, selectedSegmentIndex]);
 
-	const persistSegment = useCallback(
-		async (segment: SubtitleSegment) => {
-			if (!currentProject || !activeSubtitleFileId) return;
-			await projectService.updateSubtitleSegment(currentProject.path, activeSubtitleFileId, segment.id, {
-				text: segment.text,
-				translation: segment.translation ?? undefined,
-				start: segment.start,
-				end: segment.end
-			});
-		},
-		[currentProject, activeSubtitleFileId]
-	);
+	/** Без onBlur изменения остаются только в полях панели — синхронизируем в проект перед Save / Exit / сменой проекта. */
+	const flushSubtitleEditorToProject = useCallback(() => {
+		if (!activeSubtitleFileId || selectedSegmentIndex < 0) return;
+		const cp = currentProjectRef.current;
+		if (!cp) return;
+		const seg = segmentsRef.current[selectedSegmentIndex];
+		if (!seg) return;
 
-	/** Рабочая копия субтитров на диске srt; перезаписывается при правках. */
-	const exportSrtForActiveTrack = useCallback(async () => {
-		if (!currentProject || !activeSubtitleFileId) return;
-		const stem = getSourceVideoStem(currentProject, activeSubtitleFileId);
-		const out = joinProjectPath(currentProject.path, 'subtitles', `${stem}.srt`);
-		await projectService.exportSubtitles(currentProject.path, activeSubtitleFileId, 'srt', out);
-	}, [currentProject, activeSubtitleFileId]);
+		const st = parseSrtTime(segEditorStart);
+		const baseStart = st !== null ? st : seg.start;
+		const d = parseFloat(segEditorDuration.replace(',', '.'));
+		const end =
+			Number.isFinite(d) && d >= 0 ? baseStart + d : seg.end;
+
+		const text = segEditorOriginal;
+		const translation = segEditorTranslation;
+		const changed =
+			text !== seg.text ||
+			(translation ?? '') !== (seg.translation ?? '') ||
+			Math.abs(baseStart - seg.start) > 1e-6 ||
+			Math.abs(end - seg.end) > 1e-6;
+
+		if (!changed) return;
+
+		const next: SubtitleSegment = {
+			...seg,
+			text,
+			translation: translation || null,
+			start: baseStart,
+			end,
+			duration: Math.max(0, end - baseStart)
+		};
+		const nextList = segmentsRef.current.map((s, i) => (i === selectedSegmentIndex ? next : s));
+		const nextProject: ProjectData = {
+			...cp,
+			files: cp.files.map((f) =>
+				f.id === activeSubtitleFileId ? { ...f, subtitle_segments: nextList } : f
+			)
+		};
+		currentProjectRef.current = nextProject;
+		setCurrentProject(nextProject);
+		setGeneratedSegments(nextList);
+		markProjectDirty();
+	}, [
+		activeSubtitleFileId,
+		selectedSegmentIndex,
+		segEditorStart,
+		segEditorDuration,
+		segEditorOriginal,
+		segEditorTranslation,
+		markProjectDirty
+	]);
 
 	const exportSrtForProject = useCallback(async (project: ProjectData, fileId: string) => {
 		const stem = getSourceVideoStem(project, fileId);
@@ -515,11 +571,78 @@ export default function App() {
 		await projectService.exportSubtitles(project.path, fileId, 'srt', out);
 	}, []);
 
-	const enqueueProjectMutation = useCallback(<T,>(fn: () => Promise<T>): Promise<T> => {
-		const p = projectMutationChainRef.current.catch(() => undefined).then(() => fn());
-		projectMutationChainRef.current = p;
-		return p;
-	}, []);
+	const handleSaveProject = useCallback(async (): Promise<boolean> => {
+		flushSubtitleEditorToProject();
+		const cp = currentProjectRef.current;
+		if (!cp) return false;
+		try {
+			await projectService.save(cp);
+			for (const f of cp.files) {
+				if (f.file_type !== 'Subtitle') continue;
+				await exportSrtForProject(cp, f.id);
+			}
+			clearProjectDirty();
+			return true;
+		} catch (e) {
+			console.error('save project', e);
+			const detail = e instanceof Error ? e.message : String(e);
+			try {
+				await message(detail, { title: 'Ошибка сохранения', kind: 'error' });
+			} catch {
+				window.alert(`Ошибка сохранения: ${detail}`);
+			}
+			return false;
+		}
+	}, [clearProjectDirty, exportSrtForProject, flushSubtitleEditorToProject]);
+
+	const maybeSaveBeforeSwitchingProject = useCallback(async (): Promise<boolean> => {
+		flushSubtitleEditorToProject();
+		if (!projectDirtyRef.current) return true;
+		let saveFirst: boolean;
+		try {
+			saveFirst = await ask('В проекте есть несохранённые изменения. Сохранить перед продолжением?', {
+				title: 'Subtitle Studio',
+				kind: 'warning'
+			});
+		} catch {
+			saveFirst = window.confirm(
+				'В проекте есть несохранённые изменения. Сохранить перед продолжением?'
+			);
+		}
+		if (saveFirst) {
+			return await handleSaveProject();
+		}
+		return true;
+	}, [handleSaveProject, flushSubtitleEditorToProject]);
+
+	const handleExitProject = useCallback(async () => {
+		flushSubtitleEditorToProject();
+		if (currentProjectRef.current && projectDirtyRef.current) {
+			let saveFirst: boolean;
+			try {
+				saveFirst = await ask('Сохранить изменения перед закрытием проекта?', {
+					title: 'Subtitle Studio',
+					kind: 'warning'
+				});
+			} catch {
+				saveFirst = window.confirm('Сохранить изменения перед закрытием проекта?');
+			}
+			if (saveFirst) {
+				const ok = await handleSaveProject();
+				if (!ok) return;
+			}
+		}
+		setCurrentProject(null);
+		currentProjectRef.current = null;
+		setGeneratedSegments([]);
+		setActiveSubtitleFileId(null);
+		setSelectedSegmentIndex(-1);
+		undoSegmentsStackRef.current = [];
+		redoSegmentsStackRef.current = [];
+		clearProjectDirty();
+		setActiveMenu(null);
+		setActiveModal(null);
+	}, [handleSaveProject, clearProjectDirty, flushSubtitleEditorToProject]);
 
 	const pushSubtitleHistorySnapshot = useCallback(() => {
 		if (!activeSubtitleFileId) return;
@@ -529,7 +652,7 @@ export default function App() {
 	}, [activeSubtitleFileId]);
 
 	const applySubtitleSegmentsSnapshot = useCallback(
-		async (segments: SubtitleSegment[]) => {
+		(segments: SubtitleSegment[]) => {
 			if (!activeSubtitleFileId) return;
 			const cp = currentProjectRef.current;
 			if (!cp) return;
@@ -542,43 +665,34 @@ export default function App() {
 			currentProjectRef.current = nextProject;
 			setCurrentProject(nextProject);
 			setGeneratedSegments(segments);
-			try {
-				await projectService.save(nextProject);
-				await exportSrtForProject(nextProject, activeSubtitleFileId);
-			} catch (e) {
-				console.error('undo/redo persist', e);
-			}
+			markProjectDirty();
 			setSelectedSegmentIndex((idx) => {
 				if (segments.length === 0) return -1;
 				return Math.min(Math.max(0, idx), segments.length - 1);
 			});
 		},
-		[activeSubtitleFileId, exportSrtForProject]
+		[activeSubtitleFileId, markProjectDirty]
 	);
 
-	const performSubtitleUndo = useCallback(async () => {
+	const performSubtitleUndo = useCallback(() => {
 		if (!activeSubtitleFileId) return;
-		await enqueueProjectMutation(async () => {
-			const stack = undoSegmentsStackRef.current;
-			if (stack.length === 0) return;
-			const prev = stack.pop()!;
-			redoSegmentsStackRef.current.push(cloneSubtitleSegments(segmentsRef.current));
-			await applySubtitleSegmentsSnapshot(prev);
-		});
-	}, [activeSubtitleFileId, applySubtitleSegmentsSnapshot, enqueueProjectMutation]);
+		const stack = undoSegmentsStackRef.current;
+		if (stack.length === 0) return;
+		const prev = stack.pop()!;
+		redoSegmentsStackRef.current.push(cloneSubtitleSegments(segmentsRef.current));
+		applySubtitleSegmentsSnapshot(prev);
+	}, [activeSubtitleFileId, applySubtitleSegmentsSnapshot]);
 
-	const performSubtitleRedo = useCallback(async () => {
+	const performSubtitleRedo = useCallback(() => {
 		if (!activeSubtitleFileId) return;
-		await enqueueProjectMutation(async () => {
-			const stack = redoSegmentsStackRef.current;
-			if (stack.length === 0) return;
-			const next = stack.pop()!;
-			undoSegmentsStackRef.current.push(cloneSubtitleSegments(segmentsRef.current));
-			await applySubtitleSegmentsSnapshot(next);
-		});
-	}, [activeSubtitleFileId, applySubtitleSegmentsSnapshot, enqueueProjectMutation]);
+		const stack = redoSegmentsStackRef.current;
+		if (stack.length === 0) return;
+		const next = stack.pop()!;
+		undoSegmentsStackRef.current.push(cloneSubtitleSegments(segmentsRef.current));
+		applySubtitleSegmentsSnapshot(next);
+	}, [activeSubtitleFileId, applySubtitleSegmentsSnapshot]);
 
-	const handleDeleteSelectedSubtitle = useCallback(async () => {
+	const handleDeleteSelectedSubtitle = useCallback(() => {
 		if (!activeSubtitleFileId) return;
 		if (selectedSegmentIndex < 0) return;
 		const seg = segmentsRef.current[selectedSegmentIndex];
@@ -586,37 +700,83 @@ export default function App() {
 		const cp = currentProjectRef.current;
 		if (!cp) return;
 		pushSubtitleHistorySnapshot();
-		const projectPath = cp.path;
 		const fileId = activeSubtitleFileId;
 		const deletedIndex = selectedSegmentIndex;
 		try {
-			await enqueueProjectMutation(async () => {
-				const { segments } = await projectService.deleteSubtitleSegment(projectPath, fileId, seg.id);
-				const base = currentProjectRef.current;
-				if (!base) return;
-				const nextProject: ProjectData = {
-					...base,
-					files: base.files.map((f) =>
-						f.id === fileId ? { ...f, subtitle_segments: segments } : f
-					)
-				};
-				currentProjectRef.current = nextProject;
-				setGeneratedSegments(segments);
-				setCurrentProject(nextProject);
-				const newLen = segments.length;
-				if (newLen === 0) {
-					setSelectedSegmentIndex(-1);
-				} else {
-					setSelectedSegmentIndex(Math.min(deletedIndex, newLen - 1));
-				}
-				const stem = getSourceVideoStem(nextProject, fileId);
-				const out = joinProjectPath(nextProject.path, 'subtitles', `${stem}.srt`);
-				await projectService.exportSubtitles(nextProject.path, fileId, 'srt', out);
-			});
+			const segments = deleteSegmentById(segmentsRef.current, seg.id);
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === fileId ? { ...f, subtitle_segments: segments } : f
+				)
+			};
+			currentProjectRef.current = nextProject;
+			setGeneratedSegments(segments);
+			setCurrentProject(nextProject);
+			markProjectDirty();
+			const newLen = segments.length;
+			if (newLen === 0) {
+				setSelectedSegmentIndex(-1);
+			} else {
+				setSelectedSegmentIndex(Math.min(deletedIndex, newLen - 1));
+			}
 		} catch (e) {
-			console.error('deleteSubtitleSegment', e);
+			console.error('delete subtitle', e);
 		}
-	}, [activeSubtitleFileId, selectedSegmentIndex, pushSubtitleHistorySnapshot, enqueueProjectMutation]);
+	}, [activeSubtitleFileId, selectedSegmentIndex, pushSubtitleHistorySnapshot, markProjectDirty]);
+
+	const handleSelectProject = useCallback(async (path: string) => {
+		const canProceed = await maybeSaveBeforeSwitchingProject();
+		if (!canProceed) return;
+		try {
+			const projectData = await projectService.open(path);
+			undoSegmentsStackRef.current = [];
+			redoSegmentsStackRef.current = [];
+			setCurrentProject(projectData);
+			const firstFileWithSegments = projectData.files.find(
+				(file) => file.subtitle_segments && file.subtitle_segments.length > 0
+			);
+			const segs = firstFileWithSegments?.subtitle_segments ?? [];
+			setGeneratedSegments(segs);
+			setActiveSubtitleFileId(firstFileWithSegments?.id ?? null);
+			setSelectedSegmentIndex(segs.length > 0 ? 0 : -1);
+			setActiveModal(null);
+			clearProjectDirty();
+		} catch (error: unknown) {
+			console.error('open project', error);
+			const detail =
+				typeof error === 'string'
+					? error
+					: error instanceof Error
+						? error.message
+						: String(error);
+			try {
+				await message(
+					`Укажите папку проекта Subtitle Studio — в корне должен быть файл project.json. Обычная папка без него не подойдёт.\n\n${detail}`,
+					{ title: 'Не удалось открыть проект', kind: 'error' }
+				);
+			} catch {
+				window.alert(
+					`Не удалось открыть проект. Нужна папка с project.json.\n\n${detail}`
+				);
+			}
+		}
+	}, [maybeSaveBeforeSwitchingProject, clearProjectDirty]);
+
+	const handleOpenProjectDialog = useCallback(async () => {
+		try {
+			const selected = await open({
+				directory: true,
+				multiple: false,
+				title: 'Открыть папку проекта'
+			});
+			if (selected && typeof selected === 'string') {
+				await handleSelectProject(selected);
+			}
+		} catch (e) {
+			console.error('open project dialog', e);
+		}
+	}, [handleSelectProject]);
 
 	const menuItems = useMemo(
 		() => [
@@ -624,9 +784,9 @@ export default function App() {
 				label: 'File',
 				items: [
 					{ label: 'New Project', action: () => setActiveModal('createProject') },
-					{ label: 'Open Project' },
-					{ label: 'Save' },
-					{ label: 'Exit' },
+					{ label: 'Open Project', action: () => void handleOpenProjectDialog() },
+					{ label: 'Save', action: () => void handleSaveProject() },
+					{ label: 'Exit', action: () => void handleExitProject() },
 				],
 			},
 			{
@@ -652,50 +812,65 @@ export default function App() {
 				],
 			},
 		],
-		[performSubtitleUndo, performSubtitleRedo, handleDeleteSelectedSubtitle, isDarkTheme]
+		[
+			performSubtitleUndo,
+			performSubtitleRedo,
+			handleDeleteSelectedSubtitle,
+			isDarkTheme,
+			handleOpenProjectDialog,
+			handleSaveProject,
+			handleExitProject
+		]
 	);
 
 	const updateSegmentAtIndex = useCallback(
-		async (
-			index: number,
-			patch: Partial<SubtitleSegment>,
-			opts?: { skipHistory?: boolean }
-		) => {
-			if (!currentProject || !activeSubtitleFileId || index < 0) return;
-			const seg = generatedSegments[index];
+		(index: number, patch: Partial<SubtitleSegment>, opts?: { skipHistory?: boolean }) => {
+			if (!activeSubtitleFileId || index < 0) return;
+			const cp = currentProjectRef.current;
+			if (!cp) return;
+			const segs = segmentsRef.current;
+			const seg = segs[index];
 			if (!seg) return;
 			if (!opts?.skipHistory) pushSubtitleHistorySnapshot();
 			let next: SubtitleSegment = { ...seg, ...patch };
 			if (patch.start !== undefined || patch.end !== undefined) {
 				next.duration = Math.max(0, next.end - next.start);
 			}
-			const nextList = generatedSegments.map((s, i) => (i === index ? next : s));
-			setGeneratedSegments(nextList);
-			setCurrentProject({
-				...currentProject,
-				files: currentProject.files.map((f) =>
+			const nextList = segs.map((s, i) => (i === index ? next : s));
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
 					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: nextList } : f
 				)
-			});
-			await enqueueProjectMutation(async () => {
-				await persistSegment(next);
-				try {
-					await exportSrtForActiveTrack();
-				} catch (e) {
-					console.error('SRT export failed', e);
-				}
-			});
+			};
+			currentProjectRef.current = nextProject;
+			setCurrentProject(nextProject);
+			setGeneratedSegments(nextList);
+			markProjectDirty();
 		},
-		[
-			currentProject,
-			activeSubtitleFileId,
-			generatedSegments,
-			persistSegment,
-			exportSrtForActiveTrack,
-			pushSubtitleHistorySnapshot,
-			enqueueProjectMutation
-		]
+		[activeSubtitleFileId, pushSubtitleHistorySnapshot, markProjectDirty]
 	);
+
+	const commitSegEditorStart = useCallback(() => {
+		if (selectedSegmentIndex < 0) return;
+		const t = parseSrtTime(segEditorStart);
+		if (t === null) return;
+		const seg = generatedSegments[selectedSegmentIndex];
+		if (!seg) return;
+		const dur = seg.end - seg.start;
+		void updateSegmentAtIndex(selectedSegmentIndex, { start: t, end: t + dur });
+	}, [selectedSegmentIndex, segEditorStart, generatedSegments, updateSegmentAtIndex]);
+
+	const commitSegEditorDuration = useCallback(() => {
+		if (selectedSegmentIndex < 0) return;
+		const d = parseFloat(segEditorDuration.replace(',', '.'));
+		if (!Number.isFinite(d) || d < 0) return;
+		const seg = generatedSegments[selectedSegmentIndex];
+		if (!seg) return;
+		const st = parseSrtTime(segEditorStart);
+		const baseStart = st !== null ? st : seg.start;
+		void updateSegmentAtIndex(selectedSegmentIndex, { end: baseStart + d });
+	}, [selectedSegmentIndex, segEditorDuration, segEditorStart, generatedSegments, updateSegmentAtIndex]);
 
 	/* Клик по видео/таймлайну не забирает фокус с input/textarea */
 	useEffect(() => {
@@ -716,48 +891,89 @@ export default function App() {
 		return () => document.removeEventListener('pointerdown', onPointerDown, true);
 	}, []);
 
-	const handleTimelineInsert = useCallback(async () => {
-		if (!currentProject || !activeSubtitleFileId) return;
+	const handleTimelineInsert = useCallback(() => {
+		const cp = currentProjectRef.current;
+		if (!cp || !activeSubtitleFileId) return;
 		const td = Math.max(timelineTotalDuration, MIN_SEGMENT_DURATION);
-		let start = Math.max(0, Math.min(currentPlaybackTime, td - MIN_SEGMENT_DURATION));
-		let end = Math.min(start + 1, td);
+		let start: number;
+		let end: number;
+		if (timelineInsertRange) {
+			start = Math.max(0, Math.min(timelineInsertRange.start, td - MIN_SEGMENT_DURATION));
+			end = Math.max(start + MIN_SEGMENT_DURATION, Math.min(timelineInsertRange.end, td));
+		} else {
+			start = Math.max(0, Math.min(currentPlaybackTime, td - MIN_SEGMENT_DURATION));
+			end = Math.min(start + 1, td);
+		}
 		if (end - start < MIN_SEGMENT_DURATION) return;
 		pushSubtitleHistorySnapshot();
-		const projectPath = currentProject.path;
 		const fileId = activeSubtitleFileId;
 		try {
-			await enqueueProjectMutation(async () => {
-				const { segments, inserted_id } = await projectService.insertSubtitleSegment(
-					projectPath,
-					fileId,
-					start,
-					end
-				);
-				const nextProject: ProjectData = {
-					...currentProject,
-					files: currentProject.files.map((f) =>
-						f.id === fileId ? { ...f, subtitle_segments: segments } : f
-					)
-				};
-				setGeneratedSegments(segments);
-				setCurrentProject(nextProject);
-				const newIdx = segments.findIndex((s) => s.id === inserted_id);
-				if (newIdx >= 0) setSelectedSegmentIndex(newIdx);
-				const stem = getSourceVideoStem(nextProject, fileId);
-				const out = joinProjectPath(nextProject.path, 'subtitles', `${stem}.srt`);
-				await projectService.exportSubtitles(nextProject.path, fileId, 'srt', out);
-			});
+			const { segments, insertedId } = insertEmptySegment(segmentsRef.current, start, end);
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === fileId ? { ...f, subtitle_segments: segments } : f
+				)
+			};
+			currentProjectRef.current = nextProject;
+			setGeneratedSegments(segments);
+			setCurrentProject(nextProject);
+			setTimelineInsertRange(null);
+			const newIdx = segments.findIndex((s) => s.id === insertedId);
+			if (newIdx >= 0) setSelectedSegmentIndex(newIdx);
+			markProjectDirty();
 		} catch (e) {
-			console.error('insertSubtitleSegment', e);
+			console.error('insert subtitle', e);
 		}
 	}, [
-		currentProject,
 		activeSubtitleFileId,
 		timelineTotalDuration,
 		currentPlaybackTime,
+		timelineInsertRange,
 		pushSubtitleHistorySnapshot,
-		enqueueProjectMutation
+		markProjectDirty
 	]);
+
+	const handleTimelineSplit = useCallback(() => {
+		const cp0 = currentProjectRef.current;
+		if (!cp0 || !activeSubtitleFileId) return;
+		const t = currentPlaybackTime;
+		const segs = segmentsRef.current;
+		const idx = segs.findIndex(
+			(s) => t > s.start + MIN_SEGMENT_DURATION && t < s.end - MIN_SEGMENT_DURATION
+		);
+		if (idx < 0) return;
+		const seg = segs[idx];
+		const splitT = Math.max(
+			seg.start + MIN_SEGMENT_DURATION,
+			Math.min(t, seg.end - MIN_SEGMENT_DURATION)
+		);
+		const origStart = seg.start;
+
+		pushSubtitleHistorySnapshot();
+		const fileId = activeSubtitleFileId;
+
+		try {
+			const merged = splitSegmentAt(segs, idx, splitT);
+			const nextProject: ProjectData = {
+				...cp0,
+				files: cp0.files.map((f) =>
+					f.id === fileId ? { ...f, subtitle_segments: merged } : f
+				)
+			};
+			currentProjectRef.current = nextProject;
+			setCurrentProject(nextProject);
+			setGeneratedSegments(merged);
+			markProjectDirty();
+			const firstIdx = merged.findIndex(
+				(s) =>
+					Math.abs(s.start - origStart) < 1e-3 && Math.abs(s.end - splitT) < 1e-3
+			);
+			if (firstIdx >= 0) setSelectedSegmentIndex(firstIdx);
+		} catch (e) {
+			console.error('split subtitle', e);
+		}
+	}, [activeSubtitleFileId, currentPlaybackTime, pushSubtitleHistorySnapshot, markProjectDirty]);
 
 	const handleTimelineSetStart = useCallback(() => {
 		if (selectedSegmentIndex < 0) return;
@@ -826,6 +1042,61 @@ export default function App() {
 		if (w <= 0 || td <= 0) return 0;
 		return Math.max(0, Math.min(td, (x / w) * td));
 	}, []);
+
+	const beginTimelineRangeSelect = useCallback(
+		(e: React.PointerEvent) => {
+			if (e.button !== 0) return;
+			const el = e.target as HTMLElement;
+			if (el.closest('[data-tl-segment]')) return;
+			if (el.closest('[data-tl-edge]')) return;
+			e.preventDefault();
+			setTimelineInsertRange(null);
+			const t0 = clientXToTimelineTime(e.clientX);
+			timelineRangeSelectDragRef.current = { t0 };
+			setTimelineRangePreview({ a: t0, b: t0 });
+
+			const onMove = (ev: PointerEvent) => {
+				if (!timelineRangeSelectDragRef.current) return;
+				const t = clientXToTimelineTime(ev.clientX);
+				const d = timelineRangeSelectDragRef.current;
+				setTimelineRangePreview({ a: d.t0, b: t });
+			};
+			const onUp = (ev: PointerEvent) => {
+				window.removeEventListener('pointermove', onMove);
+				window.removeEventListener('pointerup', onUp);
+				const d = timelineRangeSelectDragRef.current;
+				timelineRangeSelectDragRef.current = null;
+				const t0 = d?.t0 ?? clientXToTimelineTime(ev.clientX);
+				const t1 = clientXToTimelineTime(ev.clientX);
+				setTimelineRangePreview(null);
+				const td = timelineTotalDurationRef.current;
+				const lo = Math.min(t0, t1);
+				const hi = Math.max(t0, t1);
+				if (hi - lo >= MIN_SEGMENT_DURATION) {
+					setTimelineInsertRange({ start: lo, end: hi });
+					setCurrentPlaybackTime(lo);
+					const v = videoRef.current;
+					if (v) v.currentTime = lo;
+				} else {
+					setTimelineInsertRange(null);
+					const seekT = Math.max(0, Math.min(td, t1));
+					setCurrentPlaybackTime(seekT);
+					const v = videoRef.current;
+					if (v) v.currentTime = seekT;
+				}
+			};
+			window.addEventListener('pointermove', onMove);
+			window.addEventListener('pointerup', onUp);
+		},
+		[clientXToTimelineTime]
+	);
+
+	const canSplitAtPlayhead = useMemo(() => {
+		const t = currentPlaybackTime;
+		return generatedSegments.some(
+			(s) => t > s.start + MIN_SEGMENT_DURATION && t < s.end - MIN_SEGMENT_DURATION
+		);
+	}, [generatedSegments, currentPlaybackTime]);
 
 	const beginTimelineEdgeDrag = useCallback(
 		(edge: 'start' | 'end', index: number, ev: React.MouseEvent) => {
@@ -985,6 +1256,17 @@ export default function App() {
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
 	}, [activeModal, activeSubtitleFileId, selectedSegmentIndex, handleDeleteSelectedSubtitle]);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key !== 'Escape') return;
+			setTimelineInsertRange(null);
+			setTimelineRangePreview(null);
+			timelineRangeSelectDragRef.current = null;
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	}, []);
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
@@ -1491,40 +1773,6 @@ export default function App() {
 		window.addEventListener('mouseup', stopDrag);
 	}, [colWidths]);
 
-
-	const handleSelectProject = async (path: string) => {
-		try {
-			// Вызываем открытие через наш сервис
-			const projectData = await projectService.open(path);
-			setCurrentProject(projectData);
-			const firstFileWithSegments = projectData.files.find((file) => file.subtitle_segments && file.subtitle_segments.length > 0);
-			const segs = firstFileWithSegments?.subtitle_segments ?? [];
-			setGeneratedSegments(segs);
-			setActiveSubtitleFileId(firstFileWithSegments?.id ?? null);
-			setSelectedSegmentIndex(segs.length > 0 ? 0 : -1);
-			setActiveModal(null); 
-			console.log("Проект успешно открыт:", path);
-		} catch (error) {
-			console.error("Ошибка при открытии проекта:", error);
-		}
-	};
-
-	const handleOpenProjectDialog = async () => {
-		try {
-			const selected = await open({
-				directory: true,
-				multiple: false,
-				title: 'Open Project Folder'
-			});
-
-			if (selected && typeof selected === 'string') {
-				await handleSelectProject(selected);
-			}
-		} catch (error) {
-			console.error("Ошибка выбора проекта:", error);
-		}
-	};
-
 	const handleProjectCreated = async (project: ProjectData) => {
 		try {
 			await handleSelectProject(project.path);
@@ -1639,11 +1887,22 @@ export default function App() {
 									<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 							
-							<button title="Открыть проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
+							<button
+								type="button"
+								title="Открыть проект"
+								onClick={() => void handleOpenProjectDialog()}
+								className="group w-7 h-7 flex items-center justify-center shrink-0"
+							>
 								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 							
-							<button title="Сохранить проект" className="group w-7 h-7 flex items-center justify-center shrink-0">
+							<button
+								type="button"
+								title="Сохранить проект"
+								onClick={() => void handleSaveProject()}
+								disabled={!currentProject}
+								className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
+							>
 								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 							</button>
 						</div>
@@ -2029,13 +2288,18 @@ export default function App() {
 										<div className="flex flex-col gap-[4px]">
 											<label className="text-caption text-text-primary">Start time</label>
 											<input 
-												type="text" 
+												type="text"
+												inputMode="text"
+												autoComplete="off"
+												spellCheck={false}
 												value={segEditorStart}
-												onChange={(e) => setSegEditorStart(e.target.value)}
-												onBlur={() => {
-													if (selectedSegmentIndex < 0) return;
-													const t = parseSrtTime(segEditorStart);
-													if (t !== null) void updateSegmentAtIndex(selectedSegmentIndex, { start: t });
+												onChange={(e) => setSegEditorStart(sanitizeSrtTimeInput(e.target.value))}
+												onBlur={commitSegEditorStart}
+												onKeyDown={(e) => {
+													if (e.key === 'Enter') {
+														e.preventDefault();
+														e.currentTarget.blur();
+													}
 												}}
 												className="w-[100px] h-[24px] bg-surface-secondary border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
 											/>
@@ -2043,18 +2307,18 @@ export default function App() {
 										<div className="flex flex-col gap-[4px]">
 											<label className="text-caption text-text-primary">Duration</label>
 											<input 
-												type="text" 
+												type="text"
+												inputMode="decimal"
+												autoComplete="off"
+												spellCheck={false}
 												value={segEditorDuration}
-												onChange={(e) => setSegEditorDuration(e.target.value)}
-												onBlur={() => {
-													if (selectedSegmentIndex < 0 || !selectedSegment) return;
-													const d = parseFloat(segEditorDuration.replace(',', '.'));
-													if (!Number.isFinite(d) || d < 0) return;
-													const st = parseSrtTime(segEditorStart);
-													const baseStart = st !== null ? st : selectedSegment.start;
-													void updateSegmentAtIndex(selectedSegmentIndex, {
-														end: baseStart + d
-													});
+												onChange={(e) => setSegEditorDuration(sanitizeDurationInput(e.target.value))}
+												onBlur={commitSegEditorDuration}
+												onKeyDown={(e) => {
+													if (e.key === 'Enter') {
+														e.preventDefault();
+														e.currentTarget.blur();
+													}
 												}}
 												className="w-[76px] h-[24px] bg-surface-secondary border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
 											/>
@@ -2319,6 +2583,11 @@ export default function App() {
 								<button
 									type="button"
 									disabled={!currentProject || !activeSubtitleFileId}
+									title={
+										timelineInsertRange
+											? `Insert empty subtitle ${timelineInsertRange.start.toFixed(2)}s – ${timelineInsertRange.end.toFixed(2)}s (or clear with Esc)`
+											: 'Insert empty subtitle at playhead (default 1s), or drag on the timeline to set range'
+									}
 									onClick={() => void handleTimelineInsert()}
 									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
 								>
@@ -2340,6 +2609,15 @@ export default function App() {
 								>
 									Set end
 								</button>
+								<button
+									type="button"
+									disabled={!currentProject || !activeSubtitleFileId || !canSplitAtPlayhead}
+									title="Split selected subtitle at the playhead (both parts keep the same text)"
+									onClick={() => void handleTimelineSplit()}
+									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+								>
+									Split
+								</button>
 							</div>
 
 							{/* основная зона таймлайна (wheel: горизонтальный скролл; Alt+wheel: зум) */}
@@ -2352,22 +2630,9 @@ export default function App() {
 								>
 									<div
 										ref={timelineInnerRef}
-										className="relative h-full min-h-0"
+										className="relative h-full min-h-0 select-none"
 										style={{ width: `${Math.max(100, timelineZoomPercent)}%` }}
-										onClick={(e) => {
-											const inner = timelineInnerRef.current;
-											const scr = timelineScrollRef.current;
-											if (!inner || !scr || timelineTotalDuration <= 0) return;
-											if ((e.target as HTMLElement).closest('[data-tl-segment]')) return;
-											if ((e.target as HTMLElement).closest('[data-tl-edge]')) return;
-											const scrRect = scr.getBoundingClientRect();
-											const x = e.clientX - scrRect.left + scr.scrollLeft;
-											const ratio = Math.max(0, Math.min(1, x / inner.offsetWidth));
-											const t = ratio * timelineTotalDuration;
-											const v = videoRef.current;
-											if (v) v.currentTime = t;
-											setCurrentPlaybackTime(t);
-										}}
+										onPointerDown={beginTimelineRangeSelect}
 									>
 										{/* Сетка */}
 										<div
@@ -2377,6 +2642,37 @@ export default function App() {
 												backgroundSize: '20px 20px'
 											}}
 										/>
+										{(() => {
+											const td = timelineTotalDuration;
+											if (td <= 0) return null;
+											if (timelineRangePreview) {
+												const lo = Math.min(timelineRangePreview.a, timelineRangePreview.b);
+												const hi = Math.max(timelineRangePreview.a, timelineRangePreview.b);
+												const left = (lo / td) * 100;
+												const w = Math.max(((hi - lo) / td) * 100, 0.04);
+												return (
+													<div
+														className="absolute top-0 bottom-0 z-[8] rounded-sm bg-primary-main/30 pointer-events-none"
+														style={{ left: `${left}%`, width: `${w}%` }}
+													/>
+												);
+											}
+											if (
+												timelineInsertRange &&
+												timelineInsertRange.end - timelineInsertRange.start >= MIN_SEGMENT_DURATION
+											) {
+												const { start: rs, end: re } = timelineInsertRange;
+												const left = (rs / td) * 100;
+												const w = ((re - rs) / td) * 100;
+												return (
+													<div
+														className="absolute top-0 bottom-0 z-[8] rounded-sm bg-primary-main/25 pointer-events-none"
+														style={{ left: `${left}%`, width: `${w}%` }}
+													/>
+												);
+											}
+											return null;
+										})()}
 
 										{/* Волна: PNG (showwavespic) или canvas по пикам */}
 										{waveformImageSrc ? (
