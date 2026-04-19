@@ -1,6 +1,13 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { open } from '@tauri-apps/plugin-dialog';
+import { 
+  ChevronRight, 
+  ChevronDown 
+} from 'lucide-react';
 
+// компоненты модальных окон
 import { WelcomeModal } from './components/modals/WelcomeModal';
 import { NewProjectModal } from './components/modals/NewProjectModal';
 import { WizardModal } from './components/modals/WizardModal';
@@ -9,28 +16,231 @@ import { GlossaryModal } from './components/modals/GlossaryModal';
 
 const appWindow = getCurrentWindow();
 
-import { 
-  FilePlus2, 
-  FolderPlus, 
-  ChevronRight, 
-  ChevronDown 
-} from 'lucide-react';
+import { projectService, ProjectData, ProjectFile, SubtitleSegment } from './services/projectService';
 
+function formatSrtTime(seconds: number): string {
+	if (!Number.isFinite(seconds)) return '00:00:00,000';
+	const totalMs = Math.round(seconds * 1000);
+	const ms = totalMs % 1000;
+	const totalSec = Math.floor(totalMs / 1000);
+	const s = totalSec % 60;
+	const totalMin = Math.floor(totalSec / 60);
+	const m = totalMin % 60;
+	const h = Math.floor(totalMin / 60);
+	return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+}
+
+function parseSrtTime(t: string): number | null {
+	const m = t.trim().match(/^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$/);
+	if (!m) return null;
+	const h = parseInt(m[1], 10);
+	const mi = parseInt(m[2], 10);
+	const s = parseInt(m[3], 10);
+	const ms = parseInt(m[4].padEnd(3, '0').slice(0, 3), 10);
+	return h * 3600 + mi * 60 + s + ms / 1000;
+}
+
+function joinProjectPath(base: string, ...parts: string[]): string {
+	const a = base.replace(/[/\\]+$/, '');
+	const rest = parts.map((p) => p.replace(/^[/\\]+/, '').replace(/\\/g, '/')).join('/');
+	return `${a}/${rest}`;
+}
+
+function getSourceVideoStem(project: ProjectData, activeFileId: string | null): string {
+	if (!activeFileId) return 'subtitles';
+	const track = project.files.find((f) => f.id === activeFileId);
+	if (track?.file_type === 'Video') {
+		return track.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
+	}
+	const vid = project.files.find((f) => f.file_type === 'Video');
+	if (vid) return vid.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
+	return track?.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
+}
+
+function mergeProjectFilesWithDisk(
+	projectFiles: ProjectFile[],
+	disk: { relative_path: string; name: string }[]
+): ProjectFile[] {
+	const seen = new Set(projectFiles.map((f) => f.path.replace(/\\/g, '/').toLowerCase()));
+	const extra: ProjectFile[] = [];
+	for (const d of disk) {
+		const key = d.relative_path.replace(/\\/g, '/').toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		const folder = d.relative_path.split('/')[0]?.toLowerCase() ?? '';
+		const file_type: ProjectFile['file_type'] =
+			folder === 'video' ? 'Video' : folder === 'subtitles' ? 'Subtitle' : 'Config';
+		extra.push({
+			id: `disk:${d.relative_path}`,
+			name: d.name,
+			file_type,
+			path: d.relative_path,
+			duration: null,
+			subtitle_segments: null,
+			created_at: '',
+			updated_at: ''
+		});
+	}
+	return [...projectFiles, ...extra];
+}
+
+function formatPlaybackClock(seconds: number): string {
+	if (!Number.isFinite(seconds) || seconds < 0) return '00:00:00';
+	const h = Math.floor(seconds / 3600);
+	const m = Math.floor((seconds % 3600) / 60);
+	const s = Math.floor(seconds % 60);
+	const ms = Math.floor((seconds % 1) * 1000);
+	return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+}
+
+const MIN_SEGMENT_DURATION = 0.05;
+
+/** Симметричная «настоящая» волна по массиву пиков (как в аудиоредакторах). */
+function TimelineSymmetricWaveform({
+	peaks,
+	className
+}: {
+	peaks: number[] | null;
+	className?: string;
+}) {
+	const wrapRef = useRef<HTMLDivElement>(null);
+	const canvasRef = useRef<HTMLCanvasElement>(null);
+
+	useLayoutEffect(() => {
+		const wrap = wrapRef.current;
+		const canvas = canvasRef.current;
+		if (!wrap || !canvas) return;
+
+		let rafTries = 0;
+		const draw = () => {
+			const w = wrap.clientWidth;
+			const h = wrap.clientHeight;
+			if (w < 2 || h < 4) {
+				if (rafTries < 24) {
+					rafTries += 1;
+					requestAnimationFrame(draw);
+				}
+				return;
+			}
+
+			const dpr = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 2);
+			canvas.width = Math.floor(w * dpr);
+			canvas.height = Math.floor(h * dpr);
+			canvas.style.width = `${w}px`;
+			canvas.style.height = `${h}px`;
+
+			const ctx = canvas.getContext('2d');
+			if (!ctx) return;
+			ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+			ctx.clearRect(0, 0, w, h);
+
+			const mid = h / 2;
+			const maxHalf = Math.max(2, mid - 1);
+			const ampGain = 1.42;
+
+			if (!peaks || peaks.length === 0) {
+				ctx.strokeStyle = 'rgba(173, 255, 47, 0.35)';
+				ctx.lineWidth = 1;
+				ctx.beginPath();
+				ctx.moveTo(0, mid);
+				ctx.lineTo(w, mid);
+				ctx.stroke();
+				return;
+			}
+
+			let mx = 0;
+			for (let i = 0; i < peaks.length; i++) {
+				const a = Math.abs(peaks[i]);
+				if (a > mx) mx = a;
+			}
+			const norm = mx > 1e-9 ? 1 / mx : 1;
+
+			const n = peaks.length;
+			ctx.fillStyle = '#ADFF2F';
+			for (let col = 0; col < w; col++) {
+				const t = w <= 1 ? 0 : col / (w - 1);
+				const idx = t * (n - 1);
+				const i0 = Math.floor(idx);
+				const i1 = Math.min(n - 1, i0 + 1);
+				const f = idx - i0;
+				const v = Math.abs((1 - f) * peaks[i0] + f * peaks[i1]) * norm;
+				const amp = Math.min(maxHalf, v * maxHalf * ampGain);
+				const half = Math.max(1, amp);
+				ctx.fillRect(col, mid - half, 1, half * 2);
+			}
+		};
+
+		draw();
+		const ro = new ResizeObserver(() => {
+			rafTries = 0;
+			draw();
+		});
+		ro.observe(wrap);
+		return () => ro.disconnect();
+	}, [peaks]);
+
+	return (
+		<div
+			ref={wrapRef}
+			className={
+				className ??
+				'absolute inset-x-0 top-[5%] bottom-[5%] w-full pointer-events-none'
+			}
+		>
+			<canvas ref={canvasRef} className="block h-full w-full min-h-0" aria-hidden />
+		</div>
+	);
+}
+
+/** Пробел не должен запускать видео, когда фокус в поле ввода, слайдере и т.п. */
+function shouldIgnoreSpacebarForVideo(target: EventTarget | null): boolean {
+	if (!target || !(target instanceof Element)) return false;
+	const el = target as HTMLElement;
+	if (el.isContentEditable) return true;
+	const tag = el.tagName;
+	if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+	if (el.closest('[contenteditable="true"]')) return true;
+	/* range / number inputs часто используют пробел */
+	if (el.closest('input[type="range"], [role="slider"]')) return true;
+	return false;
+}
+
+// константы ограничений интерфейса
 const LIMITS = {
   SIDEBAR: 60,
   PROJECT_TREE: { MIN: 150, MAX: 250 },
   AI_AGENT: { MIN: 280, MAX: 400 },
   TABLE: 300,
-  VIDEO: 400,
+  /** Минимальная ширина колонки видео (контролы переносятся — можно уже прежних ~400px) */
+  VIDEO: 220,
 };
+
+const TIMELINE_ZOOM_PRESETS = [50, 75, 90, 100, 120, 150, 200, 300, 400] as const;
+
+function stepTimelineZoom(current: number, direction: 1 | -1): number {
+	const sorted = [...TIMELINE_ZOOM_PRESETS];
+	let bestI = 0;
+	let bestD = Infinity;
+	for (let i = 0; i < sorted.length; i++) {
+		const d = Math.abs(sorted[i] - current);
+		if (d < bestD) {
+			bestD = d;
+			bestI = i;
+		}
+	}
+	const nextI = Math.min(sorted.length - 1, Math.max(0, bestI + direction));
+	return sorted[nextI];
+}
 
 export default function App() {
 
+	// СОСТОЯНИЕ ОКНА И РАЗМЕРОВ ЭКРАНА 
 	const [windowSize, setWindowSize] = useState({
 		width: window.innerWidth,
 		height: window.innerHeight
 	});
 
+	// отслеживание изменения размера окна браузера
 	useEffect(() => {
 		const handleResize = () => {
 			setWindowSize({
@@ -38,12 +248,11 @@ export default function App() {
 				height: window.innerHeight
 			});
 		};
-
 		window.addEventListener('resize', handleResize);
-
 		return () => window.removeEventListener('resize', handleResize);
 	}, []);
 
+	// отслеживание изменения размера окна через tauri
 	useEffect(() => {
 		const unlisten = appWindow.listen('tauri://resize', () => {
 			setWindowSize({
@@ -51,70 +260,37 @@ export default function App() {
 				height: window.innerHeight
 			});
 		});
-
 		return () => {
 			unlisten.then(f => f());
 		};
 	}, []);
 
+	// СОСТОЯНИЕ ПАНЕЛЕЙ И ИНТЕРФЕЙСА
+	const [projectTreeWidth, setProjectTreeWidth] = useState(240); // ширина иерархии файлов
+	const [aiAgentWidth, setAiAgentWidth] = useState(320); // ширина панели с агентом
+	const [tablePanelWidth, setTablePanelWidth] = useState(800); // ширина таблицы
+	const [upperSectionHeight, setUpperSectionHeight] = useState(450); // высота верхней части (таблица + плеер)
+	const [colWidths, setColWidths] = useState([50, 120, 120, 100]); // ширины колонок таблицы
 
-	// начальные размеры и статусы
-	const [projectTreeWidth, setProjectTreeWidth] = useState(240); // начальная ширина иерархия файлов
-	const [isResizing, setIsResizing] = useState(false); //проверка тянушки
-	const [isVideoFolderOpen, setIsVideoFolderOpen] = useState(true); //проверка открытой папки
-	const [aiAgentWidth, setAiAgentWidth] = useState(320); // Начальная ширина панели с агентом
-	const [isAiAgentResizing, setIsAiAgentResizing] = useState(false); //проверка тянушки агента
+	const [isResizing, setIsResizing] = useState(false); // состояние ресайза дерева проекта
+	const [isAiAgentResizing, setIsAiAgentResizing] = useState(false); // состояние ресайза агента
+	const [isVideoFolderOpen, setIsVideoFolderOpen] = useState(true); // открыта ли папка в дереве
 
-	const [tablePanelWidth, setTablePanelWidth] = useState(800); //размер таблицы
-  const [upperSectionHeight, setUpperSectionHeight] = useState(450); //высота панели таблицы и плеера
+	// --- ТЕМА И МЕНЮ ---
+	const [isDarkTheme, setIsDarkTheme] = useState(() => {
+		const saved = localStorage.getItem('theme');
+		return saved === 'dark';
+	});
 
-	// Стейт для ширин первых 4-х фиксированных колонок
-  const [colWidths, setColWidths] = useState([50, 120, 120, 100]);
-
-	// состояние для выпадающих списков верхнего меню
 	const [activeMenu, setActiveMenu] = useState<string | null>(null);
 
-	type ModalType =
-		| null
-		| 'welcome'
-		| 'newProject'
-		| 'wizardStep1'
-		| 'wizardStep2'
-		| 'wizardStep3'
-		| 'wizardStep4'
-		| 'wizardStep5'
-		| 'wizardStep6'
-		| 'wizardStep7'
-		| 'glossary'
-		| 'export'
-		| 'find'
-		| 'spellcheck';
-
-	const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | null>('welcome');
-	const openWizard = () => setActiveModal('wizard');
-	const openNewProject = () => setActiveModal('createProject');
-
+	// применение темы
 	useEffect(() => {
-		setActiveModal('welcome');
-	}, []);
+		document.documentElement.classList.toggle('dark', isDarkTheme);
+		localStorage.setItem('theme', isDarkTheme ? 'dark' : 'light');
+	}, [isDarkTheme]);
 
-
-	// системные функции для управления окном через таури
-	const handleMinimize = async () => {
-		await appWindow.minimize();
-	};
-
-	const handleMaximize = async () => {
-		await appWindow.toggleMaximize();
-	};
-
-	const handleClose = async () => {
-		await appWindow.close();
-	};
-
-	
-
-	// Добавить эффект для закрытия меню при клике вне его
+	// закрытие меню при клике вне его
 	useEffect(() => {
 		const handleClickOutside = () => setActiveMenu(null);
 		if (activeMenu) {
@@ -123,17 +299,7 @@ export default function App() {
 		return () => window.removeEventListener('click', handleClickOutside);
 	}, [activeMenu]);
 
-	const [isDarkTheme, setIsDarkTheme] = useState(() => {
-		const saved = localStorage.getItem('theme');
-		return saved === 'dark';
-	});
-
-	useEffect(() => {
-		document.documentElement.classList.toggle('dark', isDarkTheme);
-		localStorage.setItem('theme', isDarkTheme ? 'dark' : 'light');
-	}, [isDarkTheme]);
-
-	// Список пунктов меню наверху
+	// данные для верхнего меню
 	const menuItems = [
 		{ label: 'File', items: [{ label: 'New Project', action: () => setActiveModal('createProject') }, { label: 'Open Project' }, { label: 'Save' }, { label: 'Exit' }] },
 		{ label: 'Edit', items: [{ label: 'Undo' }, { label: 'Redo' }, { label: 'Find' }] },
@@ -151,18 +317,700 @@ export default function App() {
 			],
 		},
 	];
-	
 
-	// режим изменения размера
-	const startResizing = useCallback(() => {
-		setIsResizing(true);
+	// --- МОДАЛЬНЫЕ ОКНА ---
+	const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | null>('welcome');
+	const [currentProject, setCurrentProject] = useState<ProjectData | null>(null);
+	const [generatedSegments, setGeneratedSegments] = useState<SubtitleSegment[]>([]);
+	const [activeSubtitleFileId, setActiveSubtitleFileId] = useState<string | null>(null);
+	const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number>(-1);
+	const [isConfigFolderOpen, setIsConfigFolderOpen] = useState(false);
+	const [isSubtitlesFolderOpen, setIsSubtitlesFolderOpen] = useState(false);
+
+	const videoRef = useRef<HTMLVideoElement | null>(null);
+	const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+	const timelineInnerRef = useRef<HTMLDivElement | null>(null);
+	const timelineWheelRef = useRef<HTMLDivElement | null>(null);
+	const currentPlaybackTimeRef = useRef(0);
+	const zoomAnchorRef = useRef<{ ratio: number; scrollLeft: number; innerW: number } | null>(null);
+	const isPlayingRef = useRef(false);
+	const volumeBeforeMuteRef = useRef(1);
+	const segmentsRef = useRef<SubtitleSegment[]>([]);
+	const timelineTotalDurationRef = useRef(1);
+	const timelineEdgeDragRef = useRef<{
+		edge: 'start' | 'end';
+		index: number;
+		start: number;
+		end: number;
+	} | null>(null);
+	const timelineSegmentMoveRef = useRef<{
+		index: number;
+		origStart: number;
+		origEnd: number;
+		t0: number;
+	} | null>(null);
+	const segmentBodyDragMovedRef = useRef(false);
+
+	const [videoDuration, setVideoDuration] = useState(0);
+	const [currentPlaybackTime, setCurrentPlaybackTime] = useState(0);
+	const [volume, setVolume] = useState(1);
+	const [videoMuted, setVideoMuted] = useState(false);
+	const [timelineZoomPercent, setTimelineZoomPercent] = useState(100);
+	const [waveformPeaks, setWaveformPeaks] = useState<number[] | null>(null);
+	const [waveformImageSrc, setWaveformImageSrc] = useState<string | null>(null);
+	const [tlViewport, setTlViewport] = useState({ sl: 0, sw: 0, cw: 0 });
+	const [projectDiskFiles, setProjectDiskFiles] = useState<{ relative_path: string; name: string }[]>([]);
+	const [probedMediaDuration, setProbedMediaDuration] = useState<number | null>(null);
+
+	const activeVideoFile = useMemo(() => {
+		if (!currentProject) return null;
+		if (activeSubtitleFileId) {
+			const t = currentProject.files.find((f) => f.id === activeSubtitleFileId);
+			if (t?.file_type === 'Video') return t;
+		}
+		return currentProject.files.find((f) => f.file_type === 'Video') ?? null;
+	}, [currentProject, activeSubtitleFileId]);
+
+	const activeVideoAbsolutePath = useMemo(() => {
+		if (!currentProject || !activeVideoFile) return null;
+		return joinProjectPath(currentProject.path, activeVideoFile.path);
+	}, [currentProject, activeVideoFile]);
+
+	const videoSrc = useMemo(() => {
+		if (!activeVideoAbsolutePath) return null;
+		const normalized = activeVideoAbsolutePath.replace(/\\/g, '/');
+		return convertFileSrc(normalized);
+	}, [activeVideoAbsolutePath]);
+
+	const maxSegmentEnd = useMemo(
+		() => (generatedSegments.length > 0 ? Math.max(...generatedSegments.map((s) => s.end)) : 0),
+		[generatedSegments]
+	);
+
+	const mediaLengthHint = useMemo(() => {
+		const vd = videoDuration > 0 && Number.isFinite(videoDuration) ? videoDuration : 0;
+		const fd =
+			activeVideoFile?.duration != null && activeVideoFile.duration > 0 ? activeVideoFile.duration : 0;
+		const pr = probedMediaDuration != null && probedMediaDuration > 0 ? probedMediaDuration : 0;
+		return Math.max(vd, fd, pr);
+	}, [videoDuration, activeVideoFile?.duration, probedMediaDuration]);
+
+	const timelineTotalDuration = useMemo(() => {
+		return Math.max(mediaLengthHint, maxSegmentEnd, 1);
+	}, [mediaLengthHint, maxSegmentEnd]);
+
+	segmentsRef.current = generatedSegments;
+	timelineTotalDurationRef.current = timelineTotalDuration;
+	currentPlaybackTimeRef.current = currentPlaybackTime;
+
+	const currentVideoSubtitleLine = useMemo(() => {
+		const t = currentPlaybackTime;
+		const seg = generatedSegments.find((s) => t >= s.start && t < s.end);
+		if (!seg) return '';
+		return (seg.translation && seg.translation.trim()) || seg.text || '';
+	}, [generatedSegments, currentPlaybackTime]);
+
+	const treeFiles = useMemo(() => {
+		const empty = {
+			config: [] as ProjectFile[],
+			video: [] as ProjectFile[],
+			subtitles: [] as ProjectFile[],
+			root: [] as ProjectFile[]
+		};
+		if (!currentProject) return empty;
+		const merged = mergeProjectFilesWithDisk(currentProject.files, projectDiskFiles);
+		const out = { ...empty };
+		for (const f of merged) {
+			const p = f.path.replace(/\\/g, '/').toLowerCase();
+			if (p.startsWith('config/')) out.config.push(f);
+			else if (p.startsWith('video/')) out.video.push(f);
+			else if (p.startsWith('subtitles/')) out.subtitles.push(f);
+			else out.root.push(f);
+		}
+		return out;
+	}, [currentProject, projectDiskFiles]);
+
+	const selectedSegment =
+		selectedSegmentIndex >= 0 && generatedSegments[selectedSegmentIndex]
+			? generatedSegments[selectedSegmentIndex]
+			: null;
+
+	const persistSegment = useCallback(
+		async (segment: SubtitleSegment) => {
+			if (!currentProject || !activeSubtitleFileId) return;
+			await projectService.updateSubtitleSegment(currentProject.path, activeSubtitleFileId, segment.id, {
+				text: segment.text,
+				translation: segment.translation ?? undefined,
+				start: segment.start,
+				end: segment.end
+			});
+		},
+		[currentProject, activeSubtitleFileId]
+	);
+
+	/** Рабочая копия субтитров на диске — всегда SRT; перезаписывается при правках. */
+	const exportSrtForActiveTrack = useCallback(async () => {
+		if (!currentProject || !activeSubtitleFileId) return;
+		const stem = getSourceVideoStem(currentProject, activeSubtitleFileId);
+		const out = joinProjectPath(currentProject.path, 'subtitles', `${stem}.srt`);
+		await projectService.exportSubtitles(currentProject.path, activeSubtitleFileId, 'srt', out);
+	}, [currentProject, activeSubtitleFileId]);
+
+	const updateSegmentAtIndex = useCallback(
+		async (index: number, patch: Partial<SubtitleSegment>) => {
+			if (!currentProject || !activeSubtitleFileId || index < 0) return;
+			const seg = generatedSegments[index];
+			if (!seg) return;
+			let next: SubtitleSegment = { ...seg, ...patch };
+			if (patch.start !== undefined || patch.end !== undefined) {
+				next.duration = Math.max(0, next.end - next.start);
+			}
+			const nextList = generatedSegments.map((s, i) => (i === index ? next : s));
+			setGeneratedSegments(nextList);
+			setCurrentProject({
+				...currentProject,
+				files: currentProject.files.map((f) =>
+					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: nextList } : f
+				)
+			});
+			await persistSegment(next);
+			try {
+				await exportSrtForActiveTrack();
+			} catch (e) {
+				console.error('SRT export failed', e);
+			}
+		},
+		[currentProject, activeSubtitleFileId, generatedSegments, persistSegment, exportSrtForActiveTrack]
+	);
+
+	const handleTimelineInsert = useCallback(async () => {
+		if (!currentProject || !activeSubtitleFileId) return;
+		const td = Math.max(timelineTotalDuration, MIN_SEGMENT_DURATION);
+		let start = Math.max(0, Math.min(currentPlaybackTime, td - MIN_SEGMENT_DURATION));
+		let end = Math.min(start + 1, td);
+		if (end - start < MIN_SEGMENT_DURATION) return;
+		try {
+			const { segments, inserted_id } = await projectService.insertSubtitleSegment(
+				currentProject.path,
+				activeSubtitleFileId,
+				start,
+				end
+			);
+			setGeneratedSegments(segments);
+			setCurrentProject({
+				...currentProject,
+				files: currentProject.files.map((f) =>
+					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: segments } : f
+				)
+			});
+			const newIdx = segments.findIndex((s) => s.id === inserted_id);
+			if (newIdx >= 0) setSelectedSegmentIndex(newIdx);
+			await exportSrtForActiveTrack();
+		} catch (e) {
+			console.error('insertSubtitleSegment', e);
+		}
+	}, [
+		currentProject,
+		activeSubtitleFileId,
+		timelineTotalDuration,
+		currentPlaybackTime,
+		exportSrtForActiveTrack
+	]);
+
+	const handleTimelineSetStart = useCallback(() => {
+		if (selectedSegmentIndex < 0) return;
+		const seg = generatedSegments[selectedSegmentIndex];
+		if (!seg) return;
+		const prev = selectedSegmentIndex > 0 ? generatedSegments[selectedSegmentIndex - 1] : null;
+		const t = currentPlaybackTime;
+		const newStart = Math.max(
+			prev?.end ?? 0,
+			Math.min(t, seg.end - MIN_SEGMENT_DURATION)
+		);
+		if (newStart >= seg.end - MIN_SEGMENT_DURATION) return;
+		void updateSegmentAtIndex(selectedSegmentIndex, { start: newStart });
+	}, [selectedSegmentIndex, generatedSegments, currentPlaybackTime, updateSegmentAtIndex]);
+
+	const handleTimelineSetEnd = useCallback(() => {
+		if (selectedSegmentIndex < 0) return;
+		const seg = generatedSegments[selectedSegmentIndex];
+		if (!seg) return;
+		const next =
+			selectedSegmentIndex < generatedSegments.length - 1
+				? generatedSegments[selectedSegmentIndex + 1]
+				: null;
+		const t = currentPlaybackTime;
+		const maxEnd = next?.start ?? timelineTotalDuration;
+		const newEnd = Math.min(maxEnd, Math.max(t, seg.start + MIN_SEGMENT_DURATION));
+		if (newEnd <= seg.start + MIN_SEGMENT_DURATION) return;
+		void updateSegmentAtIndex(selectedSegmentIndex, { end: newEnd });
+	}, [selectedSegmentIndex, generatedSegments, currentPlaybackTime, timelineTotalDuration, updateSegmentAtIndex]);
+
+	const setSegmentStartEndLocal = useCallback(
+		(index: number, start: number, end: number) => {
+			const dur = Math.max(0, end - start);
+			setGeneratedSegments((prev) => {
+				const seg = prev[index];
+				if (!seg) return prev;
+				const next = { ...seg, start, end, duration: dur };
+				return prev.map((s, i) => (i === index ? next : s));
+			});
+			setCurrentProject((cp) => {
+				if (!cp || !activeSubtitleFileId) return cp;
+				return {
+					...cp,
+					files: cp.files.map((f) => {
+						if (f.id !== activeSubtitleFileId || !f.subtitle_segments) return f;
+						const segs = [...f.subtitle_segments];
+						const seg = segs[index];
+						if (!seg) return f;
+						segs[index] = { ...seg, start, end, duration: dur };
+						return { ...f, subtitle_segments: segs };
+					})
+				};
+			});
+		},
+		[activeSubtitleFileId]
+	);
+
+	const clientXToTimelineTime = useCallback((clientX: number): number => {
+		const inner = timelineInnerRef.current;
+		const scr = timelineScrollRef.current;
+		if (!inner || !scr) return 0;
+		const scrRect = scr.getBoundingClientRect();
+		const x = clientX - scrRect.left + scr.scrollLeft;
+		const td = timelineTotalDurationRef.current;
+		const w = inner.offsetWidth;
+		if (w <= 0 || td <= 0) return 0;
+		return Math.max(0, Math.min(td, (x / w) * td));
 	}, []);
 
+	const beginTimelineEdgeDrag = useCallback(
+		(edge: 'start' | 'end', index: number, ev: React.MouseEvent) => {
+			ev.preventDefault();
+			ev.stopPropagation();
+			const seg = segmentsRef.current[index];
+			if (!seg || !activeSubtitleFileId) return;
+			timelineEdgeDragRef.current = {
+				edge,
+				index,
+				start: seg.start,
+				end: seg.end
+			};
+			const onMove = (e: MouseEvent) => {
+				const drag = timelineEdgeDragRef.current;
+				if (!drag) return;
+				const segs = segmentsRef.current;
+				const t = clientXToTimelineTime(e.clientX);
+				const maxT = timelineTotalDurationRef.current;
+				const prev = drag.index > 0 ? segs[drag.index - 1] : null;
+				const next = drag.index < segs.length - 1 ? segs[drag.index + 1] : null;
+				let start = drag.start;
+				let end = drag.end;
+				if (drag.edge === 'start') {
+					start = Math.max(prev?.end ?? 0, Math.min(t, end - MIN_SEGMENT_DURATION));
+				} else {
+					end = Math.min(next?.start ?? maxT, Math.max(t, start + MIN_SEGMENT_DURATION));
+				}
+				drag.start = start;
+				drag.end = end;
+				setSegmentStartEndLocal(drag.index, start, end);
+			};
+			const onUp = () => {
+				window.removeEventListener('mousemove', onMove);
+				window.removeEventListener('mouseup', onUp);
+				const drag = timelineEdgeDragRef.current;
+				timelineEdgeDragRef.current = null;
+				if (drag) {
+					void updateSegmentAtIndex(drag.index, { start: drag.start, end: drag.end });
+				}
+			};
+			window.addEventListener('mousemove', onMove);
+			window.addEventListener('mouseup', onUp);
+		},
+		[activeSubtitleFileId, clientXToTimelineTime, setSegmentStartEndLocal, updateSegmentAtIndex]
+	);
+
+	const beginTimelineSegmentMove = useCallback(
+		(index: number, ev: React.MouseEvent) => {
+			if (!activeSubtitleFileId) return;
+			if ((ev.target as HTMLElement).closest('[data-tl-edge]')) return;
+			ev.preventDefault();
+			ev.stopPropagation();
+			const seg = segmentsRef.current[index];
+			if (!seg) return;
+			const t0 = clientXToTimelineTime(ev.clientX);
+			timelineSegmentMoveRef.current = {
+				index,
+				origStart: seg.start,
+				origEnd: seg.end,
+				t0
+			};
+			const onMove = (e: MouseEvent) => {
+				const mv = timelineSegmentMoveRef.current;
+				if (!mv) return;
+				const segs = segmentsRef.current;
+				const prev = mv.index > 0 ? segs[mv.index - 1] : null;
+				const next = mv.index < segs.length - 1 ? segs[mv.index + 1] : null;
+				const maxT = timelineTotalDurationRef.current;
+				const deltaT = clientXToTimelineTime(e.clientX) - mv.t0;
+				const dur = mv.origEnd - mv.origStart;
+				const pEnd = prev?.end ?? 0;
+				const nStart = next?.start ?? maxT;
+				let s = mv.origStart + deltaT;
+				s = Math.max(pEnd, Math.min(s, nStart - dur));
+				const en = s + dur;
+				setSegmentStartEndLocal(mv.index, s, en);
+			};
+			const onUp = () => {
+				window.removeEventListener('mousemove', onMove);
+				window.removeEventListener('mouseup', onUp);
+				const mv = timelineSegmentMoveRef.current;
+				timelineSegmentMoveRef.current = null;
+				if (!mv) return;
+				const cur = segmentsRef.current[mv.index];
+				const changed =
+					cur &&
+					(Math.abs(cur.start - mv.origStart) > 1e-4 ||
+						Math.abs(cur.end - mv.origEnd) > 1e-4);
+				if (changed && cur) {
+					segmentBodyDragMovedRef.current = true;
+					void updateSegmentAtIndex(mv.index, { start: cur.start, end: cur.end });
+				}
+			};
+			window.addEventListener('mousemove', onMove);
+			window.addEventListener('mouseup', onUp);
+		},
+		[activeSubtitleFileId, clientXToTimelineTime, setSegmentStartEndLocal, updateSegmentAtIndex]
+	);
+	
+	const openWizard = () => setActiveModal('wizard');
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.code !== 'Space' && e.key !== ' ') return;
+			if (activeModal !== null) return;
+			if (shouldIgnoreSpacebarForVideo(e.target)) return;
+			if (!videoSrc) return;
+			const v = videoRef.current;
+			if (!v) return;
+			e.preventDefault();
+			if (v.paused) void v.play();
+			else v.pause();
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	}, [activeModal, videoSrc]);
+
+	useEffect(() => {
+		setActiveModal('welcome');
+	}, []);
+
+	useEffect(() => {
+		setVideoDuration(0);
+		setCurrentPlaybackTime(0);
+		setWaveformPeaks(null);
+		setWaveformImageSrc(null);
+		setProbedMediaDuration(null);
+	}, [activeVideoAbsolutePath]);
+
+	useEffect(() => {
+		if (!currentProject?.path) {
+			setProjectDiskFiles([]);
+			return;
+		}
+		const projectPath = currentProject.path;
+		let cancelled = false;
+		const refreshDiskList = () => {
+			void projectService.listProjectDirectoryFiles(projectPath).then((list) => {
+				if (!cancelled) setProjectDiskFiles(list);
+			}).catch(() => {
+				if (!cancelled) setProjectDiskFiles([]);
+			});
+		};
+		refreshDiskList();
+		const intervalId = window.setInterval(refreshDiskList, 2000);
+		const onFocus = () => refreshDiskList();
+		const onVisibility = () => {
+			if (document.visibilityState === 'visible') refreshDiskList();
+		};
+		window.addEventListener('focus', onFocus);
+		document.addEventListener('visibilitychange', onVisibility);
+		return () => {
+			cancelled = true;
+			window.clearInterval(intervalId);
+			window.removeEventListener('focus', onFocus);
+			document.removeEventListener('visibilitychange', onVisibility);
+		};
+	}, [currentProject?.path]);
+
+	useEffect(() => {
+		setProbedMediaDuration(null);
+		if (!activeVideoAbsolutePath || !activeVideoFile) return;
+		if (activeVideoFile.duration != null && activeVideoFile.duration > 0) return;
+		let cancelled = false;
+		void projectService.probeMediaDuration(activeVideoAbsolutePath).then((d) => {
+			if (!cancelled && Number.isFinite(d) && d > 0) setProbedMediaDuration(d);
+		}).catch(() => {});
+		return () => {
+			cancelled = true;
+		};
+	}, [activeVideoAbsolutePath, activeVideoFile?.id, activeVideoFile?.duration]);
+
+	useEffect(() => {
+		if (!activeVideoAbsolutePath || !currentProject) return;
+		let cancelled = false;
+		const outJson = joinProjectPath(currentProject.path, 'config', 'waveform_cache.json');
+		const outPng = joinProjectPath(currentProject.path, 'config', 'waveform.png');
+		(async () => {
+			setWaveformImageSrc(null);
+			try {
+				await projectService.generateWaveformPng(activeVideoAbsolutePath, outPng, 4096, 1024);
+				if (!cancelled) {
+					const url = convertFileSrc(outPng.replace(/\\/g, '/'));
+					setWaveformImageSrc(`${url}?t=${Date.now()}`);
+				}
+			} catch (e) {
+				console.warn('[waveform] PNG (ffmpeg showwavespic):', e);
+			}
+			try {
+				const data = await projectService.generateWaveform(activeVideoAbsolutePath, outJson, 48);
+				if (!cancelled && data.peaks?.length) {
+					setWaveformPeaks(data.peaks.map((p) => Number(p)));
+				}
+			} catch (e) {
+				console.warn('[waveform] peaks:', e);
+				if (!cancelled) setWaveformPeaks(null);
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [activeVideoAbsolutePath, currentProject?.path]);
+
+	useEffect(() => {
+		const v = videoRef.current;
+		if (v) v.volume = volume;
+	}, [volume]);
+
+	useEffect(() => {
+		const v = videoRef.current;
+		if (v) v.muted = videoMuted;
+	}, [videoMuted]);
+
+	/** Плавная полоска таймлайна: timeupdate слишком редкий (~4 Гц), во время play читаем currentTime в rAF */
+	useEffect(() => {
+		if (!videoSrc) return;
+		const v = videoRef.current;
+		if (!v) return;
+
+		let rafId = 0;
+
+		const tick = () => {
+			rafId = 0;
+			if (v.paused || v.ended) return;
+			setCurrentPlaybackTime(v.currentTime);
+			rafId = requestAnimationFrame(tick);
+		};
+
+		const startLoop = () => {
+			if (rafId) cancelAnimationFrame(rafId);
+			rafId = requestAnimationFrame(tick);
+		};
+
+		const onPause = () => {
+			if (rafId) {
+				cancelAnimationFrame(rafId);
+				rafId = 0;
+			}
+			setCurrentPlaybackTime(v.currentTime);
+		};
+
+		const onSeeked = () => setCurrentPlaybackTime(v.currentTime);
+
+		v.addEventListener('play', startLoop);
+		v.addEventListener('pause', onPause);
+		v.addEventListener('seeked', onSeeked);
+
+		if (!v.paused) startLoop();
+
+		return () => {
+			v.removeEventListener('play', startLoop);
+			v.removeEventListener('pause', onPause);
+			v.removeEventListener('seeked', onSeeked);
+			if (rafId) cancelAnimationFrame(rafId);
+		};
+	}, [videoSrc]);
+
+	const updateTlViewport = useCallback(() => {
+		const el = timelineScrollRef.current;
+		if (!el) return;
+		setTlViewport({ sl: el.scrollLeft, sw: el.scrollWidth, cw: el.clientWidth });
+	}, []);
+
+	useEffect(() => {
+		const panel = timelineWheelRef.current;
+		if (!panel) return;
+
+		const onWheel = (e: WheelEvent) => {
+			if (e.altKey) {
+				e.preventDefault();
+				const dir: 1 | -1 = e.deltaY > 0 ? -1 : 1;
+				const scr = timelineScrollRef.current;
+				const inner = timelineInnerRef.current;
+				const td = timelineTotalDurationRef.current;
+				if (scr && inner && td > 0) {
+					const r = Math.max(0, Math.min(1, currentPlaybackTimeRef.current / td));
+					zoomAnchorRef.current = { ratio: r, scrollLeft: scr.scrollLeft, innerW: inner.offsetWidth };
+				} else {
+					zoomAnchorRef.current = null;
+				}
+				setTimelineZoomPercent((z) => {
+					const zNext = stepTimelineZoom(z, dir);
+					if (zNext === z) zoomAnchorRef.current = null;
+					return zNext;
+				});
+				requestAnimationFrame(() => updateTlViewport());
+				return;
+			}
+			const scr = timelineScrollRef.current;
+			if (!scr) return;
+			const scrollDelta =
+				Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+			if (scrollDelta === 0) return;
+			e.preventDefault();
+			scr.scrollLeft += scrollDelta;
+			updateTlViewport();
+		};
+
+		panel.addEventListener('wheel', onWheel, { passive: false });
+		return () => panel.removeEventListener('wheel', onWheel);
+	}, [updateTlViewport]);
+
+	useLayoutEffect(() => {
+		const a = zoomAnchorRef.current;
+		if (!a) return;
+		zoomAnchorRef.current = null;
+		const scr = timelineScrollRef.current;
+		const inner = timelineInnerRef.current;
+		if (!scr || !inner) return;
+		const wAfter = inner.offsetWidth;
+		const sNew = a.ratio * wAfter - (a.ratio * a.innerW - a.scrollLeft);
+		const maxSl = Math.max(0, scr.scrollWidth - scr.clientWidth);
+		scr.scrollLeft = Math.max(0, Math.min(sNew, maxSl));
+		updateTlViewport();
+	}, [timelineZoomPercent, updateTlViewport]);
+
+	const seekVideoFromClientX = useCallback(
+		(clientX: number, barEl: HTMLElement) => {
+			const v = videoRef.current;
+			if (!v) return;
+			const dur = timelineTotalDuration;
+			if (!dur) return;
+			const rect = barEl.getBoundingClientRect();
+			const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+			const t = ratio * dur;
+			v.currentTime = Math.min(t, Number.isFinite(v.duration) && v.duration > 0 ? v.duration : t);
+			setCurrentPlaybackTime(v.currentTime);
+		},
+		[timelineTotalDuration]
+	);
+
+	const handleVideoProgressPointerDown = useCallback(
+		(e: React.MouseEvent<HTMLDivElement>) => {
+			e.preventDefault();
+			const bar = e.currentTarget;
+			seekVideoFromClientX(e.clientX, bar);
+			const onMove = (ev: MouseEvent) => seekVideoFromClientX(ev.clientX, bar);
+			const onUp = () => {
+				window.removeEventListener('mousemove', onMove);
+				window.removeEventListener('mouseup', onUp);
+			};
+			window.addEventListener('mousemove', onMove);
+			window.addEventListener('mouseup', onUp);
+		},
+		[seekVideoFromClientX]
+	);
+
+	const handleTimelineScrubPointerDown = useCallback(
+		(e: React.MouseEvent<HTMLDivElement>) => {
+			e.preventDefault();
+			const bar = e.currentTarget;
+			const el = timelineScrollRef.current;
+			if (!el) return;
+			const apply = (clientX: number) => {
+				const maxScroll = el.scrollWidth - el.clientWidth;
+				if (maxScroll <= 0) return;
+				const rect = bar.getBoundingClientRect();
+				const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+				el.scrollLeft = ratio * maxScroll;
+				updateTlViewport();
+			};
+			apply(e.clientX);
+			const onMove = (ev: MouseEvent) => apply(ev.clientX);
+			const onUp = () => {
+				window.removeEventListener('mousemove', onMove);
+				window.removeEventListener('mouseup', onUp);
+			};
+			window.addEventListener('mousemove', onMove);
+			window.addEventListener('mouseup', onUp);
+		},
+		[updateTlViewport]
+	);
+
+	const handleVolumePointerDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+		e.preventDefault();
+		const bar = e.currentTarget;
+		const apply = (clientX: number) => {
+			const v = videoRef.current;
+			if (!v) return;
+			const rect = bar.getBoundingClientRect();
+			const r = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+			v.volume = r;
+			setVolume(r);
+			if (r > 0 && v.muted) {
+				v.muted = false;
+				setVideoMuted(false);
+			}
+		};
+		apply(e.clientX);
+		const onMove = (ev: MouseEvent) => apply(ev.clientX);
+		const onUp = () => {
+			window.removeEventListener('mousemove', onMove);
+			window.removeEventListener('mouseup', onUp);
+		};
+		window.addEventListener('mousemove', onMove);
+		window.addEventListener('mouseup', onUp);
+	}, []);
+
+	useEffect(() => {
+		updateTlViewport();
+		const t = window.requestAnimationFrame(updateTlViewport);
+		return () => window.cancelAnimationFrame(t);
+	}, [timelineZoomPercent, generatedSegments.length, timelineTotalDuration, updateTlViewport]);
+
+	useEffect(() => {
+		if (!isPlayingRef.current) return;
+		const el = timelineScrollRef.current;
+		const inner = timelineInnerRef.current;
+		if (!el || !inner || timelineTotalDuration <= 0) return;
+		const playheadX = (currentPlaybackTime / timelineTotalDuration) * inner.offsetWidth;
+		const target = playheadX - el.clientWidth * 0.35;
+		el.scrollLeft = Math.max(0, Math.min(target, el.scrollWidth - el.clientWidth));
+	}, [currentPlaybackTime, timelineTotalDuration]);
+
+	// --- ЛОГИКА РЕШАЙЗА (УПРАВЛЕНИЕ МЫШЬЮ) ---
+
+	// остановка любого ресайза
 	const stopResizing = useCallback(() => {
 		setIsResizing(false);
 	}, []);
 
-	// высчитываем ширину дерева проекта при движении мышки с учетом бокового меню
+	// ресайз дерева проекта
+	const startResizing = useCallback(() => {
+		setIsResizing(true);
+	}, []);
+
 	const resize = useCallback((mouseMoveEvent: MouseEvent) => {
 		if (isResizing) {
 			const newWidth = mouseMoveEvent.clientX - 60;
@@ -174,7 +1022,7 @@ export default function App() {
 		}
 	}, [isResizing, windowSize, aiAgentWidth]);
 
-	// вешаем глобальные слушатели на мышку для работы ресайза
+	// слушатели для ресайза дерева
 	useEffect(() => {
 		window.addEventListener("mousemove", resize);
 		window.addEventListener("mouseup", stopResizing);
@@ -184,40 +1032,32 @@ export default function App() {
 		};
 	}, [resize, stopResizing]);
 
+	// контроль ограничений при изменении окна
 	useEffect(() => {
 		const totalFixed = 60 + projectTreeWidth + aiAgentWidth;
-
-		// 👉 сколько реально можно дать таблице, чтобы видео не сломалось
 		const maxTable = windowSize.width - totalFixed - LIMITS.VIDEO;
 
-		// 👉 если таблица слишком большая — ужимаем
 		if (tablePanelWidth > maxTable) {
 			setTablePanelWidth(Math.max(300, maxTable));
 		}
 
-		// 👉 если наоборот таблица ок, но видео уже меньше минимума — тоже ужимаем таблицу
 		const currentVideoWidth = windowSize.width - totalFixed - tablePanelWidth;
-
 		if (currentVideoWidth < LIMITS.VIDEO) {
 			const fixedTable = windowSize.width - totalFixed - LIMITS.VIDEO;
 			setTablePanelWidth(Math.max(300, fixedTable));
 		}
 
-		// высота
 		if (upperSectionHeight > windowSize.height - 150) {
 			setUpperSectionHeight(windowSize.height - 150);
 		}
-
 	}, [windowSize, tablePanelWidth, projectTreeWidth, aiAgentWidth]);
 
-	// логика изменения ширины панели аи агента через прямое управление событиями
+	// ресайз панели аи агента
 	const startAiAgentResizing = useCallback((mouseDownEvent: React.MouseEvent) => {
 		setIsAiAgentResizing(true);
-
 		const startWidth = aiAgentWidth;
 		const startX = mouseDownEvent.clientX;
 		
-
 		const doDrag = (mouseMoveEvent: MouseEvent) => {
 			const newWidth = startWidth + (mouseMoveEvent.clientX - startX);
 			const maxDynamic = windowSize.width - (LIMITS.SIDEBAR + projectTreeWidth + LIMITS.TABLE + LIMITS.VIDEO);
@@ -235,24 +1075,20 @@ export default function App() {
 
 		window.addEventListener('mousemove', doDrag);
 		window.addEventListener('mouseup', stopDrag);
-	}, [aiAgentWidth]);
+	}, [aiAgentWidth, windowSize.width, projectTreeWidth]);
 
-	// Ресайз всей панели
-  const startTablePanelResizing = useCallback((direction: 'right' | 'bottom', mouseDownEvent: React.MouseEvent) => {
-    const startWidth = tablePanelWidth;
-    const startHeight = upperSectionHeight;
-    const startX = mouseDownEvent.clientX;
-    const startY = mouseDownEvent.clientY;
+	// ресайз таблицы (ширина и высота верхней части)
+	const startTablePanelResizing = useCallback((direction: 'right' | 'bottom', mouseDownEvent: React.MouseEvent) => {
+		const startWidth = tablePanelWidth;
+		const startHeight = upperSectionHeight;
+		const startX = mouseDownEvent.clientX;
+		const startY = mouseDownEvent.clientY;
 
-    const doDrag = (e: MouseEvent) => {
+		const doDrag = (e: MouseEvent) => {
 			if (direction === 'right') {
 				const newWidth = startWidth + (e.clientX - startX);
-				
 				const minTableWidth = 400; 
-
-				const maxAllowedWidth = windowSize.width 
-				- (60 + projectTreeWidth + aiAgentWidth) 
-				- LIMITS.VIDEO;
+				const maxAllowedWidth = windowSize.width - (60 + projectTreeWidth + aiAgentWidth) - LIMITS.VIDEO;
 
 				if (newWidth >= minTableWidth && newWidth <= maxAllowedWidth) {
 					setTablePanelWidth(newWidth);
@@ -263,34 +1099,75 @@ export default function App() {
 			}
 		};
 
-    const stopDrag = () => {
-      window.removeEventListener('mousemove', doDrag);
-      window.removeEventListener('mouseup', stopDrag);
-    };
-    window.addEventListener('mousemove', doDrag);
-    window.addEventListener('mouseup', stopDrag);
-		}, [tablePanelWidth, upperSectionHeight, windowSize, projectTreeWidth, aiAgentWidth]);
+		const stopDrag = () => {
+			window.removeEventListener('mousemove', doDrag);
+			window.removeEventListener('mouseup', stopDrag);
+		};
+		window.addEventListener('mousemove', doDrag);
+		window.addEventListener('mouseup', stopDrag);
+	}, [tablePanelWidth, upperSectionHeight, windowSize, projectTreeWidth, aiAgentWidth]);
 
-  // Ресайз колонок таблицы
-  const startColResize = useCallback((index: number, mouseDownEvent: React.MouseEvent) => {
-    const startWidth = colWidths[index];
-    const startX = mouseDownEvent.clientX;
+	// ресайз отдельных колонок таблицы
+	const startColResize = useCallback((index: number, mouseDownEvent: React.MouseEvent) => {
+		const startWidth = colWidths[index];
+		const startX = mouseDownEvent.clientX;
 
-    const doDrag = (e: MouseEvent) => {
-      const newWidth = Math.max(40, startWidth + (e.clientX - startX));
-      const newWidths = [...colWidths];
-      newWidths[index] = newWidth;
-      setColWidths(newWidths);
-    };
+		const doDrag = (e: MouseEvent) => {
+			const newWidth = Math.max(40, startWidth + (e.clientX - startX));
+			const newWidths = [...colWidths];
+			newWidths[index] = newWidth;
+			setColWidths(newWidths);
+		};
 
-    const stopDrag = () => {
-      window.removeEventListener('mousemove', doDrag);
-      window.removeEventListener('mouseup', stopDrag);
-    };
-    window.addEventListener('mousemove', doDrag);
-    window.addEventListener('mouseup', stopDrag);
-  }, [colWidths]);
+		const stopDrag = () => {
+			window.removeEventListener('mousemove', doDrag);
+			window.removeEventListener('mouseup', stopDrag);
+		};
+		window.addEventListener('mousemove', doDrag);
+		window.addEventListener('mouseup', stopDrag);
+	}, [colWidths]);
 
+
+	const handleSelectProject = async (path: string) => {
+		try {
+			// Вызываем открытие через наш сервис
+			const projectData = await projectService.open(path);
+			setCurrentProject(projectData);
+			const firstFileWithSegments = projectData.files.find((file) => file.subtitle_segments && file.subtitle_segments.length > 0);
+			const segs = firstFileWithSegments?.subtitle_segments ?? [];
+			setGeneratedSegments(segs);
+			setActiveSubtitleFileId(firstFileWithSegments?.id ?? null);
+			setSelectedSegmentIndex(segs.length > 0 ? 0 : -1);
+			setActiveModal(null); 
+			console.log("Проект успешно открыт:", path);
+		} catch (error) {
+			console.error("Ошибка при открытии проекта:", error);
+		}
+	};
+
+	const handleOpenProjectDialog = async () => {
+		try {
+			const selected = await open({
+				directory: true,
+				multiple: false,
+				title: 'Open Project Folder'
+			});
+
+			if (selected && typeof selected === 'string') {
+				await handleSelectProject(selected);
+			}
+		} catch (error) {
+			console.error("Ошибка выбора проекта:", error);
+		}
+	};
+
+	const handleProjectCreated = async (project: ProjectData) => {
+		try {
+			await handleSelectProject(project.path);
+		} catch (error) {
+			console.error("Ошибка открытия нового проекта:", error);
+		}
+	};
 
 
 
@@ -351,7 +1228,7 @@ export default function App() {
 				{/* ЦЕНТРАЛЬНАЯ ЧАСТЬ Название проекта */}
 				<div className="flex-1 flex justify-center items-center h-full overflow-hidden px-4">
 					<span className="text-[11px] text-text-primary font-inter truncate">
-						{isVideoFolderOpen ? 'S1E01.mp4' : 'Untitled'} - subtitlestudio
+						{currentProject?.name ?? 'Untitled'} - subtitlestudio
 					</span>
 				</div>
 
@@ -445,7 +1322,7 @@ export default function App() {
 					{/* Заголовок */}
 					<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
 						<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
-							VIMN_KALLY_20
+							{currentProject?.name ?? 'No project'}
 						</span>
 						
 						<div className="flex items-center gap-[12px] shrink-0">
@@ -461,15 +1338,33 @@ export default function App() {
 					</div>
 
 					{/* Список файлов */}
-					<div className="flex-1 overflow-y-auto p-3 bg-surface-bg">
+					<div className="flex-1 min-w-0 overflow-y-auto p-3 bg-surface-bg subtitle-table-scroll project-tree-scroll">
 						<div className="flex flex-col gap-[8px]"> {/* Строгий вертикальный ритм 8px */}
 						
-							<div className="flex items-center gap-[8px] cursor-pointer group h-4">
-								<ChevronRight size={12} className="text-text-primary/70 shrink-0" />
+							<div 
+								className="flex items-center gap-[8px] cursor-pointer group h-4"
+								onClick={() => setIsConfigFolderOpen(!isConfigFolderOpen)}
+							>
+								{isConfigFolderOpen ? <ChevronDown size={12} className="text-text-primary/70 shrink-0" /> : <ChevronRight size={12} className="text-text-primary/70 shrink-0" />}
 								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
 									.config
 								</span>
 							</div>
+
+							{isConfigFolderOpen && treeFiles.config.length > 0 && (
+								<div className="flex gap-[11px] ml-[5px]">
+									<div className="w-[1px] bg-border-default shrink-0" />
+									<div className="flex flex-col gap-[8px] flex-1">
+										{treeFiles.config.map((file) => (
+											<div key={file.id} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
+												<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+													{file.name}
+												</span>
+											</div>
+										))}
+									</div>
+								</div>
+							)}
 
 							<div className="flex flex-col gap-[8px]">
 								<div 
@@ -487,10 +1382,10 @@ export default function App() {
 										<div className="w-[1px] bg-border-default shrink-0" />
 										
 										<div className="flex flex-col gap-[8px] flex-1">
-											{['S1E01.mp4', 'S1E02.mp4', 'S1E03.mp4', 'S1E04.mp4'].map((file) => (
-												<div key={file} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
+											{treeFiles.video.map((file) => (
+												<div key={file.id} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
 													<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-														{file}
+														{file.name}
 													</span>
 												</div>
 											))}
@@ -499,18 +1394,40 @@ export default function App() {
 								)}
 							</div>
 
-							<div className="flex items-center gap-[8px] cursor-pointer group h-4">
-								<ChevronRight size={12} className="text-text-primary/70 shrink-0" />
-								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-									subtitles
-								</span>
+							<div className="flex flex-col gap-[8px]">
+								<div 
+									className="flex items-center gap-[8px] cursor-pointer group h-4"
+									onClick={() => setIsSubtitlesFolderOpen(!isSubtitlesFolderOpen)}
+								>
+									{isSubtitlesFolderOpen ? <ChevronDown size={12} className="text-text-primary/70 shrink-0" /> : <ChevronRight size={12} className="text-text-primary/70 shrink-0" />}
+									<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+										subtitles
+									</span>
+								</div>
+
+								{isSubtitlesFolderOpen && treeFiles.subtitles.length > 0 && (
+									<div className="flex gap-[11px] ml-[5px]">
+										<div className="w-[1px] bg-border-default shrink-0" />
+										<div className="flex flex-col gap-[8px] flex-1">
+											{treeFiles.subtitles.map((file) => (
+												<div key={file.id} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
+													<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+														{file.name}
+													</span>
+												</div>
+											))}
+										</div>
+									</div>
+								)}
 							</div>
 
-							<div className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
-								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-									vimn_license_idkidk.pdf
-								</span>
-							</div>
+							{treeFiles.root.map((file) => (
+								<div key={file.id} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
+									<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+										{file.name}
+									</span>
+								</div>
+							))}
 
 						</div>
 					</div>
@@ -692,25 +1609,31 @@ export default function App() {
 										</thead>
 										
 										<tbody>
-											{Array.from({ length: 25 }).map((_, i) => (
-												<tr key={i} className="h-[25px] hover:bg-black/5 transition-colors group text-table">
+											{generatedSegments.map((segment, idx) => (
+												<tr
+													key={`${segment.id}-${idx}`}
+													onClick={() => setSelectedSegmentIndex(idx)}
+													className={`h-[25px] hover:bg-black/5 transition-colors group text-table cursor-pointer ${
+														selectedSegmentIndex === idx ? 'bg-black/10' : ''
+													}`}
+												>
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-														<div className="truncate">{i + 1}</div>
+														<div className="truncate">{segment.id}</div>
 													</td>
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-														<div className="truncate">00:01:03,174</div>
+														<div className="truncate">{segment.start.toFixed(3)}</div>
 													</td>
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-														<div className="truncate">00:01:03,174</div>
+														<div className="truncate">{segment.end.toFixed(3)}</div>
 													</td>
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-														<div className="truncate">1,244</div>
+														<div className="truncate">{segment.duration.toFixed(3)}</div>
 													</td>
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
-														<div className="truncate">It's the biggest event of the year in Magix...</div>
+														<div className="truncate">{segment.translation || '-'}</div>
 													</td>
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
-														<div className="truncate">C'est le plus grand événement de l'année...</div>
+														<div className="truncate">{segment.text}</div>
 													</td>
 												</tr>
 											))}
@@ -736,7 +1659,13 @@ export default function App() {
 											<label className="text-caption text-text-primary">Start time</label>
 											<input 
 												type="text" 
-												defaultValue="00:01:03,174"
+												key={`start-${selectedSegmentIndex}-${selectedSegment?.id ?? 'x'}`}
+												defaultValue={selectedSegment ? formatSrtTime(selectedSegment.start) : ''}
+												onBlur={(e) => {
+													if (selectedSegmentIndex < 0) return;
+													const t = parseSrtTime(e.target.value);
+													if (t !== null) void updateSegmentAtIndex(selectedSegmentIndex, { start: t });
+												}}
 												className="w-[100px] h-[24px] bg-surface-secondary border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
 											/>
 										</div>
@@ -744,7 +1673,16 @@ export default function App() {
 											<label className="text-caption text-text-primary">Duration</label>
 											<input 
 												type="text" 
-												defaultValue="1,244"
+												key={`dur-${selectedSegmentIndex}-${selectedSegment?.id ?? 'x'}`}
+												defaultValue={selectedSegment ? selectedSegment.duration.toFixed(3) : ''}
+												onBlur={(e) => {
+													if (selectedSegmentIndex < 0 || !selectedSegment) return;
+													const d = parseFloat(e.target.value.replace(',', '.'));
+													if (!Number.isFinite(d) || d < 0) return;
+													void updateSegmentAtIndex(selectedSegmentIndex, {
+														end: selectedSegment.start + d
+													});
+												}}
 												className="w-[76px] h-[24px] bg-surface-secondary border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
 											/>
 										</div>
@@ -753,10 +1691,24 @@ export default function App() {
 									{/* Блок кнопок */}
 									<div className="mt-[16px] flex flex-col gap-[4px] w-[124px]">
 										<div className="flex gap-[4px] w-full">
-											<button className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover  text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center">
+											<button
+												type="button"
+												disabled={selectedSegmentIndex <= 0}
+												onClick={() => setSelectedSegmentIndex((i) => Math.max(0, i - 1))}
+												className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+											>
 												&lt; Prev
 											</button>
-											<button className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center">
+											<button
+												type="button"
+												disabled={selectedSegmentIndex < 0 || selectedSegmentIndex >= generatedSegments.length - 1}
+												onClick={() =>
+													setSelectedSegmentIndex((i) =>
+														Math.min(generatedSegments.length - 1, i + 1)
+													)
+												}
+												className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+											>
 												Next &gt;
 											</button>
 										</div>
@@ -771,15 +1723,29 @@ export default function App() {
 									<label className="text-caption text-text-primary">Translation</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
+											key={`trn-${selectedSegmentIndex}-${selectedSegment?.id ?? 'x'}`}
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
 											placeholder="Translation..."
-											defaultValue="It's the biggest event of the year in Magix..."
+											defaultValue={selectedSegment?.translation ?? ''}
+											onBlur={(e) => {
+												if (selectedSegmentIndex < 0) return;
+												void updateSegmentAtIndex(selectedSegmentIndex, {
+													translation: e.target.value
+												});
+											}}
 										/>
 									</div>
 									{/* Вертикальная статистика */}
 									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
-										<span className="truncate">Total length: 42</span>
-										<span className="truncate">Chars/sec: 12.4</span>
+										<span className="truncate">
+											Total length: {selectedSegment ? (selectedSegment.translation ?? '').length : 0}
+										</span>
+										<span className="truncate">
+											Chars/sec:{' '}
+											{selectedSegment && selectedSegment.duration > 0
+												? ((selectedSegment.translation ?? '').length / selectedSegment.duration).toFixed(1)
+												: '—'}
+										</span>
 									</div>
 								</div>
 
@@ -788,15 +1754,27 @@ export default function App() {
 									<label className="text-caption text-text-primary">Original text</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
+											key={`orig-${selectedSegmentIndex}-${selectedSegment?.id ?? 'x'}`}
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
 											placeholder="Original text..."
-											defaultValue="C'est le plus grand événement de l'année..."
+											defaultValue={selectedSegment?.text ?? ''}
+											onBlur={(e) => {
+												if (selectedSegmentIndex < 0) return;
+												void updateSegmentAtIndex(selectedSegmentIndex, { text: e.target.value });
+											}}
 										/>
 									</div>
 									{/* Вертикальная статистика */}
 									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
-										<span className="truncate">Total length: 38</span>
-										<span className="truncate">Chars/sec: 11.2</span>
+										<span className="truncate">
+											Total length: {selectedSegment ? selectedSegment.text.length : 0}
+										</span>
+										<span className="truncate">
+											Chars/sec:{' '}
+											{selectedSegment && selectedSegment.duration > 0
+												? (selectedSegment.text.length / selectedSegment.duration).toFixed(1)
+												: '—'}
+										</span>
 									</div>
 								</div>
 							</div>
@@ -805,16 +1783,50 @@ export default function App() {
 						</div>
 						
 						{/* ПАНЕЛЬ ВИДЕОПЛЕЕР */}
-						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[400px] overflow-hidden select-none">
+						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[220px] overflow-hidden select-none">
 								
 								{/* Область видео */}
 								<div className="flex-1 relative flex flex-col items-center justify-center group bg-[#000000]">
-										<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
+										{videoSrc ? (
+											<video
+												key={activeVideoAbsolutePath ?? 'v'}
+												ref={videoRef}
+												src={videoSrc}
+												className="absolute inset-0 z-0 w-full h-full object-contain"
+												playsInline
+												muted={videoMuted}
+												preload="metadata"
+												onLoadedMetadata={(e) => {
+													const d = e.currentTarget.duration;
+													setVideoDuration(Number.isFinite(d) ? d : 0);
+													e.currentTarget.volume = volume;
+													e.currentTarget.muted = videoMuted;
+												}}
+												onDurationChange={(e) => {
+													const d = e.currentTarget.duration;
+													if (Number.isFinite(d) && d > 0) setVideoDuration(d);
+												}}
+												onPlay={() => {
+													isPlayingRef.current = true;
+												}}
+												onPause={() => {
+													isPlayingRef.current = false;
+												}}
+												onVolumeChange={(e) => setVolume(e.currentTarget.volume)}
+												onError={() => {
+													console.error('Video load/playback error', activeVideoAbsolutePath, videoSrc);
+												}}
+											/>
+										) : (
+											<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
 												Video Preview
-										</div>
-										<div className="absolute bottom-12 w-full text-center px-10">
-												<span className="text-white text-[20px] font-bold drop-shadow-md leading-[20px] tracking-[-0.01em] font-inter">
-														Kali, if you get an autograph, I'll...
+											</div>
+										)}
+										<div className="absolute bottom-12 z-10 w-full text-center px-10 pointer-events-none">
+												<span
+													className="text-white text-[20px] font-bold leading-[20px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]"
+												>
+														{currentVideoSubtitleLine || '\u00A0'}
 												</span>
 										</div>
 								</div>
@@ -822,30 +1834,83 @@ export default function App() {
 								{/* Панель управления */}
 								<div className="bg-surface-panel border-t border-border-default flex flex-col shrink-0 p-3 m-0 gap-[24px]">
 										<div className="w-full">
-												<div className="relative w-full h-[4px] bg-border-default cursor-pointer group">
-														<div className="absolute left-0 top-0 h-full bg-[#9FA3B0] w-[45%]" />
-														<div className="absolute left-[45%] top-1/2 -translate-y-1/2 w-3 h-4 bg-surface-secondary border border-border-default rounded-full shadow-sm opacity-0 group-hover:opacity-100 transition-opacity z-10" />
+												<div
+													className="relative w-full h-[4px] bg-border-default cursor-pointer"
+													onMouseDown={handleVideoProgressPointerDown}
+												>
+														<div
+															className="absolute left-0 top-0 h-full bg-[#9FA3B0]"
+															style={{
+																width: `${timelineTotalDuration ? Math.min(100, (currentPlaybackTime / timelineTotalDuration) * 100) : 0}%`
+															}}
+														/>
 												</div>
 										</div>
 
-										{/* Контролы */}
-										<div className="flex items-center justify-between w-full flex-nowrap">
-												<div className="flex items-center gap-[12px] shrink-0">
-														<button className="w-6 h-6 bg-secondary-hover rounded-md shrink-0" />
-														<button className="w-6 h-6 bg-secondary-hover rounded-md shrink-0" />
-														<button className="w-6 h-6 bg-secondary-hover rounded-sm shrink-0" />
+										{/* Контролы: при узкой панели таймкод переносится вниз и выравнивается слева */}
+										<div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 w-full min-w-0">
+												<div className="flex items-center gap-[12px] shrink-0 min-w-0">
+														<button
+															type="button"
+															className="w-6 h-6 bg-secondary-hover rounded-md shrink-0"
+															onClick={() => {
+																const v = videoRef.current;
+																if (!v) return;
+																if (v.paused) void v.play();
+																else v.pause();
+															}}
+														/>
+														<button
+															type="button"
+															className="w-6 h-6 bg-secondary-hover rounded-md shrink-0"
+															onClick={() => {
+																const v = videoRef.current;
+																if (!v) return;
+																v.pause();
+																v.currentTime = 0;
+																setCurrentPlaybackTime(0);
+															}}
+														/>
+														<button
+															type="button"
+															className="w-6 h-6 bg-secondary-hover rounded-sm shrink-0"
+															onClick={() => {
+																const v = videoRef.current;
+																if (!v) return;
+																if (!videoMuted) {
+																	volumeBeforeMuteRef.current = v.volume;
+																}
+																const next = !videoMuted;
+																setVideoMuted(next);
+																v.muted = next;
+																if (!next) {
+																	v.volume = volumeBeforeMuteRef.current;
+																	setVolume(volumeBeforeMuteRef.current);
+																}
+															}}
+														/>
 														
 														{/* Слайдер громкости */}
-														<div className="w-16 h-[2px] bg-border-default relative shrink-0">
-																<div className="absolute left-0 top-0 h-full bg-primary-disabled w-1/2" />
+														<div
+															className="w-16 h-[2px] bg-border-default relative shrink-0 cursor-pointer"
+															onMouseDown={handleVolumePointerDown}
+														>
+																<div
+																	className="absolute left-0 top-0 h-full bg-primary-disabled"
+																	style={{
+																		width: `${(videoMuted ? 0 : volume) * 100}%`
+																	}}
+																/>
 														</div>
 												</div>
 
 												{/* Таймкоды */}
-												<div className="flex items-center gap-1 text-[12px] text-body-med text-text-primary shrink-0 ml-4">
-														<span>00:01:22,165</span>
+												<div className="flex items-center gap-1 text-[12px] text-body-med text-text-primary shrink-0">
+														<span>{formatPlaybackClock(currentPlaybackTime)}</span>
 														<span className="text-text-secondary/40">/</span>
-														<span className="text-text-secondary">00:23:03,306</span>
+														<span className="text-text-secondary">
+															{formatPlaybackClock(timelineTotalDuration)}
+														</span>
 												</div>
 										</div>
 								</div>
@@ -869,77 +1934,149 @@ export default function App() {
 						<div className="flex flex-1 min-h-0">
 							{/* Левая панель с кнопками */}
 							<div className="w-[100px] border-r border-border-default flex flex-col gap-[4px] p-2 bg-surface-panel shrink-0">
-								{['Insert', 'Set start', 'Set end'].map((label) => (
-									<button 
-										key={label}
-										className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
-									>
-										{label}
-									</button>
-								))}
+								<button
+									type="button"
+									disabled={!currentProject || !activeSubtitleFileId}
+									onClick={() => void handleTimelineInsert()}
+									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+								>
+									Insert
+								</button>
+								<button
+									type="button"
+									disabled={selectedSegmentIndex < 0}
+									onClick={() => handleTimelineSetStart()}
+									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+								>
+									Set start
+								</button>
+								<button
+									type="button"
+									disabled={selectedSegmentIndex < 0}
+									onClick={() => handleTimelineSetEnd()}
+									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+								>
+									Set end
+								</button>
 							</div>
 
-							{/* основная зона таймлайна */}
-							<div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+							{/* основная зона таймлайна (wheel: горизонтальный скролл; Alt+wheel: зум) */}
+							<div ref={timelineWheelRef} className="flex-1 flex flex-col min-w-0 overflow-hidden">
 								
 								{/* Контейнер с волной и субтитрами */}
-								<div className="flex-1 relative bg-[#121212] m-3 rounded-md border border-black overflow-hidden shadow-inner group">
-									
-									{/* Сетка */}
-									<div className="absolute inset-0 opacity-10" 
-										style={{ 
-											backgroundImage: `linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)`,
-											backgroundSize: '20px 20px'
-										}} 
-									/>
-
-									{/* Псевдо-вейвформа (имитация через CSS-mask или фон) */}
-									<div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-32 opacity-80"
-										style={{
-											backgroundColor: '#A3E635',
-											maskImage: 'url("data:image/svg+xml,%3Csvg width=\'100%27 height=\'100%25%27 viewBox=\'0 0 1000 100\' preserveAspectRatio=\'none\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cpath d=\'M0 50 L10 20 L20 80 L30 40 L40 60 L50 10 L60 90 L70 30 L80 70 L90 20 L100 50 L110 10 L120 90 L130 30 L140 80 L150 40 L160 60 L170 10 L180 90 L190 30 L200 50 L210 10 L220 90 L230 30 L240 80 L250 40 L260 60 L270 10 L280 90 L290 30 L300 50 L310 10 L320 90 L330 30 L340 80 L350 40 L360 60 L370 10 L380 90 L390 30 L400 50 L410 10 L420 90 L430 30 L440 80 L450 40 L460 60 L470 10 L480 90 L490 30 L500 50 L510 10 L520 90 L530 30 L540 80 L550 40 L560 60 L570 10 L580 90 L590 30 L600 50 L610 10 L620 90 L630 30 L640 80 L650 40 L660 60 L670 10 L680 90 L690 30 L700 50 L710 10 L720 90 L730 30 L740 80 L750 40 L760 60 L770 10 L780 90 L790 30 L800 50 L810 10 L820 90 L830 30 L840 80 L850 40 L860 60 L870 10 L880 90 L890 30 L900 50 L910 10 L920 90 L930 30 L940 80 L950 40 L960 60 L970 10 L980 90 L990 30 L1000 50\' stroke=\'black\' fill=\'none\'/%3E%3C/svg%3E")',
-											WebkitMaskImage: 'url("data:image/svg+xml,%3Csvg width=\'1000\' height=\'100\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Crect width=\'100%25\' height=\'100%25\' fill=\'white\'/%3E%3C/svg%3E")', // Здесь можно подставить реальный SVG вейвформы
+								<div
+									ref={timelineScrollRef}
+									className="timeline-pan-no-scrollbar flex-1 relative bg-[#121212] m-3 rounded-md border border-black overflow-x-auto overflow-y-hidden shadow-inner group"
+									onScroll={() => updateTlViewport()}
+								>
+									<div
+										ref={timelineInnerRef}
+										className="relative h-full min-h-[120px]"
+										style={{ width: `${Math.max(100, timelineZoomPercent)}%` }}
+										onClick={(e) => {
+											const inner = timelineInnerRef.current;
+											const scr = timelineScrollRef.current;
+											if (!inner || !scr || timelineTotalDuration <= 0) return;
+											if ((e.target as HTMLElement).closest('[data-tl-segment]')) return;
+											if ((e.target as HTMLElement).closest('[data-tl-edge]')) return;
+											const scrRect = scr.getBoundingClientRect();
+											const x = e.clientX - scrRect.left + scr.scrollLeft;
+											const ratio = Math.max(0, Math.min(1, x / inner.offsetWidth));
+											const t = ratio * timelineTotalDuration;
+											const v = videoRef.current;
+											if (v) v.currentTime = t;
+											setCurrentPlaybackTime(t);
 										}}
 									>
-										{/* Упрощенная визуализация волны полосками */}
-										<div className="flex items-center gap-[1px] h-full px-2">
-											{Array.from({ length: 120 }).map((_, i) => (
-												<div 
-													key={i} 
-													className="bg-[#A3E635] w-[3px] rounded-full" 
-													style={{ height: `${Math.random() * 60 + 20}%` }}
+										{/* Сетка */}
+										<div
+											className="absolute inset-0 opacity-10"
+											style={{
+												backgroundImage: `linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)`,
+												backgroundSize: '20px 20px'
+											}}
+										/>
+
+										{/* Волна: PNG (showwavespic) или canvas по пикам */}
+										{waveformImageSrc ? (
+											<div
+												key={waveformImageSrc}
+												className="absolute inset-x-0 top-[5%] bottom-[5%] z-[5] overflow-hidden pointer-events-none"
+											>
+												<img
+													src={waveformImageSrc}
+													alt=""
+													draggable={false}
+													className="h-full w-full min-h-0 select-none object-cover object-center opacity-95"
 												/>
-											))}
-										</div>
-									</div>
-
-									{/* Субтитры на таймлайне */}
-									<div className="absolute inset-0 flex items-stretch">
-										{/* Субтитр 1 */}
-										<div className="absolute left-[2%] w-[25%] h-full border-x border-[#A3E635] bg-surface-secondary/5 backdrop-blur-[1px] p-2 flex flex-col justify-between">
-											<span className="text-[11px] text-white font-medium truncate">That's our new home!</span>
-											<div className="flex gap-2 text-[10px] text-white/50 font-mono">
-												<span>#232</span>
-												<span>1,738</span>
 											</div>
-										</div>
+										) : (
+											<TimelineSymmetricWaveform
+												peaks={waveformPeaks}
+												className="absolute inset-x-0 top-[5%] bottom-[5%] z-[5] w-full min-w-0 opacity-95 pointer-events-none"
+											/>
+										)}
 
-										{/* Субтитр 2 */}
-										<div className="absolute left-[35%] w-[35%] h-full border-x border-[#A3E635] bg-surface-secondary/10 backdrop-blur-[1px] p-2 flex flex-col justify-between">
-											<span className="text-[11px] text-white font-medium truncate">Kali, if you get an autograph, I'll...</span>
-											<div className="flex gap-2 text-[10px] text-white/50 font-mono">
-												<span>#232</span>
-												<span>1,520</span>
-											</div>
-										</div>
-
-										{/* Субтитр 3 */}
-										<div className="absolute left-[75%] w-[23%] h-full border-x border-[#A3E635] bg-surface-secondary/5 backdrop-blur-[1px] p-2 flex flex-col justify-between">
-											<span className="text-[11px] text-white font-medium truncate">That's our new home!</span>
-											<div className="flex gap-2 text-[10px] text-white/50 font-mono">
-												<span>#232</span>
-												<span>1,738</span>
-											</div>
+										{/* Субтитры на таймлайне */}
+										<div className="absolute inset-0 flex items-stretch pointer-events-none">
+											{generatedSegments.map((seg, idx) => {
+												const left = (seg.start / timelineTotalDuration) * 100;
+												const w = Math.max(0, ((seg.end - seg.start) / timelineTotalDuration) * 100);
+												const isSel = idx === selectedSegmentIndex;
+												return (
+													<div
+														key={seg.id}
+														data-tl-segment
+														className={`absolute top-0 z-[11] h-full border-x border-[#A3E635] flex flex-col justify-between pointer-events-auto cursor-pointer ${
+															isSel ? 'bg-surface-secondary/10' : 'bg-surface-secondary/5'
+														}`}
+														style={{ left: `${left}%`, width: `${w}%` }}
+														onClick={(e) => {
+															if ((e.target as HTMLElement).closest('[data-tl-edge]')) return;
+															if (segmentBodyDragMovedRef.current) {
+																segmentBodyDragMovedRef.current = false;
+																return;
+															}
+															e.stopPropagation();
+															const t = clientXToTimelineTime(e.clientX);
+															const v = videoRef.current;
+															if (v) v.currentTime = t;
+															setCurrentPlaybackTime(t);
+															setSelectedSegmentIndex(idx);
+														}}
+													>
+														<div
+															data-tl-body
+															className="relative z-[10] flex flex-col justify-between p-2 min-h-0 flex-1 min-w-0 cursor-grab active:cursor-grabbing"
+															onMouseDown={(e) => beginTimelineSegmentMove(idx, e)}
+														>
+															<span className="text-[11px] text-white font-medium truncate">
+																{(seg.translation && seg.translation.trim()) || seg.text || '\u00A0'}
+															</span>
+															<div className="flex gap-2 text-[10px] text-white/50 font-mono">
+																<span>#{idx + 1}</span>
+																<span>{(seg.text ?? '').length}</span>
+															</div>
+														</div>
+														<div
+															data-tl-edge="start"
+															className="absolute left-0 top-0 bottom-0 w-2 z-[35] cursor-ew-resize hover:bg-white/25"
+															onMouseDown={(e) => beginTimelineEdgeDrag('start', idx, e)}
+														/>
+														<div
+															data-tl-edge="end"
+															className="absolute right-0 top-0 bottom-0 w-2 z-[35] cursor-ew-resize hover:bg-white/25"
+															onMouseDown={(e) => beginTimelineEdgeDrag('end', idx, e)}
+														/>
+													</div>
+												);
+											})}
+											<div
+												className="absolute top-0 bottom-0 w-px bg-primary-main z-20 pointer-events-none"
+												style={{
+													left: `${Math.min(100, (currentPlaybackTime / timelineTotalDuration) * 100)}%`
+												}}
+											/>
 										</div>
 									</div>
 								</div>
@@ -950,16 +2087,28 @@ export default function App() {
 									{/* зум кнопки */}
 									<div className="flex items-center gap-2">
 										{/* зум аут */}
-										<button className="group w-[22px] h-[22px] flex items-center justify-center shrink-0">
+										<button
+											type="button"
+											className="group w-[22px] h-[22px] flex items-center justify-center shrink-0"
+											onClick={() =>
+												setTimelineZoomPercent((z) => stepTimelineZoom(z, -1))
+											}
+										>
 											<div className="w-[22px] h-[22px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 										</button>
 
 										{/* выпадающее */}
 										<div className="relative flex items-center h-[22px]">
-											<select className="appearance-none h-full bg-surface-bg border border-border-default rounded-[4px] pl-2 pr-7 text-[12px] leading-none text-text-primary font-medium outline-none cursor-pointer hover:border-primary-main transition-colors m-0">
-												<option>90%</option>
-												<option>100%</option>
-												<option>120%</option>
+											<select
+												className="appearance-none h-full bg-surface-bg border border-border-default rounded-[4px] pl-2 pr-7 text-[12px] leading-none text-text-primary font-medium outline-none cursor-pointer hover:border-primary-main transition-colors m-0"
+												value={timelineZoomPercent}
+												onChange={(e) => setTimelineZoomPercent(Number(e.target.value))}
+											>
+												{TIMELINE_ZOOM_PRESETS.map((z) => (
+													<option key={z} value={z}>
+														{z}%
+													</option>
+												))}
 											</select>
 
 											<div className="absolute right-2 pointer-events-none flex items-center">
@@ -970,14 +2119,40 @@ export default function App() {
 										</div>
 
 										{/* зум аут */}
-										<button className="group w-[22px] h-[22px] flex items-center justify-center shrink-0">
+										<button
+											type="button"
+											className="group w-[22px] h-[22px] flex items-center justify-center shrink-0"
+											onClick={() =>
+												setTimelineZoomPercent((z) => stepTimelineZoom(z, 1))
+											}
+										>
 											<div className="w-[22px] h-[22px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
 										</button>
 									</div>
 
 									{/* Полоса прокрутки */}
-									<div className="flex-1 h-[4px] bg-border-default rounded-full relative overflow-hidden">
-										<div className="absolute left-0 top-0 h-full w-[40%] bg-primary-disabled rounded-full" />
+									<div
+										className="flex-1 h-[4px] bg-border-default rounded-full relative overflow-hidden cursor-pointer"
+										onMouseDown={handleTimelineScrubPointerDown}
+									>
+										<div
+											className="absolute top-0 h-full bg-primary-disabled rounded-full"
+											style={{
+												width: `${(() => {
+													const { sw, cw } = tlViewport;
+													if (!sw || sw <= cw) return 100;
+													return Math.max(8, (cw / sw) * 100);
+												})()}%`,
+												left: `${(() => {
+													const { sl, sw, cw } = tlViewport;
+													if (!sw || sw <= cw) return 0;
+													const maxScroll = sw - cw;
+													const thumbW = Math.max((cw / sw) * 100, 8);
+													const travel = 100 - thumbW;
+													return (sl / maxScroll) * travel;
+												})()}%`
+											}}
+										/>
 									</div>
 								</div>
 
@@ -998,20 +2173,54 @@ export default function App() {
 						{activeModal === 'welcome' && (
 							<WelcomeModal 
 								onClose={() => setActiveModal(null)} 
-								onNewProject={() => setActiveModal('createProject')} 
+								onNewProject={() => setActiveModal('createProject')}
+								onOpenProject={handleOpenProjectDialog}
+								onSelectProject={handleSelectProject} // <-- Добавь эту строку
 							/>
 						)}
 
 						{activeModal === 'createProject' && (
 							<NewProjectModal 
 								onClose={() => setActiveModal(null)} 
+								onProjectCreated={handleProjectCreated}
 							/>
 						)}
 
-						{activeModal === 'wizard' && <WizardModal onClose={() => setActiveModal(null)} />}
+						{activeModal === 'wizard' && (
+							<WizardModal
+								onClose={() => setActiveModal(null)}
+								projectPath={currentProject?.path}
+								onComplete={({ project, segments }) => {
+									setCurrentProject(project);
+									setGeneratedSegments(segments);
+									const withSeg = project.files.find(
+										(f) => f.subtitle_segments && f.subtitle_segments.length > 0
+									);
+									setActiveSubtitleFileId(withSeg?.id ?? null);
+									setSelectedSegmentIndex(segments.length > 0 ? 0 : -1);
+									if (withSeg?.id) {
+										const stem = getSourceVideoStem(project, withSeg.id);
+										void projectService
+											.exportSubtitles(
+												project.path,
+												withSeg.id,
+												'srt',
+												joinProjectPath(project.path, 'subtitles', `${stem}.srt`)
+											)
+											.catch((e) => console.error('Initial SRT export failed', e));
+									}
+								}}
+							/>
+						)}
 
 						{activeModal === 'glossary' && (
-							<GlossaryModal onClose={() => setActiveModal(null)} />
+							<GlossaryModal
+								projectPath={currentProject?.path ?? null}
+								onSaved={(glossary) => {
+									setCurrentProject((p) => (p ? { ...p, glossary } : null));
+								}}
+								onClose={() => setActiveModal(null)}
+							/>
 						)}
 
 						{activeModal === 'export' && (

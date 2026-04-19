@@ -1,6 +1,7 @@
 use tauri::Manager;
 use std::path::Path;
 use std::fs;
+use crate::commands::audio::media_duration_seconds;
 use crate::project::{Project, ProjectFile, ProjectType, SubtitleSegment};
 use crate::cache::Cache;
 use crate::types::RecentProject;
@@ -85,12 +86,18 @@ pub async fn import_media(
         ProjectType::Config
     };
     
+    let duration = if matches!(file_type, ProjectType::Video) {
+        media_duration_seconds(&dest_path).await.ok()
+    } else {
+        None
+    };
+
     let project_file = ProjectFile {
         id: uuid::Uuid::new_v4().to_string(),
         name: file_name.clone(),
         file_type,
         path: format!("{}/{}", dest_subdir, file_name),
-        duration: None,
+        duration,
         subtitle_segments: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
@@ -130,6 +137,10 @@ pub async fn export_subtitles(
         "txt" => generate_txt(segments),
         _ => return Err(format!("Неподдерживаемый формат: {}", format)),
     };
+    
+    if let Some(parent) = Path::new(&output_path).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     
     fs::write(&output_path, content).map_err(|e| e.to_string())?;
     
@@ -483,4 +494,44 @@ fn add_directory_to_zip(
     }
     
     Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProjectDiskFile {
+    pub relative_path: String,
+    pub name: String,
+}
+
+/// Файлы на диске в `config/`, `video/`, `subtitles/` — для дерева проекта (не только project.json).
+#[tauri::command]
+pub async fn list_project_directory_files(project_path: String) -> Result<Vec<ProjectDiskFile>, String> {
+    let base = Path::new(&project_path);
+    if !base.is_dir() {
+        return Err("Папка проекта не найдена".to_string());
+    }
+    let mut out: Vec<ProjectDiskFile> = Vec::new();
+    for sub in ["config", "video", "subtitles"] {
+        let dir = base.join(sub);
+        if !dir.is_dir() {
+            continue;
+        }
+        let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.is_file() {
+                let name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let relative_path = format!("{}/{}", sub, name);
+                out.push(ProjectDiskFile {
+                    relative_path,
+                    name,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(out)
 }

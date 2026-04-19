@@ -58,55 +58,38 @@ pub async fn get_project_structure(
 
 #[tauri::command]
 pub async fn get_glossary(
-    project_id: String,
+    project_path: String,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<GlossaryEntry>, String> {
-    let projects_dir = app_handle.path().document_dir()
-        .map_err(|e| e.to_string())?
-        .join("SubtitleStudio");
-    
-    let project_path = projects_dir.join(&project_id);
-    let project = Project::load_from_file(&project_path, &app_handle)?;
-    
+    let project_path_buf = Path::new(&project_path);
+    let project = Project::load_from_file(project_path_buf, &app_handle)?;
     Ok(project.glossary)
 }
 
 #[tauri::command]
 pub async fn update_glossary(
-    project_id: String,
+    project_path: String,
     entries: Vec<GlossaryEntry>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let projects_dir = app_handle.path().document_dir()
-        .map_err(|e| e.to_string())?
-        .join("SubtitleStudio");
-    
-    let project_path = projects_dir.join(&project_id);
-    let mut project = Project::load_from_file(&project_path, &app_handle)?;
-    
+    let project_path_buf = Path::new(&project_path);
+    let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
     project.glossary = entries;
     project.updated_at = chrono::Utc::now().to_rfc3339();
-    
     project.save_to_file(&app_handle)?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn add_glossary_entry(
-    project_id: String,
+    project_path: String,
     entry: GlossaryEntry,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let projects_dir = app_handle.path().document_dir()
-        .map_err(|e| e.to_string())?
-        .join("SubtitleStudio");
-    
-    let project_path = projects_dir.join(&project_id);
-    let mut project = Project::load_from_file(&project_path, &app_handle)?;
-    
+    let project_path_buf = Path::new(&project_path);
+    let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
     project.glossary.push(entry);
     project.updated_at = chrono::Utc::now().to_rfc3339();
-    
     project.save_to_file(&app_handle)?;
     Ok(())
 }
@@ -207,6 +190,72 @@ pub async fn create_empty_segments(
         println!("➕ Создано {} пустых сегментов", count);
         
         Ok(new_segments)
+    } else {
+        Err("Файл не найден в проекте".to_string())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct InsertSubtitleSegmentResult {
+    pub segments: Vec<SubtitleSegment>,
+    pub inserted_id: u32,
+}
+
+/// Вставить пустой субтитр в заданном интервале времени (сегменты пересортировываются по `start`).
+#[tauri::command]
+pub async fn insert_subtitle_segment(
+    project_path: String,
+    file_id: String,
+    start: f64,
+    end: f64,
+    app_handle: tauri::AppHandle,
+) -> Result<InsertSubtitleSegmentResult, String> {
+    const MIN_DUR: f64 = 0.05;
+    if !start.is_finite() || !end.is_finite() {
+        return Err("Некорректное время".to_string());
+    }
+    if end <= start {
+        return Err("Конец должен быть больше начала".to_string());
+    }
+    let dur = end - start;
+    if dur < MIN_DUR {
+        return Err(format!("Минимальная длительность сегмента — {} с", MIN_DUR));
+    }
+
+    let project_path_buf = Path::new(&project_path);
+    let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
+
+    if let Some(file) = project.files.iter_mut().find(|f| f.id == file_id) {
+        let mut segments = file.subtitle_segments.take().unwrap_or_default();
+
+        let new_id = segments.iter().map(|s| s.id).max().unwrap_or(0) + 1;
+        let segment = SubtitleSegment {
+            id: new_id,
+            start,
+            end,
+            duration: dur,
+            text: String::new(),
+            translation: None,
+            flags: None,
+        };
+
+        segments.push(segment);
+        segments.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        file.subtitle_segments = Some(segments.clone());
+        file.updated_at = chrono::Utc::now().to_rfc3339();
+        project.updated_at = chrono::Utc::now().to_rfc3339();
+        project.save_to_file(&app_handle)?;
+
+        Ok(InsertSubtitleSegmentResult {
+            segments,
+            inserted_id: new_id,
+        })
     } else {
         Err("Файл не найден в проекте".to_string())
     }

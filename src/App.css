@@ -3,7 +3,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap');
 
 @theme {
-  /* цвета */
+  /*  */
   --color-surface-bg: #F8F9FA;
   --color-surface-secondary: #FFFFFF;
   --color-surface-panel: #F8F9FA;
@@ -36,10 +36,10 @@
   --font-inter: "Inter", sans-serif;
   --font-mono: "JetBrains Mono", monospace;
 
-	/* текст */
+	/*  */
 
-  /* Настраиваем текстовые стили как переменные размера */
-  /* Формат: [size, { lineHeight, letterSpacing }] */
+  /*       */
+  /* : [size, { lineHeight, letterSpacing }] */
 
 	--text-h1-heading: 16px;
 	--text-h1-heading--line-height: 20px;
@@ -119,7 +119,7 @@
   }
 }
 
-/* Контейнер панели */
+/*   */
 .table-panel-resizable {
   overflow: hidden; 
   min-width: 300px;
@@ -127,9 +127,10 @@
 }
 
 
-/* Стилизация скроллбара таблицы */
+/*    */
 .subtitle-table-scroll::-webkit-scrollbar {
   width: 12px;
+  height: 12px;
 }
 
 .subtitle-table-scroll::-webkit-scrollbar-track {
@@ -148,19 +149,28 @@
 	
 }
 
-/* Убираем белый угол скроллбара */
+/*     */
 .subtitle-table-scroll::-webkit-scrollbar-corner {
   background: var(--color-surface-secondary);
 }
 
-/* Для темной темы */
+/*    */
 .dark .subtitle-table-scroll::-webkit-scrollbar-corner {
   background: var(--color-surface-secondary);
 }
 
+/* Панель иерархии: фон угла как у панели (surface-bg) */
+.subtitle-table-scroll.project-tree-scroll::-webkit-scrollbar-corner {
+  background: var(--color-surface-bg);
+}
+
+.dark .subtitle-table-scroll.project-tree-scroll::-webkit-scrollbar-corner {
+  background: var(--color-surface-bg);
+}
 
 
-/* Убираем стандартные рамки и настраиваем ресайз колонок */
+
+/*        */
 .resizer {
   position: absolute;
   right: 0;
@@ -183,4 +193,15 @@
 
 .flag-font {
   font-family: 'FlagEmoji', sans-serif;
+}
+
+/*       scrollbar */
+.timeline-pan-no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.timeline-pan-no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }

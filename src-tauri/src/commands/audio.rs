@@ -87,6 +87,12 @@ async fn generate_waveform_with_ffmpeg(
         if n == 0 { break; }
         audio_data.extend_from_slice(&buffer[..n]);
     }
+
+    drop(reader);
+    let status = child.wait().await.map_err(|e| format!("ffmpeg wait: {}", e))?;
+    if !status.success() {
+        return Err("ffmpeg: ошибка декодирования аудио (проверьте кодек)".to_string());
+    }
     
     // Конвертируем байты в 16-битные сэмплы
     let samples: Vec<i16> = audio_data
@@ -122,6 +128,70 @@ async fn generate_waveform_with_ffmpeg(
         sample_rate: resolution,
         duration,
     })
+}
+
+/// Полноширинная «картинка» волны (как в DAW) через фильтр showwavespic — надёжнее отображение в UI.
+#[tauri::command]
+pub async fn generate_waveform_png(
+    media_path: String,
+    output_png_path: String,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<(), String> {
+    use tokio::process::Command;
+
+    let media = Path::new(&media_path);
+    if !media.exists() {
+        return Err(format!("Медиафайл не найден: {}", media_path));
+    }
+
+    let w = width.unwrap_or(4096).clamp(640, 8192);
+    let h = height.unwrap_or(256).clamp(64, 1024);
+
+    if let Some(parent) = Path::new(&output_png_path).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    /* Усиление перед showwavespic — визуально «как в DAW», тихие участки не выглядят плоскими. */
+    let filter = format!(
+        "[0:a]volume=10dB,showwavespic=s={}x{}:colors=0xADFF2F|0x121212",
+        w, h
+    );
+
+    let output = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-i")
+        .arg(media_path)
+        .arg("-filter_complex")
+        .arg(&filter)
+        .arg("-frames:v")
+        .arg("1")
+        .arg(&output_png_path)
+        .output()
+        .await
+        .map_err(|e| format!("Запуск ffmpeg: {}", e))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg showwavespic: {}", err.trim()));
+    }
+
+    println!("✅ waveform PNG: {}", output_png_path);
+    Ok(())
+}
+
+/// Длительность медиа (видео/аудио) через ffprobe — для таймкода плеера и импорта.
+#[tauri::command]
+pub async fn probe_media_duration(media_path: String) -> Result<f64, String> {
+    let p = Path::new(&media_path);
+    if !p.exists() {
+        return Err(format!("Файл не найден: {}", media_path));
+    }
+    get_audio_duration(p).await
+}
+
+pub async fn media_duration_seconds(path: &Path) -> Result<f64, String> {
+    get_audio_duration(path).await
 }
 
 async fn get_audio_duration(audio_path: &Path) -> Result<f64, String> {

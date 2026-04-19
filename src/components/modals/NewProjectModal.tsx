@@ -1,28 +1,79 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { open } from '@tauri-apps/plugin-dialog'; // РґР»СЏ РІС‹Р±РѕСЂР° РїР°РїРєРё
+import { projectService } from '../../services/projectService';
 
 interface NewProjectModalProps {
   onClose: () => void;
+  onProjectCreated: (project: any) => void; // Р§С‚РѕР±С‹ App.tsx СѓР·РЅР°Р» РѕР± СѓСЃРїРµС…Рµ
 }
 
-export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose }) => {
-  return (
+export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onProjectCreated }) => {
+  const [name, setName] = useState('');
+  const [location, setLocation] = useState('');
+  const [targetLang, setTargetLang] = useState('English');
+  const [isCreating, setIsCreating] = useState(false);
+
+  // Р¤СѓРЅРєС†РёСЏ РІС‹Р±РѕСЂР° РїР°РїРєРё С‡РµСЂРµР· СЃРёСЃС‚РµРјРЅРѕРµ РѕРєРЅРѕ
+  const handleSelectFolder = async (e: React.MouseEvent) => {
+		e.preventDefault();
+		e.stopPropagation(); // Р§С‚РѕР±С‹ РєР»РёРє РЅРµ СѓС…РѕРґРёР» СЂРѕРґРёС‚РµР»СЋ
+		console.log("Р’С‹Р·РѕРІ РґРёР°Р»РѕРіР°..."); // РџСЂРѕРІРµСЂСЊ СЌС‚Рѕ РІ РєРѕРЅСЃРѕР»Рё (F12)
+		
+		try {
+			const selected = await open({
+				directory: true,
+				multiple: false,
+				title: 'Select Project Directory'
+			});
+			console.log("Р’С‹Р±СЂР°РЅРѕ:", selected);
+			if (selected && typeof selected === 'string') {
+				setLocation(selected);
+			}
+		} catch (err) {
+			console.error("РћС€РёР±РєР° РґРёР°Р»РѕРіР°:", err);
+		}
+	};
+
+  // РћС‚РїСЂР°РІРєР° РґР°РЅРЅС‹С… РІ Rust
+  const handleCreate = async () => {
+    if (!name || !location) {
+      alert("Please fill in all fields");
+      return;
+    }
+
+    setIsCreating(true);
+    try {
+      // Р’С‹Р·С‹РІР°РµРј РЅР°С€ СЃРµСЂРІРёСЃ (РєРѕС‚РѕСЂС‹Р№ РґРµСЂРіР°РµС‚ invoke('create_project'))
+      const newProject = await projectService.create(name, location, targetLang);
+      onProjectCreated(newProject);
+      onClose();
+    } catch (err) {
+      console.error(err);
+      alert("Failed to create project");
+    } finally {
+      setIsCreating(false);
+    }
+  };
+	
+	
+	return (
     <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-      {/* p-8 дает ровно 32px со всех сторон. Убрал gap-[24px], чтобы он не толкал контент вниз от хедера */}
+      {/* p-8 РґР°РµС‚ СЂРѕРІРЅРѕ 32px СЃРѕ РІСЃРµС… СЃС‚РѕСЂРѕРЅ. РЈР±СЂР°Р» gap-[24px], С‡С‚РѕР±С‹ РѕРЅ РЅРµ С‚РѕР»РєР°Р» РєРѕРЅС‚РµРЅС‚ РІРЅРёР· РѕС‚ С…РµРґРµСЂР° */}
       <div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
         
-        {/* Хедер модалки: mb-auto прижмет основной контент к центру/низу, если будет место, 
-            но здесь мы полагаемся на flex-1 ниже */}
+        {/* РҐРµРґРµСЂ РјРѕРґР°Р»РєРё: mb-auto РїСЂРёР¶РјРµС‚ РѕСЃРЅРѕРІРЅРѕР№ РєРѕРЅС‚РµРЅС‚ Рє С†РµРЅС‚СЂСѓ/РЅРёР·Сѓ, РµСЃР»Рё Р±СѓРґРµС‚ РјРµСЃС‚Рѕ, 
+            РЅРѕ Р·РґРµСЃСЊ РјС‹ РїРѕР»Р°РіР°РµРјСЃСЏ РЅР° flex-1 РЅРёР¶Рµ */}
         <div className="flex justify-end h-5"> 
           <button onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
         </div>
 
-        {/* Основной контентный блок: mt-4 компенсирует высоту хедера, чтобы визуально 
-            центральная часть была выровнена, flex-1 заставляет блок занять все пространство до низа p-8 */}
+        {/* РћСЃРЅРѕРІРЅРѕР№ РєРѕРЅС‚РµРЅС‚РЅС‹Р№ Р±Р»РѕРє: mt-4 РєРѕРјРїРµРЅСЃРёСЂСѓРµС‚ РІС‹СЃРѕС‚Сѓ С…РµРґРµСЂР°, С‡С‚РѕР±С‹ РІРёР·СѓР°Р»СЊРЅРѕ 
+            С†РµРЅС‚СЂР°Р»СЊРЅР°СЏ С‡Р°СЃС‚СЊ Р±С‹Р»Р° РІС‹СЂРѕРІРЅРµРЅР°, flex-1 Р·Р°СЃС‚Р°РІР»СЏРµС‚ Р±Р»РѕРє Р·Р°РЅСЏС‚СЊ РІСЃРµ РїСЂРѕСЃС‚СЂР°РЅСЃС‚РІРѕ РґРѕ РЅРёР·Р° p-8 */}
         <div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 mt-4">
           
-          {/* Левая колонна */}
+          {/* Р›РµРІР°СЏ РєРѕР»РѕРЅРЅР° */}
           <div className="flex flex-col">
             <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
               Create a new project
@@ -32,7 +83,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose }) => 
             </p>
           </div>
 
-          {/* Правая колонна: Убрал pb-2, так как он создавал лишний отступ снизу */}
+          {/* РџСЂР°РІР°СЏ РєРѕР»РѕРЅРЅР°: РЈР±СЂР°Р» pb-2, С‚Р°Рє РєР°Рє РѕРЅ СЃРѕР·РґР°РІР°Р» Р»РёС€РЅРёР№ РѕС‚СЃС‚СѓРї СЃРЅРёР·Сѓ */}
           <div className="flex flex-col justify-between h-full">
             
             <div className="flex flex-col gap-[24px]">
@@ -40,6 +91,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose }) => 
                 <label className="text-caption text-text-secondary">Project name</label>
                 <input 
                   type="text" 
+									value={name}
+  								onChange={(e) => setName(e.target.value)}
                   placeholder="My Awesome Series/Film"
                   className="w-full px-[12px] py-[10px] bg-secondary-main border border-border-default rounded-[8px] text-body-reg text-text-primary focus:outline-none focus:border-primary-main transition-colors"
                 />
@@ -47,12 +100,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose }) => 
 
               <div className="flex flex-col gap-[8px]">
                 <label className="text-caption text-text-secondary">Project location</label>
-                <div className="relative">
+                <div className="relative cursor-pointer" onClick={handleSelectFolder}>
                   <input 
                     type="text" 
                     readOnly
-                    value="C:/Users/Admin/Projects/VIMN_work"
-                    className="w-full px-[12px] py-[10px] pr-[40px] bg-secondary-main border border-border-default rounded-[8px] text-body-reg text-text-secondary"
+                    value={location || "Click to select folder..."}
+                    className="w-full px-[12px] py-[10px] pr-[40px] bg-secondary-main border border-border-default rounded-[8px] text-body-reg text-text-secondary cursor-pointer"
                   />
                   <div className="absolute right-[12px] top-1/2 -translate-y-1/2 text-text-primary">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -64,17 +117,27 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose }) => 
 
               <div className="flex flex-col gap-[8px]">
                 <label className="text-caption text-text-secondary">Target language</label>
-                <div className="w-full px-[12px] py-[10px] bg-secondary-main border border-border-default rounded-[8px] flex items-center justify-between text-body-reg text-text-primary">
-                  <span>English</span>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 9 6 6 6-6"/></svg>
-                </div>
+                <select
+                  value={targetLang}
+                  onChange={(e) => setTargetLang(e.target.value)}
+                  className="w-full px-[12px] py-[10px] bg-secondary-main border border-border-default rounded-[8px] text-body-reg text-text-primary focus:outline-none focus:border-primary-main transition-colors"
+                >
+                  <option value="English">English</option>
+                  <option value="Russian">Russian</option>
+                  <option value="Spanish">Spanish</option>
+                  <option value="French">French</option>
+                  <option value="German">German</option>
+                </select>
               </div>
             </div>
 
-            {/* Кнопка Create: теперь она стоит ровно в углу, ограниченном только p-8 (32px) */}
+            {/* РљРЅРѕРїРєР° Create: С‚РµРїРµСЂСЊ РѕРЅР° СЃС‚РѕРёС‚ СЂРѕРІРЅРѕ РІ СѓРіР»Сѓ, РѕРіСЂР°РЅРёС‡РµРЅРЅРѕРј С‚РѕР»СЊРєРѕ p-8 (32px) */}
             <div className="flex justify-end">
-              <button className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm">
-                Create
+              <button 
+							onClick={handleCreate}
+  						disabled={isCreating}
+							className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm">
+                {isCreating ? 'Creating...' : 'Create'}
               </button>
             </div>
 
