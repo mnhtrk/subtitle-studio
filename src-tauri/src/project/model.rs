@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::fs;
-use tauri::AppHandle;  // Manager не нужен здесь, так как методы не используют app_handle.path()
+use tauri::AppHandle;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ProjectType {

@@ -94,8 +94,13 @@ function formatPlaybackClock(seconds: number): string {
 }
 
 const MIN_SEGMENT_DURATION = 0.05;
+const MAX_SUBTITLE_UNDO = 80;
 
-/** Симметричная «настоящая» волна по массиву пиков (как в аудиоредакторах). */
+function cloneSubtitleSegments(segs: SubtitleSegment[]): SubtitleSegment[] {
+	return segs.map((s) => ({ ...s }));
+}
+
+/** Симметричная аудиоволна генерация */
 function TimelineSymmetricWaveform({
 	peaks,
 	className
@@ -192,7 +197,7 @@ function TimelineSymmetricWaveform({
 	);
 }
 
-/** Пробел не должен запускать видео, когда фокус в поле ввода, слайдере и т.п. */
+/** Пробел не должен запускать видео, когда фокус в поле ввода, слайдере */
 function shouldIgnoreSpacebarForVideo(target: EventTarget | null): boolean {
 	if (!target || !(target instanceof Element)) return false;
 	const el = target as HTMLElement;
@@ -214,6 +219,13 @@ const LIMITS = {
   /** Минимальная ширина колонки видео (контролы переносятся — можно уже прежних ~400px) */
   VIDEO: 220,
 };
+
+/** Верхняя строка меню */
+const APP_HEADER_BAR_PX = 32;
+/**
+ * Минимальная высота области таймлайна
+ */
+const MIN_TIMELINE_PANE_PX = 200;
 
 const TIMELINE_ZOOM_PRESETS = [50, 75, 90, 100, 120, 150, 200, 300, 400] as const;
 
@@ -299,25 +311,6 @@ export default function App() {
 		return () => window.removeEventListener('click', handleClickOutside);
 	}, [activeMenu]);
 
-	// данные для верхнего меню
-	const menuItems = [
-		{ label: 'File', items: [{ label: 'New Project', action: () => setActiveModal('createProject') }, { label: 'Open Project' }, { label: 'Save' }, { label: 'Exit' }] },
-		{ label: 'Edit', items: [{ label: 'Undo' }, { label: 'Redo' }, { label: 'Find' }] },
-		{ label: 'Tools', items: [{ label: 'Spell check' }, { label: 'Batch convert' }] },
-		{ label: 'Video', items: [{ label: 'Open video file' }, { label: 'Audio track' }] },
-		{
-			label: 'Help',
-			items: [
-				{ label: 'About' },
-				{ label: 'Updates' },
-				{
-					label: isDarkTheme ? 'Switch to light theme' : 'Switch to dark theme',
-					action: () => setIsDarkTheme(prev => !prev),
-				},
-			],
-		},
-	];
-
 	// --- МОДАЛЬНЫЕ ОКНА ---
 	const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | null>('welcome');
 	const [currentProject, setCurrentProject] = useState<ProjectData | null>(null);
@@ -331,11 +324,15 @@ export default function App() {
 	const timelineScrollRef = useRef<HTMLDivElement | null>(null);
 	const timelineInnerRef = useRef<HTMLDivElement | null>(null);
 	const timelineWheelRef = useRef<HTMLDivElement | null>(null);
+	const timelineScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
+	const segmentEditorPanelRef = useRef<HTMLDivElement | null>(null);
+	const subtitleTableScrollRef = useRef<HTMLDivElement | null>(null);
 	const currentPlaybackTimeRef = useRef(0);
 	const zoomAnchorRef = useRef<{ ratio: number; scrollLeft: number; innerW: number } | null>(null);
 	const isPlayingRef = useRef(false);
 	const volumeBeforeMuteRef = useRef(1);
 	const segmentsRef = useRef<SubtitleSegment[]>([]);
+	const currentProjectRef = useRef<ProjectData | null>(null);
 	const timelineTotalDurationRef = useRef(1);
 	const timelineEdgeDragRef = useRef<{
 		edge: 'start' | 'end';
@@ -350,6 +347,10 @@ export default function App() {
 		t0: number;
 	} | null>(null);
 	const segmentBodyDragMovedRef = useRef(false);
+	const undoSegmentsStackRef = useRef<SubtitleSegment[][]>([]);
+	const redoSegmentsStackRef = useRef<SubtitleSegment[][]>([]);
+	/** Все записи на диск строго по очереди: иначе при быстром Ctrl+Z save завершаются не по порядку и insert читает устаревший project.json */
+	const projectMutationChainRef = useRef<Promise<unknown>>(Promise.resolve());
 
 	const [videoDuration, setVideoDuration] = useState(0);
 	const [currentPlaybackTime, setCurrentPlaybackTime] = useState(0);
@@ -358,9 +359,13 @@ export default function App() {
 	const [timelineZoomPercent, setTimelineZoomPercent] = useState(100);
 	const [waveformPeaks, setWaveformPeaks] = useState<number[] | null>(null);
 	const [waveformImageSrc, setWaveformImageSrc] = useState<string | null>(null);
-	const [tlViewport, setTlViewport] = useState({ sl: 0, sw: 0, cw: 0 });
 	const [projectDiskFiles, setProjectDiskFiles] = useState<{ relative_path: string; name: string }[]>([]);
 	const [probedMediaDuration, setProbedMediaDuration] = useState<number | null>(null);
+	/** Контролируемые поля панели одного субтитра - иначе после Delete остаётся старый DOM и onBlur пишет в новый сегмент. */
+	const [segEditorTranslation, setSegEditorTranslation] = useState('');
+	const [segEditorOriginal, setSegEditorOriginal] = useState('');
+	const [segEditorStart, setSegEditorStart] = useState('');
+	const [segEditorDuration, setSegEditorDuration] = useState('');
 
 	const activeVideoFile = useMemo(() => {
 		if (!currentProject) return null;
@@ -400,6 +405,17 @@ export default function App() {
 	}, [mediaLengthHint, maxSegmentEnd]);
 
 	segmentsRef.current = generatedSegments;
+	currentProjectRef.current = currentProject;
+
+	useLayoutEffect(() => {
+		if (selectedSegmentIndex < 0) return;
+		const container = subtitleTableScrollRef.current;
+		if (!container) return;
+		const row = container.querySelector<HTMLElement>(
+			`[data-subtitle-row-index="${selectedSegmentIndex}"]`
+		);
+		row?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
+	}, [selectedSegmentIndex, generatedSegments]);
 	timelineTotalDurationRef.current = timelineTotalDuration;
 	currentPlaybackTimeRef.current = currentPlaybackTime;
 
@@ -407,8 +423,18 @@ export default function App() {
 		const t = currentPlaybackTime;
 		const seg = generatedSegments.find((s) => t >= s.start && t < s.end);
 		if (!seg) return '';
-		return (seg.translation && seg.translation.trim()) || seg.text || '';
+		const tr = seg.translation?.trim();
+		return tr ?? '';
 	}, [generatedSegments, currentPlaybackTime]);
+
+	const timelineSegmentsSorted = useMemo(
+		() =>
+			[...generatedSegments].sort((a, b) => {
+				if (a.start !== b.start) return a.start - b.start;
+				return a.id - b.id;
+			}),
+		[generatedSegments]
+	);
 
 	const treeFiles = useMemo(() => {
 		const empty = {
@@ -435,6 +461,33 @@ export default function App() {
 			? generatedSegments[selectedSegmentIndex]
 			: null;
 
+	const editorSegmentSig = useMemo(() => {
+		const s =
+			selectedSegmentIndex >= 0 && selectedSegmentIndex < generatedSegments.length
+				? generatedSegments[selectedSegmentIndex]
+				: null;
+		if (!s) return '';
+		return `${s.id}|${s.start}|${s.end}|${s.translation ?? ''}|${s.text}`;
+	}, [selectedSegmentIndex, generatedSegments]);
+
+	useEffect(() => {
+		const seg =
+			selectedSegmentIndex >= 0 && selectedSegmentIndex < generatedSegments.length
+				? generatedSegments[selectedSegmentIndex]
+				: null;
+		if (!seg) {
+			setSegEditorTranslation('');
+			setSegEditorOriginal('');
+			setSegEditorStart('');
+			setSegEditorDuration('');
+			return;
+		}
+		setSegEditorTranslation(seg.translation ?? '');
+		setSegEditorOriginal(seg.text ?? '');
+		setSegEditorStart(formatSrtTime(seg.start));
+		setSegEditorDuration(seg.duration.toFixed(3));
+	}, [editorSegmentSig, selectedSegmentIndex]);
+
 	const persistSegment = useCallback(
 		async (segment: SubtitleSegment) => {
 			if (!currentProject || !activeSubtitleFileId) return;
@@ -448,7 +501,7 @@ export default function App() {
 		[currentProject, activeSubtitleFileId]
 	);
 
-	/** Рабочая копия субтитров на диске — всегда SRT; перезаписывается при правках. */
+	/** Рабочая копия субтитров на диске srt; перезаписывается при правках. */
 	const exportSrtForActiveTrack = useCallback(async () => {
 		if (!currentProject || !activeSubtitleFileId) return;
 		const stem = getSourceVideoStem(currentProject, activeSubtitleFileId);
@@ -456,11 +509,162 @@ export default function App() {
 		await projectService.exportSubtitles(currentProject.path, activeSubtitleFileId, 'srt', out);
 	}, [currentProject, activeSubtitleFileId]);
 
+	const exportSrtForProject = useCallback(async (project: ProjectData, fileId: string) => {
+		const stem = getSourceVideoStem(project, fileId);
+		const out = joinProjectPath(project.path, 'subtitles', `${stem}.srt`);
+		await projectService.exportSubtitles(project.path, fileId, 'srt', out);
+	}, []);
+
+	const enqueueProjectMutation = useCallback(<T,>(fn: () => Promise<T>): Promise<T> => {
+		const p = projectMutationChainRef.current.catch(() => undefined).then(() => fn());
+		projectMutationChainRef.current = p;
+		return p;
+	}, []);
+
+	const pushSubtitleHistorySnapshot = useCallback(() => {
+		if (!activeSubtitleFileId) return;
+		undoSegmentsStackRef.current.push(cloneSubtitleSegments(segmentsRef.current));
+		if (undoSegmentsStackRef.current.length > MAX_SUBTITLE_UNDO) undoSegmentsStackRef.current.shift();
+		redoSegmentsStackRef.current = [];
+	}, [activeSubtitleFileId]);
+
+	const applySubtitleSegmentsSnapshot = useCallback(
+		async (segments: SubtitleSegment[]) => {
+			if (!activeSubtitleFileId) return;
+			const cp = currentProjectRef.current;
+			if (!cp) return;
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: segments } : f
+				)
+			};
+			currentProjectRef.current = nextProject;
+			setCurrentProject(nextProject);
+			setGeneratedSegments(segments);
+			try {
+				await projectService.save(nextProject);
+				await exportSrtForProject(nextProject, activeSubtitleFileId);
+			} catch (e) {
+				console.error('undo/redo persist', e);
+			}
+			setSelectedSegmentIndex((idx) => {
+				if (segments.length === 0) return -1;
+				return Math.min(Math.max(0, idx), segments.length - 1);
+			});
+		},
+		[activeSubtitleFileId, exportSrtForProject]
+	);
+
+	const performSubtitleUndo = useCallback(async () => {
+		if (!activeSubtitleFileId) return;
+		await enqueueProjectMutation(async () => {
+			const stack = undoSegmentsStackRef.current;
+			if (stack.length === 0) return;
+			const prev = stack.pop()!;
+			redoSegmentsStackRef.current.push(cloneSubtitleSegments(segmentsRef.current));
+			await applySubtitleSegmentsSnapshot(prev);
+		});
+	}, [activeSubtitleFileId, applySubtitleSegmentsSnapshot, enqueueProjectMutation]);
+
+	const performSubtitleRedo = useCallback(async () => {
+		if (!activeSubtitleFileId) return;
+		await enqueueProjectMutation(async () => {
+			const stack = redoSegmentsStackRef.current;
+			if (stack.length === 0) return;
+			const next = stack.pop()!;
+			undoSegmentsStackRef.current.push(cloneSubtitleSegments(segmentsRef.current));
+			await applySubtitleSegmentsSnapshot(next);
+		});
+	}, [activeSubtitleFileId, applySubtitleSegmentsSnapshot, enqueueProjectMutation]);
+
+	const handleDeleteSelectedSubtitle = useCallback(async () => {
+		if (!activeSubtitleFileId) return;
+		if (selectedSegmentIndex < 0) return;
+		const seg = segmentsRef.current[selectedSegmentIndex];
+		if (!seg) return;
+		const cp = currentProjectRef.current;
+		if (!cp) return;
+		pushSubtitleHistorySnapshot();
+		const projectPath = cp.path;
+		const fileId = activeSubtitleFileId;
+		const deletedIndex = selectedSegmentIndex;
+		try {
+			await enqueueProjectMutation(async () => {
+				const { segments } = await projectService.deleteSubtitleSegment(projectPath, fileId, seg.id);
+				const base = currentProjectRef.current;
+				if (!base) return;
+				const nextProject: ProjectData = {
+					...base,
+					files: base.files.map((f) =>
+						f.id === fileId ? { ...f, subtitle_segments: segments } : f
+					)
+				};
+				currentProjectRef.current = nextProject;
+				setGeneratedSegments(segments);
+				setCurrentProject(nextProject);
+				const newLen = segments.length;
+				if (newLen === 0) {
+					setSelectedSegmentIndex(-1);
+				} else {
+					setSelectedSegmentIndex(Math.min(deletedIndex, newLen - 1));
+				}
+				const stem = getSourceVideoStem(nextProject, fileId);
+				const out = joinProjectPath(nextProject.path, 'subtitles', `${stem}.srt`);
+				await projectService.exportSubtitles(nextProject.path, fileId, 'srt', out);
+			});
+		} catch (e) {
+			console.error('deleteSubtitleSegment', e);
+		}
+	}, [activeSubtitleFileId, selectedSegmentIndex, pushSubtitleHistorySnapshot, enqueueProjectMutation]);
+
+	const menuItems = useMemo(
+		() => [
+			{
+				label: 'File',
+				items: [
+					{ label: 'New Project', action: () => setActiveModal('createProject') },
+					{ label: 'Open Project' },
+					{ label: 'Save' },
+					{ label: 'Exit' },
+				],
+			},
+			{
+				label: 'Edit',
+				items: [
+					{ label: 'Undo', action: () => void performSubtitleUndo() },
+					{ label: 'Redo', action: () => void performSubtitleRedo() },
+					{ label: 'Delete', action: () => void handleDeleteSelectedSubtitle() },
+					{ label: 'Find' },
+				],
+			},
+			{ label: 'Tools', items: [{ label: 'Spell check' }, { label: 'Batch convert' }] },
+			{ label: 'Video', items: [{ label: 'Open video file' }, { label: 'Audio track' }] },
+			{
+				label: 'Help',
+				items: [
+					{ label: 'About' },
+					{ label: 'Updates' },
+					{
+						label: isDarkTheme ? 'Switch to light theme' : 'Switch to dark theme',
+						action: () => setIsDarkTheme((prev) => !prev),
+					},
+				],
+			},
+		],
+		[performSubtitleUndo, performSubtitleRedo, handleDeleteSelectedSubtitle, isDarkTheme]
+	);
+
 	const updateSegmentAtIndex = useCallback(
-		async (index: number, patch: Partial<SubtitleSegment>) => {
+		async (
+			index: number,
+			patch: Partial<SubtitleSegment>,
+			opts?: { skipHistory?: boolean }
+		) => {
 			if (!currentProject || !activeSubtitleFileId || index < 0) return;
 			const seg = generatedSegments[index];
 			if (!seg) return;
+			if (!opts?.skipHistory) pushSubtitleHistorySnapshot();
 			let next: SubtitleSegment = { ...seg, ...patch };
 			if (patch.start !== undefined || patch.end !== undefined) {
 				next.duration = Math.max(0, next.end - next.start);
@@ -473,15 +677,44 @@ export default function App() {
 					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: nextList } : f
 				)
 			});
-			await persistSegment(next);
-			try {
-				await exportSrtForActiveTrack();
-			} catch (e) {
-				console.error('SRT export failed', e);
-			}
+			await enqueueProjectMutation(async () => {
+				await persistSegment(next);
+				try {
+					await exportSrtForActiveTrack();
+				} catch (e) {
+					console.error('SRT export failed', e);
+				}
+			});
 		},
-		[currentProject, activeSubtitleFileId, generatedSegments, persistSegment, exportSrtForActiveTrack]
+		[
+			currentProject,
+			activeSubtitleFileId,
+			generatedSegments,
+			persistSegment,
+			exportSrtForActiveTrack,
+			pushSubtitleHistorySnapshot,
+			enqueueProjectMutation
+		]
 	);
+
+	/* Клик по видео/таймлайну не забирает фокус с input/textarea */
+	useEffect(() => {
+		const onPointerDown = (e: PointerEvent) => {
+			const panel = segmentEditorPanelRef.current;
+			if (!panel) return;
+			if (panel.contains(e.target as Node)) return;
+			const ae = document.activeElement;
+			if (
+				ae &&
+				panel.contains(ae) &&
+				(ae instanceof HTMLTextAreaElement || ae instanceof HTMLInputElement)
+			) {
+				(ae as HTMLElement).blur();
+			}
+		};
+		document.addEventListener('pointerdown', onPointerDown, true);
+		return () => document.removeEventListener('pointerdown', onPointerDown, true);
+	}, []);
 
 	const handleTimelineInsert = useCallback(async () => {
 		if (!currentProject || !activeSubtitleFileId) return;
@@ -489,23 +722,31 @@ export default function App() {
 		let start = Math.max(0, Math.min(currentPlaybackTime, td - MIN_SEGMENT_DURATION));
 		let end = Math.min(start + 1, td);
 		if (end - start < MIN_SEGMENT_DURATION) return;
+		pushSubtitleHistorySnapshot();
+		const projectPath = currentProject.path;
+		const fileId = activeSubtitleFileId;
 		try {
-			const { segments, inserted_id } = await projectService.insertSubtitleSegment(
-				currentProject.path,
-				activeSubtitleFileId,
-				start,
-				end
-			);
-			setGeneratedSegments(segments);
-			setCurrentProject({
-				...currentProject,
-				files: currentProject.files.map((f) =>
-					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: segments } : f
-				)
+			await enqueueProjectMutation(async () => {
+				const { segments, inserted_id } = await projectService.insertSubtitleSegment(
+					projectPath,
+					fileId,
+					start,
+					end
+				);
+				const nextProject: ProjectData = {
+					...currentProject,
+					files: currentProject.files.map((f) =>
+						f.id === fileId ? { ...f, subtitle_segments: segments } : f
+					)
+				};
+				setGeneratedSegments(segments);
+				setCurrentProject(nextProject);
+				const newIdx = segments.findIndex((s) => s.id === inserted_id);
+				if (newIdx >= 0) setSelectedSegmentIndex(newIdx);
+				const stem = getSourceVideoStem(nextProject, fileId);
+				const out = joinProjectPath(nextProject.path, 'subtitles', `${stem}.srt`);
+				await projectService.exportSubtitles(nextProject.path, fileId, 'srt', out);
 			});
-			const newIdx = segments.findIndex((s) => s.id === inserted_id);
-			if (newIdx >= 0) setSelectedSegmentIndex(newIdx);
-			await exportSrtForActiveTrack();
 		} catch (e) {
 			console.error('insertSubtitleSegment', e);
 		}
@@ -514,7 +755,8 @@ export default function App() {
 		activeSubtitleFileId,
 		timelineTotalDuration,
 		currentPlaybackTime,
-		exportSrtForActiveTrack
+		pushSubtitleHistorySnapshot,
+		enqueueProjectMutation
 	]);
 
 	const handleTimelineSetStart = useCallback(() => {
@@ -591,6 +833,7 @@ export default function App() {
 			ev.stopPropagation();
 			const seg = segmentsRef.current[index];
 			if (!seg || !activeSubtitleFileId) return;
+			const undoSnap = cloneSubtitleSegments(segmentsRef.current);
 			timelineEdgeDragRef.current = {
 				edge,
 				index,
@@ -622,7 +865,10 @@ export default function App() {
 				const drag = timelineEdgeDragRef.current;
 				timelineEdgeDragRef.current = null;
 				if (drag) {
-					void updateSegmentAtIndex(drag.index, { start: drag.start, end: drag.end });
+					undoSegmentsStackRef.current.push(undoSnap);
+					if (undoSegmentsStackRef.current.length > MAX_SUBTITLE_UNDO) undoSegmentsStackRef.current.shift();
+					redoSegmentsStackRef.current = [];
+					void updateSegmentAtIndex(drag.index, { start: drag.start, end: drag.end }, { skipHistory: true });
 				}
 			};
 			window.addEventListener('mousemove', onMove);
@@ -639,6 +885,7 @@ export default function App() {
 			ev.stopPropagation();
 			const seg = segmentsRef.current[index];
 			if (!seg) return;
+			const undoSnap = cloneSubtitleSegments(segmentsRef.current);
 			const t0 = clientXToTimelineTime(ev.clientX);
 			timelineSegmentMoveRef.current = {
 				index,
@@ -675,7 +922,10 @@ export default function App() {
 						Math.abs(cur.end - mv.origEnd) > 1e-4);
 				if (changed && cur) {
 					segmentBodyDragMovedRef.current = true;
-					void updateSegmentAtIndex(mv.index, { start: cur.start, end: cur.end });
+					undoSegmentsStackRef.current.push(undoSnap);
+					if (undoSegmentsStackRef.current.length > MAX_SUBTITLE_UNDO) undoSegmentsStackRef.current.shift();
+					redoSegmentsStackRef.current = [];
+					void updateSegmentAtIndex(mv.index, { start: cur.start, end: cur.end }, { skipHistory: true });
 				}
 			};
 			window.addEventListener('mousemove', onMove);
@@ -701,6 +951,65 @@ export default function App() {
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
 	}, [activeModal, videoSrc]);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (!e.ctrlKey && !e.metaKey) return;
+			if (activeModal !== null) return;
+			if (shouldIgnoreSpacebarForVideo(e.target)) return;
+			const key = e.key.toLowerCase();
+			if (key === 'z' && !e.shiftKey) {
+				e.preventDefault();
+				void performSubtitleUndo();
+				return;
+			}
+			if (key === 'y' || (key === 'z' && e.shiftKey)) {
+				e.preventDefault();
+				void performSubtitleRedo();
+				return;
+			}
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	}, [activeModal, performSubtitleUndo, performSubtitleRedo]);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key !== 'Delete') return;
+			if (activeModal !== null) return;
+			if (shouldIgnoreSpacebarForVideo(e.target)) return;
+			if (!activeSubtitleFileId || selectedSegmentIndex < 0) return;
+			e.preventDefault();
+			void handleDeleteSelectedSubtitle();
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	}, [activeModal, activeSubtitleFileId, selectedSegmentIndex, handleDeleteSelectedSubtitle]);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+			if (activeModal !== null) return;
+			if (shouldIgnoreSpacebarForVideo(e.target)) return;
+			if (!activeSubtitleFileId) return;
+			const n = segmentsRef.current.length;
+			if (n === 0) return;
+			e.preventDefault();
+			if (e.key === 'ArrowLeft') {
+				setSelectedSegmentIndex((i) => {
+					if (i < 0) return n - 1;
+					return Math.max(0, i - 1);
+				});
+			} else {
+				setSelectedSegmentIndex((i) => {
+					if (i < 0) return 0;
+					return Math.min(n - 1, i + 1);
+				});
+			}
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	}, [activeModal, activeSubtitleFileId]);
 
 	useEffect(() => {
 		setActiveModal('welcome');
@@ -745,9 +1054,16 @@ export default function App() {
 	}, [currentProject?.path]);
 
 	useEffect(() => {
+		undoSegmentsStackRef.current = [];
+		redoSegmentsStackRef.current = [];
+	}, [activeSubtitleFileId]);
+
+	/**
+	 * Длительность через ffprobe совпадает с тем, что ffmpeg кладёт в пнг вейвформы
+	 */
+	useEffect(() => {
 		setProbedMediaDuration(null);
-		if (!activeVideoAbsolutePath || !activeVideoFile) return;
-		if (activeVideoFile.duration != null && activeVideoFile.duration > 0) return;
+		if (!activeVideoAbsolutePath) return;
 		let cancelled = false;
 		void projectService.probeMediaDuration(activeVideoAbsolutePath).then((d) => {
 			if (!cancelled && Number.isFinite(d) && d > 0) setProbedMediaDuration(d);
@@ -755,7 +1071,7 @@ export default function App() {
 		return () => {
 			cancelled = true;
 		};
-	}, [activeVideoAbsolutePath, activeVideoFile?.id, activeVideoFile?.duration]);
+	}, [activeVideoAbsolutePath]);
 
 	useEffect(() => {
 		if (!activeVideoAbsolutePath || !currentProject) return;
@@ -775,8 +1091,15 @@ export default function App() {
 			}
 			try {
 				const data = await projectService.generateWaveform(activeVideoAbsolutePath, outJson, 48);
-				if (!cancelled && data.peaks?.length) {
-					setWaveformPeaks(data.peaks.map((p) => Number(p)));
+				if (!cancelled && data) {
+					if (data.peaks?.length) {
+						setWaveformPeaks(data.peaks.map((p) => Number(p)));
+					}
+					if (Number.isFinite(data.duration) && data.duration > 0) {
+						setProbedMediaDuration((prev) =>
+							prev != null && prev > 0 ? Math.max(prev, data.duration) : data.duration
+						);
+					}
 				}
 			} catch (e) {
 				console.warn('[waveform] peaks:', e);
@@ -798,7 +1121,7 @@ export default function App() {
 		if (v) v.muted = videoMuted;
 	}, [videoMuted]);
 
-	/** Плавная полоска таймлайна: timeupdate слишком редкий (~4 Гц), во время play читаем currentTime в rAF */
+	/** Плавная полоска таймлайна */
 	useEffect(() => {
 		if (!videoSrc) return;
 		const v = videoRef.current;
@@ -842,11 +1165,44 @@ export default function App() {
 		};
 	}, [videoSrc]);
 
-	const updateTlViewport = useCallback(() => {
+	/** Ползунок нижнего скроллбара */
+	const syncTimelineScrollbarThumb = useCallback(() => {
+		const el = timelineScrollRef.current;
+		const thumb = timelineScrollbarThumbRef.current;
+		if (!el || !thumb) return;
+		const sl = el.scrollLeft;
+		const sw = el.scrollWidth;
+		const cw = el.clientWidth;
+		if (!sw || sw <= cw) {
+			thumb.style.width = '100%';
+			thumb.style.left = '0%';
+			return;
+		}
+		const thumbW = Math.max((cw / sw) * 100, 8);
+		const maxScroll = sw - cw;
+		const travel = 100 - thumbW;
+		thumb.style.width = `${thumbW}%`;
+		thumb.style.left = `${(sl / maxScroll) * travel}%`;
+	}, []);
+
+	useLayoutEffect(() => {
 		const el = timelineScrollRef.current;
 		if (!el) return;
-		setTlViewport({ sl: el.scrollLeft, sw: el.scrollWidth, cw: el.clientWidth });
-	}, []);
+		let raf = 0;
+		const schedule = () => {
+			if (raf) return;
+			raf = requestAnimationFrame(() => {
+				raf = 0;
+				syncTimelineScrollbarThumb();
+			});
+		};
+		el.addEventListener('scroll', schedule, { passive: true });
+		schedule();
+		return () => {
+			el.removeEventListener('scroll', schedule);
+			if (raf) cancelAnimationFrame(raf);
+		};
+	}, [syncTimelineScrollbarThumb, timelineZoomPercent, generatedSegments.length, timelineTotalDuration]);
 
 	useEffect(() => {
 		const panel = timelineWheelRef.current;
@@ -870,7 +1226,7 @@ export default function App() {
 					if (zNext === z) zoomAnchorRef.current = null;
 					return zNext;
 				});
-				requestAnimationFrame(() => updateTlViewport());
+				requestAnimationFrame(() => syncTimelineScrollbarThumb());
 				return;
 			}
 			const scr = timelineScrollRef.current;
@@ -880,12 +1236,12 @@ export default function App() {
 			if (scrollDelta === 0) return;
 			e.preventDefault();
 			scr.scrollLeft += scrollDelta;
-			updateTlViewport();
+			requestAnimationFrame(() => syncTimelineScrollbarThumb());
 		};
 
 		panel.addEventListener('wheel', onWheel, { passive: false });
 		return () => panel.removeEventListener('wheel', onWheel);
-	}, [updateTlViewport]);
+	}, [syncTimelineScrollbarThumb]);
 
 	useLayoutEffect(() => {
 		const a = zoomAnchorRef.current;
@@ -898,8 +1254,8 @@ export default function App() {
 		const sNew = a.ratio * wAfter - (a.ratio * a.innerW - a.scrollLeft);
 		const maxSl = Math.max(0, scr.scrollWidth - scr.clientWidth);
 		scr.scrollLeft = Math.max(0, Math.min(sNew, maxSl));
-		updateTlViewport();
-	}, [timelineZoomPercent, updateTlViewport]);
+		syncTimelineScrollbarThumb();
+	}, [timelineZoomPercent, syncTimelineScrollbarThumb]);
 
 	const seekVideoFromClientX = useCallback(
 		(clientX: number, barEl: HTMLElement) => {
@@ -938,24 +1294,31 @@ export default function App() {
 			const bar = e.currentTarget;
 			const el = timelineScrollRef.current;
 			if (!el) return;
+			let moveRaf = 0;
 			const apply = (clientX: number) => {
 				const maxScroll = el.scrollWidth - el.clientWidth;
 				if (maxScroll <= 0) return;
 				const rect = bar.getBoundingClientRect();
 				const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
 				el.scrollLeft = ratio * maxScroll;
-				updateTlViewport();
+				if (moveRaf) return;
+				moveRaf = requestAnimationFrame(() => {
+					moveRaf = 0;
+					syncTimelineScrollbarThumb();
+				});
 			};
 			apply(e.clientX);
 			const onMove = (ev: MouseEvent) => apply(ev.clientX);
 			const onUp = () => {
+				if (moveRaf) cancelAnimationFrame(moveRaf);
 				window.removeEventListener('mousemove', onMove);
 				window.removeEventListener('mouseup', onUp);
+				syncTimelineScrollbarThumb();
 			};
 			window.addEventListener('mousemove', onMove);
 			window.addEventListener('mouseup', onUp);
 		},
-		[updateTlViewport]
+		[syncTimelineScrollbarThumb]
 	);
 
 	const handleVolumePointerDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -983,11 +1346,9 @@ export default function App() {
 		window.addEventListener('mouseup', onUp);
 	}, []);
 
-	useEffect(() => {
-		updateTlViewport();
-		const t = window.requestAnimationFrame(updateTlViewport);
-		return () => window.cancelAnimationFrame(t);
-	}, [timelineZoomPercent, generatedSegments.length, timelineTotalDuration, updateTlViewport]);
+	useLayoutEffect(() => {
+		requestAnimationFrame(() => syncTimelineScrollbarThumb());
+	}, [timelineZoomPercent, generatedSegments.length, timelineTotalDuration, syncTimelineScrollbarThumb]);
 
 	useEffect(() => {
 		if (!isPlayingRef.current) return;
@@ -997,9 +1358,10 @@ export default function App() {
 		const playheadX = (currentPlaybackTime / timelineTotalDuration) * inner.offsetWidth;
 		const target = playheadX - el.clientWidth * 0.35;
 		el.scrollLeft = Math.max(0, Math.min(target, el.scrollWidth - el.clientWidth));
-	}, [currentPlaybackTime, timelineTotalDuration]);
+		requestAnimationFrame(() => syncTimelineScrollbarThumb());
+	}, [currentPlaybackTime, timelineTotalDuration, syncTimelineScrollbarThumb]);
 
-	// --- ЛОГИКА РЕШАЙЗА (УПРАВЛЕНИЕ МЫШЬЮ) ---
+	// --- ЛОГИКА РЕШАЙЗА пАНЕЛЕЙ ---
 
 	// остановка любого ресайза
 	const stopResizing = useCallback(() => {
@@ -1047,8 +1409,9 @@ export default function App() {
 			setTablePanelWidth(Math.max(300, fixedTable));
 		}
 
-		if (upperSectionHeight > windowSize.height - 150) {
-			setUpperSectionHeight(windowSize.height - 150);
+		const maxUpper = windowSize.height - APP_HEADER_BAR_PX - MIN_TIMELINE_PANE_PX;
+		if (upperSectionHeight > maxUpper) {
+			setUpperSectionHeight(maxUpper);
 		}
 	}, [windowSize, tablePanelWidth, projectTreeWidth, aiAgentWidth]);
 
@@ -1095,7 +1458,8 @@ export default function App() {
 				}
 			} else {
 				const newHeight = startHeight + (e.clientY - startY);
-				if (newHeight > 200 && newHeight < window.innerHeight - 150) setUpperSectionHeight(newHeight);
+				const maxUpper = window.innerHeight - APP_HEADER_BAR_PX - MIN_TIMELINE_PANE_PX;
+				if (newHeight > 200 && newHeight <= maxUpper) setUpperSectionHeight(newHeight);
 			}
 		};
 
@@ -1176,7 +1540,7 @@ export default function App() {
 			{/* Верхнее меню, название проекта, 3 кнопки */}
 			<div 
 				className="h-[32px] flex items-center justify-between shrink-0 bg-surface-bg border-b border-border-default select-none relative z-[100]"
-				style={{ ['WebkitAppRegion' as any]: 'drag' }} // Вся строка по умолчанию тягабельная
+				style={{ ['WebkitAppRegion' as any]: 'drag' }}
 			>
 				
 				{/* ЛЕВАЯ ЧАСТЬ Лого и Меню */}
@@ -1286,7 +1650,7 @@ export default function App() {
 
 						{/* Кнопка мастера в круге */}
 						<button 
-								onClick={openWizard} // Добавили клик
+								onClick={openWizard}
 								title="Пошаговый мастер" 
 								className="w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-all shrink-0 my-[28px]"
 						>
@@ -1301,7 +1665,7 @@ export default function App() {
 							
 							<button 
 								title="Глоссарий" 
-								onClick={() => setActiveModal('glossary')} // Открываем глоссарий
+								onClick={() => setActiveModal('glossary')}
 								className="group w-7 h-7 flex items-center justify-center shrink-0"
 							>
 								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
@@ -1339,7 +1703,7 @@ export default function App() {
 
 					{/* Список файлов */}
 					<div className="flex-1 min-w-0 overflow-y-auto p-3 bg-surface-bg subtitle-table-scroll project-tree-scroll">
-						<div className="flex flex-col gap-[8px]"> {/* Строгий вертикальный ритм 8px */}
+						<div className="flex flex-col gap-[8px]">
 						
 							<div 
 								className="flex items-center gap-[8px] cursor-pointer group h-4"
@@ -1553,7 +1917,7 @@ export default function App() {
 
 					{/* РЕСАЙЗЕР */}
 					<div 
-						onMouseDown={startAiAgentResizing} // Вам нужно добавить хэндлер в parent App
+						onMouseDown={startAiAgentResizing}
 						className={`absolute right-[-4px] top-0 w-[8px] h-full cursor-col-resize z-30 transition-colors ${
 							isAiAgentResizing ? 'bg-primary-main/20' : 'hover:bg-primary-main/10'
 						}`}
@@ -1575,7 +1939,10 @@ export default function App() {
 						>
 							{/* СЕКЦИЯ С ТАБЛИЦЕЙ */}
 							<div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
-								<div className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary">
+								<div
+									ref={subtitleTableScrollRef}
+									className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary"
+								>
 									<table className="w-full border-collapse table-fixed bg-surface-secondary">
 									<colgroup>
 										{colWidths.map((w, i) => (
@@ -1612,8 +1979,9 @@ export default function App() {
 											{generatedSegments.map((segment, idx) => (
 												<tr
 													key={`${segment.id}-${idx}`}
+													data-subtitle-row-index={idx}
 													onClick={() => setSelectedSegmentIndex(idx)}
-													className={`h-[25px] hover:bg-black/5 transition-colors group text-table cursor-pointer ${
+													className={`h-[25px] hover:bg-black/5 transition-colors group text-table cursor-pointer scroll-mt-[25px] ${
 														selectedSegmentIndex === idx ? 'bg-black/10' : ''
 													}`}
 												>
@@ -1649,7 +2017,10 @@ export default function App() {
 							/>
 
 							{/* ПАНЕЛЬ РЕДАКТИРОВАНИЯ ОДИНОЧНОГО СУБТИТРА */}
-							<div className="h-[180px] bg-surface-panel border-t border-border-default p-[12px] flex gap-1 shrink-0 min-w-0 overflow-hidden">
+							<div
+								ref={segmentEditorPanelRef}
+								className="h-[180px] bg-surface-panel border-t border-border-default p-[12px] flex gap-1 shrink-0 min-w-0 overflow-hidden"
+							>
 								
 								{/* Колонна 1 Таймкоды и кнопки управления */}
 								<div className="w-fit flex flex-col shrink-0 min-w-0">
@@ -1659,11 +2030,11 @@ export default function App() {
 											<label className="text-caption text-text-primary">Start time</label>
 											<input 
 												type="text" 
-												key={`start-${selectedSegmentIndex}-${selectedSegment?.id ?? 'x'}`}
-												defaultValue={selectedSegment ? formatSrtTime(selectedSegment.start) : ''}
-												onBlur={(e) => {
+												value={segEditorStart}
+												onChange={(e) => setSegEditorStart(e.target.value)}
+												onBlur={() => {
 													if (selectedSegmentIndex < 0) return;
-													const t = parseSrtTime(e.target.value);
+													const t = parseSrtTime(segEditorStart);
 													if (t !== null) void updateSegmentAtIndex(selectedSegmentIndex, { start: t });
 												}}
 												className="w-[100px] h-[24px] bg-surface-secondary border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
@@ -1673,14 +2044,16 @@ export default function App() {
 											<label className="text-caption text-text-primary">Duration</label>
 											<input 
 												type="text" 
-												key={`dur-${selectedSegmentIndex}-${selectedSegment?.id ?? 'x'}`}
-												defaultValue={selectedSegment ? selectedSegment.duration.toFixed(3) : ''}
-												onBlur={(e) => {
+												value={segEditorDuration}
+												onChange={(e) => setSegEditorDuration(e.target.value)}
+												onBlur={() => {
 													if (selectedSegmentIndex < 0 || !selectedSegment) return;
-													const d = parseFloat(e.target.value.replace(',', '.'));
+													const d = parseFloat(segEditorDuration.replace(',', '.'));
 													if (!Number.isFinite(d) || d < 0) return;
+													const st = parseSrtTime(segEditorStart);
+													const baseStart = st !== null ? st : selectedSegment.start;
 													void updateSegmentAtIndex(selectedSegmentIndex, {
-														end: selectedSegment.start + d
+														end: baseStart + d
 													});
 												}}
 												className="w-[76px] h-[24px] bg-surface-secondary border border-border-default rounded-sm px-2 text-caption text-text-primary outline-none focus:border-primary-main/50"
@@ -1723,14 +2096,14 @@ export default function App() {
 									<label className="text-caption text-text-primary">Translation</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
-											key={`trn-${selectedSegmentIndex}-${selectedSegment?.id ?? 'x'}`}
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
 											placeholder="Translation..."
-											defaultValue={selectedSegment?.translation ?? ''}
-											onBlur={(e) => {
+											value={segEditorTranslation}
+											onChange={(e) => setSegEditorTranslation(e.target.value)}
+											onBlur={() => {
 												if (selectedSegmentIndex < 0) return;
 												void updateSegmentAtIndex(selectedSegmentIndex, {
-													translation: e.target.value
+													translation: segEditorTranslation
 												});
 											}}
 										/>
@@ -1738,13 +2111,16 @@ export default function App() {
 									{/* Вертикальная статистика */}
 									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
 										<span className="truncate">
-											Total length: {selectedSegment ? (selectedSegment.translation ?? '').length : 0}
+											Total length: {segEditorTranslation.length}
 										</span>
 										<span className="truncate">
 											Chars/sec:{' '}
-											{selectedSegment && selectedSegment.duration > 0
-												? ((selectedSegment.translation ?? '').length / selectedSegment.duration).toFixed(1)
-												: '—'}
+											{(() => {
+												const d = parseFloat(segEditorDuration.replace(',', '.'));
+												return Number.isFinite(d) && d > 0
+													? (segEditorTranslation.length / d).toFixed(1)
+													: '—';
+											})()}
 										</span>
 									</div>
 								</div>
@@ -1754,26 +2130,29 @@ export default function App() {
 									<label className="text-caption text-text-primary">Original text</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
-											key={`orig-${selectedSegmentIndex}-${selectedSegment?.id ?? 'x'}`}
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
 											placeholder="Original text..."
-											defaultValue={selectedSegment?.text ?? ''}
-											onBlur={(e) => {
+											value={segEditorOriginal}
+											onChange={(e) => setSegEditorOriginal(e.target.value)}
+											onBlur={() => {
 												if (selectedSegmentIndex < 0) return;
-												void updateSegmentAtIndex(selectedSegmentIndex, { text: e.target.value });
+												void updateSegmentAtIndex(selectedSegmentIndex, { text: segEditorOriginal });
 											}}
 										/>
 									</div>
 									{/* Вертикальная статистика */}
 									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
 										<span className="truncate">
-											Total length: {selectedSegment ? selectedSegment.text.length : 0}
+											Total length: {segEditorOriginal.length}
 										</span>
 										<span className="truncate">
 											Chars/sec:{' '}
-											{selectedSegment && selectedSegment.duration > 0
-												? (selectedSegment.text.length / selectedSegment.duration).toFixed(1)
-												: '—'}
+											{(() => {
+												const d = parseFloat(segEditorDuration.replace(',', '.'));
+												return Number.isFinite(d) && d > 0
+													? (segEditorOriginal.length / d).toFixed(1)
+													: '—';
+											})()}
 										</span>
 									</div>
 								</div>
@@ -1923,7 +2302,10 @@ export default function App() {
 					{/*ТАЙМЛАЙН */}
 					<div 
 						className="flex-1 min-h-0 bg-surface-bg flex flex-col relative"
-						style={{ height: `calc(100vh - ${upperSectionHeight}px - 32px)` }} // Оставшееся место после хедера и верхней части
+						style={{
+							height: `calc(100vh - ${upperSectionHeight}px - ${APP_HEADER_BAR_PX}px)`,
+							minHeight: MIN_TIMELINE_PANE_PX
+						}}
 					>
 						{/* РЕСАЙЗЕР */}
 						<div 
@@ -1966,12 +2348,11 @@ export default function App() {
 								{/* Контейнер с волной и субтитрами */}
 								<div
 									ref={timelineScrollRef}
-									className="timeline-pan-no-scrollbar flex-1 relative bg-[#121212] m-3 rounded-md border border-black overflow-x-auto overflow-y-hidden shadow-inner group"
-									onScroll={() => updateTlViewport()}
+									className="timeline-pan-no-scrollbar flex-1 relative bg-[#121212] m-3 rounded-md border border-black overflow-x-auto overflow-y-hidden shadow-inner group [overflow-anchor:none]"
 								>
 									<div
 										ref={timelineInnerRef}
-										className="relative h-full min-h-[120px]"
+										className="relative h-full min-h-0"
 										style={{ width: `${Math.max(100, timelineZoomPercent)}%` }}
 										onClick={(e) => {
 											const inner = timelineInnerRef.current;
@@ -2001,28 +2382,31 @@ export default function App() {
 										{waveformImageSrc ? (
 											<div
 												key={waveformImageSrc}
-												className="absolute inset-x-0 top-[5%] bottom-[5%] z-[5] overflow-hidden pointer-events-none"
+												className="absolute inset-x-0 top-2 bottom-2 z-[5] overflow-hidden pointer-events-none"
 											>
 												<img
 													src={waveformImageSrc}
 													alt=""
 													draggable={false}
-													className="h-full w-full min-h-0 select-none object-cover object-center opacity-95"
+													className="h-full w-full min-h-0 select-none object-fill opacity-95"
 												/>
 											</div>
 										) : (
 											<TimelineSymmetricWaveform
 												peaks={waveformPeaks}
-												className="absolute inset-x-0 top-[5%] bottom-[5%] z-[5] w-full min-w-0 opacity-95 pointer-events-none"
+												className="absolute inset-x-0 top-2 bottom-2 z-[5] w-full min-w-0 opacity-95 pointer-events-none"
 											/>
 										)}
 
 										{/* Субтитры на таймлайне */}
 										<div className="absolute inset-0 flex items-stretch pointer-events-none">
-											{generatedSegments.map((seg, idx) => {
+											{timelineSegmentsSorted.map((seg, orderIdx) => {
+												const idx = generatedSegments.findIndex((s) => s.id === seg.id);
+												if (idx < 0) return null;
 												const left = (seg.start / timelineTotalDuration) * 100;
 												const w = Math.max(0, ((seg.end - seg.start) / timelineTotalDuration) * 100);
 												const isSel = idx === selectedSegmentIndex;
+												const tr = seg.translation?.trim() ?? '';
 												return (
 													<div
 														key={seg.id}
@@ -2050,12 +2434,11 @@ export default function App() {
 															className="relative z-[10] flex flex-col justify-between p-2 min-h-0 flex-1 min-w-0 cursor-grab active:cursor-grabbing"
 															onMouseDown={(e) => beginTimelineSegmentMove(idx, e)}
 														>
-															<span className="text-[11px] text-white font-medium truncate">
-																{(seg.translation && seg.translation.trim()) || seg.text || '\u00A0'}
+															<span className="text-[12px] font-bold font-inter text-white/85 truncate">
+																{tr || '\u00A0'}
 															</span>
-															<div className="flex gap-2 text-[10px] text-white/50 font-mono">
-																<span>#{idx + 1}</span>
-																<span>{(seg.text ?? '').length}</span>
+															<div className="text-[12px] font-bold font-inter text-white/70 truncate min-w-0 w-full shrink tabular-nums">
+																#{orderIdx + 1} {seg.duration.toFixed(2)}s
 															</div>
 														</div>
 														<div
@@ -2136,22 +2519,9 @@ export default function App() {
 										onMouseDown={handleTimelineScrubPointerDown}
 									>
 										<div
+											ref={timelineScrollbarThumbRef}
 											className="absolute top-0 h-full bg-primary-disabled rounded-full"
-											style={{
-												width: `${(() => {
-													const { sw, cw } = tlViewport;
-													if (!sw || sw <= cw) return 100;
-													return Math.max(8, (cw / sw) * 100);
-												})()}%`,
-												left: `${(() => {
-													const { sl, sw, cw } = tlViewport;
-													if (!sw || sw <= cw) return 0;
-													const maxScroll = sw - cw;
-													const thumbW = Math.max((cw / sw) * 100, 8);
-													const travel = 100 - thumbW;
-													return (sl / maxScroll) * travel;
-												})()}%`
-											}}
+											style={{ width: '100%', left: '0%' }}
 										/>
 									</div>
 								</div>
@@ -2175,7 +2545,7 @@ export default function App() {
 								onClose={() => setActiveModal(null)} 
 								onNewProject={() => setActiveModal('createProject')}
 								onOpenProject={handleOpenProjectDialog}
-								onSelectProject={handleSelectProject} // <-- Добавь эту строку
+								onSelectProject={handleSelectProject}
 							/>
 						)}
 
@@ -2191,6 +2561,8 @@ export default function App() {
 								onClose={() => setActiveModal(null)}
 								projectPath={currentProject?.path}
 								onComplete={({ project, segments }) => {
+									undoSegmentsStackRef.current = [];
+									redoSegmentsStackRef.current = [];
 									setCurrentProject(project);
 									setGeneratedSegments(segments);
 									const withSeg = project.files.find(

@@ -16,7 +16,7 @@ pub async fn generate_waveform(
     resolution: Option<u32>, // Количество точек на секунду
     _app_handle: tauri::AppHandle,
 ) -> Result<WaveformData, String> {
-    println!("📊 Генерация волновой формы для: {}", audio_path);
+    println!("Генерация волновой формы для: {}", audio_path);
     
     let audio_path_buf = Path::new(&audio_path);
     if !audio_path_buf.exists() {
@@ -29,16 +29,16 @@ pub async fn generate_waveform(
         return Err("FFmpeg не установлен в системе".to_string());
     }
     
-    let resolution = resolution.unwrap_or(50); // 50 точек в секунду по умолчанию
+    let resolution = resolution.unwrap_or(50);
     
-    // Используем FFmpeg для извлечения аудио данных и генерации waveform
+    //извлечение аудио данных и генерации вейвформы
     let waveform_data = generate_waveform_with_ffmpeg(audio_path_buf, resolution).await?;
     
     // Сохраняем данные в JSON файл для фронтенда
     let json_data = serde_json::to_string(&waveform_data).map_err(|e| e.to_string())?;
     fs::write(&output_path, json_data).map_err(|e| e.to_string())?;
     
-    println!("✅ Волновая форма сохранена: {}", output_path);
+    println!("Волновая форма сохранена: {}", output_path);
     Ok(waveform_data)
 }
 
@@ -56,7 +56,7 @@ async fn generate_waveform_with_ffmpeg(
     let total_points = (duration * resolution as f64) as usize;
     let mut peaks = Vec::with_capacity(total_points);
     
-    // Используем FFmpeg для извлечения амплитуды
+    // ffmpeg для извлечения амплитуды
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-i")
         .arg(audio_path)
@@ -130,7 +130,7 @@ async fn generate_waveform_with_ffmpeg(
     })
 }
 
-/// Полноширинная «картинка» волны (как в DAW) через фильтр showwavespic — надёжнее отображение в UI.
+/// Полноширинная картинка вейвформы зеленая
 #[tauri::command]
 pub async fn generate_waveform_png(
     media_path: String,
@@ -152,7 +152,7 @@ pub async fn generate_waveform_png(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    /* Усиление перед showwavespic — визуально «как в DAW», тихие участки не выглядят плоскими. */
+    /* Усиление перед showwavespic, тихие участки не плоские. */
     let filter = format!(
         "[0:a]volume=10dB,showwavespic=s={}x{}:colors=0xADFF2F|0x121212",
         w, h
@@ -180,7 +180,7 @@ pub async fn generate_waveform_png(
     Ok(())
 }
 
-/// Длительность медиа (видео/аудио) через ffprobe — для таймкода плеера и импорта.
+/// Длительность медиа через ffprobe для таймкода плеера и импорта.
 #[tauri::command]
 pub async fn probe_media_duration(media_path: String) -> Result<f64, String> {
     let p = Path::new(&media_path);

@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { open } from '@tauri-apps/plugin-dialog'; // для выбора папки
+import { open } from '@tauri-apps/plugin-dialog'; //выбор папки
 import { projectService } from '../../services/projectService';
 
 interface NewProjectModalProps {
   onClose: () => void;
-  onProjectCreated: (project: any) => void; // Чтобы App.tsx узнал об успехе
+  onProjectCreated: (project: any) => void;
 }
 
 export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onProjectCreated }) => {
@@ -16,8 +16,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
   // Функция выбора папки через системное окно
   const handleSelectFolder = async (e: React.MouseEvent) => {
 		e.preventDefault();
-		e.stopPropagation(); // Чтобы клик не уходил родителю
-		console.log("Вызов диалога..."); // Проверь это в консоли (F12)
+		e.stopPropagation();
+		console.log("Вызов диалога..."); //дебаг
 		
 		try {
 			const selected = await open({
@@ -43,7 +43,6 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
 
     setIsCreating(true);
     try {
-      // Вызываем наш сервис (который дергает invoke('create_project'))
       const newProject = await projectService.create(name, location, targetLang);
       onProjectCreated(newProject);
       onClose();
@@ -58,19 +57,16 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
 	
 	return (
     <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-      {/* p-8 дает ровно 32px со всех сторон. Убрал gap-[24px], чтобы он не толкал контент вниз от хедера */}
       <div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
         
-        {/* Хедер модалки: mb-auto прижмет основной контент к центру/низу, если будет место, 
-            но здесь мы полагаемся на flex-1 ниже */}
+        {/* Хедер модалки с крестиком */}
         <div className="flex justify-end h-5"> 
           <button onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
         </div>
 
-        {/* Основной контентный блок: mt-4 компенсирует высоту хедера, чтобы визуально 
-            центральная часть была выровнена, flex-1 заставляет блок занять все пространство до низа p-8 */}
+        {/* Основной контентный блок */}
         <div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 mt-4">
           
           {/* Левая колонна */}
@@ -83,7 +79,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
             </p>
           </div>
 
-          {/* Правая колонна: Убрал pb-2, так как он создавал лишний отступ снизу */}
+          {/* Правая колонна*/}
           <div className="flex flex-col justify-between h-full">
             
             <div className="flex flex-col gap-[24px]">
@@ -131,7 +127,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
               </div>
             </div>
 
-            {/* Кнопка Create: теперь она стоит ровно в углу, ограниченном только p-8 (32px) */}
+            {/* Кнопка Create*/}
             <div className="flex justify-end">
               <button 
 							onClick={handleCreate}

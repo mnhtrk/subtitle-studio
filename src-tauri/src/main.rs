@@ -56,6 +56,7 @@ fn main() {
             commands::files::remove_file_from_project,
             commands::project::create_empty_segments,
             commands::project::insert_subtitle_segment,
+            commands::project::delete_subtitle_segment,
             commands::project::get_project_statistics,
             commands::project::find_and_replace_in_subtitles,
             commands::audio::generate_waveform,

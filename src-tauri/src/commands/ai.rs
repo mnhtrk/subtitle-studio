@@ -57,14 +57,14 @@ pub async fn transcribe_audio(
     app_handle: tauri::AppHandle,
     cache: tauri::State<'_, Cache>,
 ) -> Result<Vec<SubtitleSegment>, String> {
-    println!("📝 Транскрибация файла: {}", file_path);
+    println!("Транскрибация файла: {}", file_path);
     
     let file_path_buf = Path::new(&file_path);
     let file_hash = Cache::calculate_file_hash(file_path_buf)?;
     
     // Проверяем кэш
     if let Some(cached) = cache.get_transcription(&file_hash).await? {
-        println!("✅ Найдено в кэше ({} сегментов)", cached.len());
+        println!("Найдено в кэше ({} сегментов)", cached.len());
         return Ok(cached);
     }
 
@@ -132,7 +132,7 @@ pub async fn transcribe_audio(
         if prompt_text.trim().is_empty() {
             form
         } else {
-            println!("🧠 Используется кастомный whisper prompt");
+            println!("Используется кастомный whisper prompt");
             form.text("prompt", prompt_text)
         }
     } else {
@@ -178,7 +178,7 @@ pub async fn transcribe_audio(
         result_count: segments.len() 
     }).await;
     
-    println!("✅ Транскрибация завершена: {} сегментов", segments.len());
+    println!("Транскрибация завершена: {} сегментов", segments.len());
     Ok(segments)
 }
 
@@ -191,7 +191,7 @@ pub async fn translate_batch(
     app_handle: tauri::AppHandle,
     cache: tauri::State<'_, Cache>,
 ) -> Result<Vec<crate::types::TranslationResult>, String> {
-    println!("🔄 Перевод {} сегментов на {}...", segments.len(), target_language);
+    println!("Перевод {} сегментов на {}...", segments.len(), target_language);
     
     let cache_key = Cache::generate_translation_cache_key(
         &segments,
@@ -202,7 +202,7 @@ pub async fn translate_batch(
     
     // Проверяем кэш
     if let Some(cached) = cache.get_translation(&cache_key).await? {
-        println!("✅ Найдено в кэше");
+        println!("Найдено в кэше");
         return Ok(cached);
     }
 
@@ -334,7 +334,7 @@ pub async fn translate_batch(
         result_count: translations.len() 
     }).await;
     
-    println!("✅ Перевод завершён: {} сегментов", translations.len());
+    println!("Перевод завершён: {} сегментов", translations.len());
     Ok(translations)
 }
 
@@ -550,7 +550,7 @@ pub struct AutoGlossaryOptions {
     pub min_frequency: u32,
     pub max_terms: u32,
     pub target_language: String,
-    /// Промпт пользователя из мастера (персонажи, сеттинг) — учитывать при составлении глоссария.
+    /// Промпт пользователя из мастера (персонажи, сеттинг) - учитывать при составлении глоссария!!!
     #[serde(default)]
     pub context_prompt: Option<String>,
 }
@@ -570,7 +570,7 @@ fn build_subtitle_corpus(segments: &[SubtitleSegment], max_chars: usize) -> Stri
     text
 }
 
-/// Токены, которые не должны попадать в глоссарий (частые служебные слова EN/FR и т.д.).
+/// Токены, которые не должны попадать в глоссарий
 fn trivial_token_set() -> &'static HashSet<&'static str> {
     static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
@@ -612,7 +612,7 @@ fn should_drop_glossary_candidate(source: &str, target: &str) -> bool {
     if trivial_token_set().contains(lower.as_str()) {
         return true;
     }
-    // короткое совпадение без смены смысла (частый шум)
+    // короткое совпадение без смены смысла
     if s.eq_ignore_ascii_case(t) && s.chars().count() < 4 {
         return true;
     }
@@ -625,7 +625,7 @@ pub async fn auto_generate_glossary(
     options: Option<AutoGlossaryOptions>,
     _app_handle: tauri::AppHandle,
 ) -> Result<Vec<GlossaryTerm>, String> {
-    println!("📚 Автоматическое создание глоссария из {} сегментов", segments.len());
+    println!("Автоматическое создание глоссария из {} сегментов", segments.len());
 
     if segments.is_empty() {
         return Ok(Vec::new());
@@ -731,7 +731,7 @@ pub async fn auto_generate_glossary(
         glossary_terms.truncate(max_terms as usize);
     }
 
-    println!("✅ Создан глоссарий из {} терминов", glossary_terms.len());
+    println!("Создан глоссарий из {} терминов", glossary_terms.len());
     Ok(glossary_terms)
 }
 

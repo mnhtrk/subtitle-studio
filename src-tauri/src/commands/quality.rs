@@ -38,7 +38,7 @@ pub async fn check_translation_quality(
     options: Option<QualityCheckOptions>,
     _app_handle: tauri::AppHandle,
 ) -> Result<QualityReport, String> {
-    println!("🔍 Проверка качества перевода для {} сегментов", segments.len());
+    println!("Проверка качества перевода для {} сегментов", segments.len());
     
     let options = options.unwrap_or(QualityCheckOptions {
         check_length_ratio: true,
@@ -85,7 +85,7 @@ pub async fn check_translation_quality(
         (coverage_score + (50.0 - issues_penalty)).max(0.0)
     };
     
-    println!("✅ Найдено {} проблем в {} сегментах", total_issues, segments.len());
+    println!("Найдено {} проблем в {} сегментах", total_issues, segments.len());
     
     Ok(QualityReport {
         total_segments: segments.len() as u32,
@@ -132,7 +132,6 @@ fn check_length_ratio(original: &str, translation: &str, tolerance: f64) -> Opti
 
 fn check_meaning_preservation(original: &str, translation: &str) -> Option<QualityIssue> {
     // Простая проверка: наличие ключевых слов
-    // В реальном приложении можно использовать семантический анализ или LLM
     
     let original_lower = original.to_lowercase();
     let translation_lower = translation.to_lowercase();

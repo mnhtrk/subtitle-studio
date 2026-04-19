@@ -191,6 +191,14 @@ export const projectService = {
     return await invoke('insert_subtitle_segment', { projectPath, fileId, start, end });
   },
 
+  deleteSubtitleSegment: async (
+    projectPath: string,
+    fileId: string,
+    segmentId: number
+  ): Promise<{ segments: SubtitleSegment[] }> => {
+    return await invoke('delete_subtitle_segment', { projectPath, fileId, segmentId });
+  },
+
   exportSubtitles: async (
     projectPath: string,
     fileId: string,

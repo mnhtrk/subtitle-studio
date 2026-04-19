@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-// УДАЛЯЕМ неиспользуемые импорты
 // use crate::project::{SubtitleSegment, GlossaryEntry};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

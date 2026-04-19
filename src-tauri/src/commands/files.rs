@@ -28,7 +28,7 @@ pub async fn open_project(
     cache.cache_project_structure(&project.id, &project).await?;
     update_recent_projects(&path, &app_handle)?;
     
-    println!("📂 Проект '{}' открыт", project.name);
+    println!("Проект '{}' открыт", project.name);
     Ok(project)
 }
 
@@ -41,7 +41,7 @@ pub async fn save_project(
         .save_to_file(&app_handle)
         .map_err(|e| format!("Ошибка сохранения проекта: {}", e))?;
     
-    println!("💾 Проект '{}' сохранён", project.name);
+    println!("Проект '{}' сохранён", project.name);
     Ok(())
 }
 
@@ -107,7 +107,7 @@ pub async fn import_media(
     project.files.push(project_file.clone());
     project.save_to_file(&app_handle)?;
     
-    println!("📥 Файл '{}' импортирован в проект", file_name);
+    println!("Файл '{}' импортирован в проект", file_name);
     Ok(project_file)
 }
 
@@ -144,7 +144,7 @@ pub async fn export_subtitles(
     
     fs::write(&output_path, content).map_err(|e| e.to_string())?;
     
-    println!("📤 Субтитры экспортированы: {}", output_path);
+    println!("Субтитры экспортированы: {}", output_path);
     Ok(output_path)
 }
 
@@ -304,7 +304,7 @@ pub async fn remove_file_from_project(
             if full_file_path.exists() {
                 fs::remove_file(&full_file_path)
                     .map_err(|e| format!("Ошибка удаления файла {}: {}", full_file_path.display(), e))?;
-                println!("🗑️ Физический файл удалён: {}", full_file_path.display());
+                println!("Физический файл удалён: {}", full_file_path.display());
             }
         }
         
@@ -315,7 +315,7 @@ pub async fn remove_file_from_project(
             
             // Сохраняем проект
             project.save_to_file(&app_handle)?;
-            println!("🗑️ Файл '{}' удалён из проекта", file.name);
+            println!("Файл '{}' удалён из проекта", file.name);
             
             Ok(())
         } else {
@@ -334,7 +334,7 @@ pub async fn import_existing_subtitles(
     file_id: String,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<SubtitleSegment>, String> {
-    println!("📥 Импорт существующих субтитров: {}", subtitle_path);
+    println!("Импорт существующих субтитров: {}", subtitle_path);
     
     let subtitle_path_buf = Path::new(&subtitle_path);
     if !subtitle_path_buf.exists() {
@@ -365,7 +365,7 @@ pub async fn import_existing_subtitles(
         return Err("Не удалось распарсить субтитры".to_string());
     }
     
-    println!("✅ Импортировано {} сегментов", segments.len());
+    println!("Импортировано {} сегментов", segments.len());
     
     // Обновляем файл в проекте
     let project_path_buf = Path::new(&project_path);
@@ -377,7 +377,7 @@ pub async fn import_existing_subtitles(
         project.updated_at = chrono::Utc::now().to_rfc3339();
         
         project.save_to_file(&app_handle)?;
-        println!("💾 Субтитры сохранены в проект");
+        println!("Субтитры сохранены в проект");
     }
     
     Ok(segments)
@@ -397,7 +397,7 @@ pub async fn backup_project(
     options: Option<BackupOptions>,
     _app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    println!("💾 Создание резервной копии проекта: {}", project_path);
+    println!("Создание резервной копии проекта: {}", project_path);
     
     let project_path_buf = Path::new(&project_path);
     if !project_path_buf.exists() {
@@ -445,7 +445,7 @@ pub async fn backup_project(
         .map_err(|e| format!("Ошибка завершения архива: {}", e))?;
     
     let backup_path_str = backup_file_path.to_string_lossy().to_string();
-    println!("✅ Резервная копия создана: {}", backup_path_str);
+    println!("Резервная копия создана: {}", backup_path_str);
     
     Ok(backup_path_str)
 }
@@ -502,7 +502,7 @@ pub struct ProjectDiskFile {
     pub name: String,
 }
 
-/// Файлы на диске в `config/`, `video/`, `subtitles/` — для дерева проекта (не только project.json).
+/// Файлы на диске в `config/`, `video/`, `subtitles/` для дерева проекта
 #[tauri::command]
 pub async fn list_project_directory_files(project_path: String) -> Result<Vec<ProjectDiskFile>, String> {
     let base = Path::new(&project_path);

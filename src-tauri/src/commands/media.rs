@@ -1,5 +1,4 @@
-// УДАЛЯЕМ неиспользуемые импорты
-use std::path::Path;  // ← Удалён PathBuf
+use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -7,9 +6,9 @@ use tokio::process::Command;
 pub async fn extract_audio_from_video(
     video_path: String,
     output_path: String,
-    _app_handle: tauri::AppHandle,  // ← Префикс _ для неиспользуемой переменной
+    _app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    println!("🔊 Извлечение аудио из видео: {}", video_path);
+    println!("Извлечение аудио из видео: {}", video_path);
     
     // Проверяем существование исходного файла
     let video_path_buf = Path::new(&video_path);
@@ -23,10 +22,10 @@ pub async fn extract_audio_from_video(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     
-    // Проверяем доступность FFmpeg
+    // Проверяем FFmpeg
     let ffmpeg_available = is_ffmpeg_available().await;
     if !ffmpeg_available {
-        return Err("FFmpeg не установлен в системе. Установите FFmpeg и добавьте его в PATH.".to_string());
+        return Err("FFmpeg не установлен в системе".to_string());
     }
     
     // Формируем команду FFmpeg
@@ -43,7 +42,7 @@ pub async fn extract_audio_from_video(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     
-    println!("🎬 Выполнение команды: ffmpeg -i {} -vn -acodec libmp3lame -b:a 192k -y {}", 
+    println!("Выполнение команды: ffmpeg -i {} -vn -acodec libmp3lame -b:a 192k -y {}", 
              video_path, output_path);
     
     // Запускаем процесс
@@ -53,7 +52,7 @@ pub async fn extract_audio_from_video(
     
     // Проверяем результат
     if output.status.success() {
-        println!("✅ Аудио успешно извлечено: {}", output_path);
+        println!("Аудио успешно извлечено: {}", output_path);
         
         // Проверяем, что файл создан и имеет ненулевой размер
         if output_path_buf.exists() {
@@ -73,7 +72,7 @@ pub async fn extract_audio_from_video(
             "FFmpeg завершился с ошибкой:\nSTDERR: {}\nSTDOUT: {}",
             stderr, stdout
         );
-        println!("❌ Ошибка FFmpeg: {}", error_msg);
+        println!("Ошибка FFmpeg: {}", error_msg);
         return Err(error_msg);
     }
 }
