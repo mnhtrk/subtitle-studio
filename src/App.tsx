@@ -23,6 +23,28 @@ import {
 	splitSegmentAt
 } from './utils/subtitleSegmentsLocal';
 
+import iconNewProject from './assets/icons/new-project.svg';
+import iconOpenProject from './assets/icons/open-project.svg';
+import iconSave from './assets/icons/save.svg';
+import iconWizard from './assets/icons/wizard.svg';
+import iconExport from './assets/icons/export.svg';
+import iconGlossary from './assets/icons/glossary.svg';
+import iconSearch from './assets/icons/search.svg';
+
+/** SVG как CSS-mask: цвет задаётся фоном (text-primary / white), тема переключается автоматически. */
+function sidebarIconMaskStyle(src: string): React.CSSProperties {
+	return {
+		maskImage: `url(${src})`,
+		WebkitMaskImage: `url(${src})`,
+		maskSize: 'contain',
+		maskRepeat: 'no-repeat',
+		maskPosition: 'center'
+	};
+}
+
+const SIDEBAR_ICON_CLASS =
+	'pointer-events-none inline-block h-7 w-7 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
+
 function formatSrtTime(seconds: number): string {
 	if (!Number.isFinite(seconds)) return '00:00:00,000';
 	const totalMs = Math.round(seconds * 1000);
@@ -1879,23 +1901,32 @@ export default function App() {
 						
 						{/* Верхняя группа кнопок */}
 						<div className="flex flex-col items-center gap-[30px]">
-							<button 
-									title="Создать новый проект" 
-									onClick={() => setActiveModal('createProject')} // <-- Добавь это
-									className="group w-7 h-7 flex items-center justify-center shrink-0"
+							<button
+								type="button"
+								title="Создать новый проект"
+								onClick={() => setActiveModal('createProject')}
+								className="group w-7 h-7 flex items-center justify-center shrink-0"
 							>
-									<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+								<span
+									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconNewProject)}
+									aria-hidden
+								/>
 							</button>
-							
+
 							<button
 								type="button"
 								title="Открыть проект"
 								onClick={() => void handleOpenProjectDialog()}
 								className="group w-7 h-7 flex items-center justify-center shrink-0"
 							>
-								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+								<span
+									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconOpenProject)}
+									aria-hidden
+								/>
 							</button>
-							
+
 							<button
 								type="button"
 								title="Сохранить проект"
@@ -1903,35 +1934,62 @@ export default function App() {
 								disabled={!currentProject}
 								className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
 							>
-								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+								<span
+									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconSave)}
+									aria-hidden
+								/>
 							</button>
 						</div>
 
 						{/* Кнопка мастера в круге */}
-						<button 
-								onClick={openWizard}
-								title="Пошаговый мастер" 
-								className="w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-all shrink-0 my-[28px]"
+						<button
+							type="button"
+							onClick={openWizard}
+							title="Пошаговый мастер"
+							className="group w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-colors shrink-0 my-[28px]"
 						>
-								<div className="w-7 h-7 bg-surface-secondary/20 rounded-sm" />
+							<span
+								className={`${SIDEBAR_ICON_CLASS} bg-white`}
+								style={sidebarIconMaskStyle(iconWizard)}
+								aria-hidden
+							/>
 						</button>
 
 						{/* Нижняя группа кнопок */}
 						<div className="flex flex-col items-center gap-[30px]">
-							<button title="Экспорт" onClick={() => setActiveModal('export')} className="group w-7 h-7 flex items-center justify-center shrink-0">
-								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							<button
+								type="button"
+								title="Экспорт"
+								onClick={() => setActiveModal('export')}
+								className="group w-7 h-7 flex items-center justify-center shrink-0"
+							>
+								<span
+									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconExport)}
+									aria-hidden
+								/>
 							</button>
-							
-							<button 
-								title="Глоссарий" 
+
+							<button
+								type="button"
+								title="Глоссарий"
 								onClick={() => setActiveModal('glossary')}
 								className="group w-7 h-7 flex items-center justify-center shrink-0"
 							>
-								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+								<span
+									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconGlossary)}
+									aria-hidden
+								/>
 							</button>
 
-							<button title="Поиск" className="group w-7 h-7 flex items-center justify-center shrink-0">
-								<div className="w-7 h-7 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							<button type="button" title="Поиск" className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<span
+									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconSearch)}
+									aria-hidden
+								/>
 							</button>
 						</div>
 					</div>
