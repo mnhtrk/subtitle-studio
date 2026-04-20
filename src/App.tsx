@@ -24,12 +24,26 @@ import {
 } from './utils/subtitleSegmentsLocal';
 
 import iconNewProject from './assets/icons/new-project.svg';
+import iconNewFile from './assets/icons/new-file.svg';
 import iconOpenProject from './assets/icons/open-project.svg';
 import iconSave from './assets/icons/save.svg';
 import iconWizard from './assets/icons/wizard.svg';
 import iconExport from './assets/icons/export.svg';
 import iconGlossary from './assets/icons/glossary.svg';
 import iconSearch from './assets/icons/search.svg';
+import iconNewFolder from './assets/icons/new-folder.svg';
+import iconAdd from './assets/icons/add.svg';
+import iconMore from './assets/icons/more.svg';
+import iconArrowUp from './assets/icons/arrow-up.svg';
+import iconArrowDown from './assets/icons/arrow-down.svg';
+import iconSend from './assets/icons/send.svg';
+import iconPlay from './assets/icons/play.svg';
+import iconPause from './assets/icons/pause.svg';
+import iconStop from './assets/icons/stop.svg';
+import iconVolume from './assets/icons/volume.svg';
+import iconVolumeMute from './assets/icons/volume-mute.svg';
+import iconZoomIn from './assets/icons/zoom-in.svg';
+import iconZoomOut from './assets/icons/zoom-out.svg';
 
 /** SVG как CSS-mask: цвет задаётся фоном (text-primary / white), тема переключается автоматически. */
 function sidebarIconMaskStyle(src: string): React.CSSProperties {
@@ -44,6 +58,33 @@ function sidebarIconMaskStyle(src: string): React.CSSProperties {
 
 const SIDEBAR_ICON_CLASS =
 	'pointer-events-none inline-block h-7 w-7 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
+
+
+const PANEL_HEADER_ICON_CLASS =
+	'pointer-events-none inline-block h-4 w-4 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
+
+/** Видеоплеер 24×24, именованные group/* чтобы не цеплять чужие group-hover */
+const VIDEO_CTRL_BTN_CLASS =
+	'flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-40';
+
+const VIDEO_CTRL_ICON_PLAY =
+	'pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/vplay:scale-110 group-active/vplay:scale-[0.92]';
+
+const VIDEO_CTRL_ICON_STOP =
+	'pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/vstop:scale-110 group-active/vstop:scale-[0.92]';
+
+const VIDEO_CTRL_ICON_VOL =
+	'pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/vvol:scale-110 group-active/vvol:scale-[0.92]';
+
+/** Таймлайн zoom 22×22, без фона при hover */
+const TIMELINE_ZOOM_BTN_CLASS =
+	'flex h-[22px] w-[22px] shrink-0 items-center justify-center border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40';
+
+const TIMELINE_ZOOM_OUT_ICON_CLASS =
+	'pointer-events-none inline-block h-[22px] w-[22px] shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/tzoomout:scale-110 group-active/tzoomout:scale-[0.92]';
+
+const TIMELINE_ZOOM_IN_ICON_CLASS =
+	'pointer-events-none inline-block h-[22px] w-[22px] shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/tzoomin:scale-110 group-active/tzoomin:scale-[0.92]';
 
 function formatSrtTime(seconds: number): string {
 	if (!Number.isFinite(seconds)) return '00:00:00,000';
@@ -322,6 +363,7 @@ export default function App() {
 	const [isResizing, setIsResizing] = useState(false); // состояние ресайза дерева проекта
 	const [isAiAgentResizing, setIsAiAgentResizing] = useState(false); // состояние ресайза агента
 	const [isVideoFolderOpen, setIsVideoFolderOpen] = useState(true); // открыта ли папка в дереве
+	const [agentEmbedDiffExpanded, setAgentEmbedDiffExpanded] = useState(true);
 
 	// --- ТЕМА И МЕНЮ ---
 	const [isDarkTheme, setIsDarkTheme] = useState(() => {
@@ -390,6 +432,7 @@ export default function App() {
 	const [currentPlaybackTime, setCurrentPlaybackTime] = useState(0);
 	const [volume, setVolume] = useState(1);
 	const [videoMuted, setVideoMuted] = useState(false);
+	const [isVideoPlaying, setIsVideoPlaying] = useState(false);
 	const [timelineZoomPercent, setTimelineZoomPercent] = useState(100);
 	const [waveformPeaks, setWaveformPeaks] = useState<number[] | null>(null);
 	const [waveformImageSrc, setWaveformImageSrc] = useState<string | null>(null);
@@ -799,6 +842,24 @@ export default function App() {
 			console.error('open project dialog', e);
 		}
 	}, [handleSelectProject]);
+
+	const handleProjectTreeNewFile = useCallback(() => {
+		if (!currentProject) return;
+		// TODO: новый файл в выбранной папке дерева проекта
+	}, [currentProject]);
+
+	const handleProjectTreeNewFolder = useCallback(() => {
+		if (!currentProject) return;
+		// TODO: новая папка в выбранном месте дерева
+	}, [currentProject]);
+
+	const handleAiAgentAdd = useCallback(() => {
+		// TODO: действие кнопки «Добавить» в чате агента
+	}, []);
+
+	const handleAiAgentMore = useCallback(() => {
+		// TODO: дополнительные опции чата
+	}, []);
 
 	const menuItems = useMemo(
 		() => [
@@ -1231,7 +1292,7 @@ export default function App() {
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if (e.code !== 'Space' && e.key !== ' ') return;
+			if (e.code !== 'Space') return;
 			if (activeModal !== null) return;
 			if (shouldIgnoreSpacebarForVideo(e.target)) return;
 			if (!videoSrc) return;
@@ -1250,13 +1311,13 @@ export default function App() {
 			if (!e.ctrlKey && !e.metaKey) return;
 			if (activeModal !== null) return;
 			if (shouldIgnoreSpacebarForVideo(e.target)) return;
-			const key = e.key.toLowerCase();
-			if (key === 'z' && !e.shiftKey) {
+			/* e.code — физическая клавиша (KeyZ и т.д.), работает в любой раскладке */
+			if (e.code === 'KeyZ' && !e.shiftKey) {
 				e.preventDefault();
 				void performSubtitleUndo();
 				return;
 			}
-			if (key === 'y' || (key === 'z' && e.shiftKey)) {
+			if (e.code === 'KeyY' || (e.code === 'KeyZ' && e.shiftKey)) {
 				e.preventDefault();
 				void performSubtitleRedo();
 				return;
@@ -1268,7 +1329,7 @@ export default function App() {
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key !== 'Delete') return;
+			if (e.code !== 'Delete') return;
 			if (activeModal !== null) return;
 			if (shouldIgnoreSpacebarForVideo(e.target)) return;
 			if (!activeSubtitleFileId || selectedSegmentIndex < 0) return;
@@ -1281,7 +1342,7 @@ export default function App() {
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key !== 'Escape') return;
+			if (e.code !== 'Escape') return;
 			setTimelineInsertRange(null);
 			setTimelineRangePreview(null);
 			timelineRangeSelectDragRef.current = null;
@@ -1292,14 +1353,14 @@ export default function App() {
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+			if (e.code !== 'ArrowLeft' && e.code !== 'ArrowRight') return;
 			if (activeModal !== null) return;
 			if (shouldIgnoreSpacebarForVideo(e.target)) return;
 			if (!activeSubtitleFileId) return;
 			const n = segmentsRef.current.length;
 			if (n === 0) return;
 			e.preventDefault();
-			if (e.key === 'ArrowLeft') {
+			if (e.code === 'ArrowLeft') {
 				setSelectedSegmentIndex((i) => {
 					if (i < 0) return n - 1;
 					return Math.max(0, i - 1);
@@ -1424,6 +1485,10 @@ export default function App() {
 		const v = videoRef.current;
 		if (v) v.muted = videoMuted;
 	}, [videoMuted]);
+
+	useEffect(() => {
+		if (!videoSrc) setIsVideoPlaying(false);
+	}, [videoSrc]);
 
 	/** Плавная полоска таймлайна */
 	useEffect(() => {
@@ -1635,7 +1700,10 @@ export default function App() {
 			const r = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
 			v.volume = r;
 			setVolume(r);
-			if (r > 0 && v.muted) {
+			if (r < 1e-4) {
+				v.muted = true;
+				setVideoMuted(true);
+			} else {
 				v.muted = false;
 				setVideoMuted(false);
 			}
@@ -2007,13 +2075,32 @@ export default function App() {
 						</span>
 						
 						<div className="flex items-center gap-[12px] shrink-0">
-
-							<button title="New File" className="group w-4 h-4 flex items-center justify-center shrink-0">
-								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							<button
+								type="button"
+								title="Новый файл"
+								onClick={handleProjectTreeNewFile}
+								disabled={!currentProject}
+								className="group w-4 h-4 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
+							>
+								<span
+									className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconNewFile)}
+									aria-hidden
+								/>
 							</button>
-							
-							<button title="New Folder" className="group w-4 h-4 flex items-center justify-center shrink-0">
-								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+
+							<button
+								type="button"
+								title="Новая папка"
+								onClick={handleProjectTreeNewFolder}
+								disabled={!currentProject}
+								className="group w-4 h-4 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
+							>
+								<span
+									className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconNewFolder)}
+									aria-hidden
+								/>
 							</button>
 						</div>
 					</div>
@@ -2138,12 +2225,30 @@ export default function App() {
 						</span>
 						
 						<div className="flex items-center gap-[12px] shrink-0">
-							<button title="Add" className="group w-4 h-4 flex items-center justify-center shrink-0">
-								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+							<button
+								type="button"
+								title="Добавить"
+								onClick={handleAiAgentAdd}
+								className="group w-4 h-4 flex items-center justify-center shrink-0"
+							>
+								<span
+									className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconAdd)}
+									aria-hidden
+								/>
 							</button>
-							
-							<button title="Options" className="group w-4 h-4 flex items-center justify-center shrink-0">
-								<div className="w-4 h-4 bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+
+							<button
+								type="button"
+								title="Ещё"
+								onClick={handleAiAgentMore}
+								className="group w-4 h-4 flex items-center justify-center shrink-0"
+							>
+								<span
+									className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
+									style={sidebarIconMaskStyle(iconMore)}
+									aria-hidden
+								/>
 							</button>
 						</div>
 					</div>
@@ -2167,33 +2272,67 @@ export default function App() {
 									Конечно! Эта идиома означает, что человек вошел в ритм и начал работать эффективно. Вот варианты перевода:
 								</p>
 
-								{/* Встраиваемая реплика */}
+								{/* Встраиваемая реплика (diff-карточка) */}
 								<div className="mt-3 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
-									<div className="flex items-center justify-between">
-										<div className="w-4 h-4 bg-text-primary/20 rounded-sm flex items-center justify-center cursor-pointer hover:bg-text-primary/30 transition-colors">
-											<div className="w-2 h-1 bg-text-primary/40 rounded-full" /> 
-										</div>
-										<div className="flex gap-[12px]">
-											<button className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors">Undo</button>
-											<button className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors">Keep</button>
+									<div className="flex items-center justify-between gap-2">
+										<button
+											type="button"
+											title={agentEmbedDiffExpanded ? 'Свернуть' : 'Развернуть'}
+											aria-expanded={agentEmbedDiffExpanded}
+											onClick={() => setAgentEmbedDiffExpanded((v) => !v)}
+											className="group flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-primary transition-colors hover:bg-text-primary/15"
+										>
+											<span
+												className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
+												style={sidebarIconMaskStyle(
+													agentEmbedDiffExpanded ? iconArrowUp : iconArrowDown
+												)}
+												aria-hidden
+											/>
+										</button>
+										<div className="flex gap-[12px] shrink-0">
+											<button
+												type="button"
+												className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors"
+											>
+												Undo
+											</button>
+											<button
+												type="button"
+												className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors"
+											>
+												Keep
+											</button>
 										</div>
 									</div>
 
-									{/* Метаданные ID, Таймкод и Тонкая Линия */}
-									<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
-										<span className="whitespace-nowrap">#152</span>
-										<span className="whitespace-nowrap">[ 00:01:03 ]</span>
-										<div className="flex-1 h-[1px] bg-border-default" /> {/* Тонкая линия как в Project Tree */}
-									</div>
+									{!agentEmbedDiffExpanded && (
+										<p className="text-caption font-inter text-text-primary/70">1 change</p>
+									)}
 
-									<div className="flex flex-col gap-[4px]">
-										<div className="h-[22px] bg-inline-error rounded-[2px] px-[4px] flex items-center">
-											<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магикс!</span>
-										</div>
-										<div className="h-[22px] bg-inline-success rounded-[2px] px-[4px] flex items-center">
-											<span className="text-caption text-text-primary truncate font-inter">Поехали сегодня в Магиксию!</span>
-										</div>
-									</div>
+									{agentEmbedDiffExpanded && (
+										<>
+											{/* Метаданные ID, Таймкод и Тонкая Линия */}
+											<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+												<span className="whitespace-nowrap">#152</span>
+												<span className="whitespace-nowrap">[ 00:01:03 ]</span>
+												<div className="flex-1 h-[1px] bg-border-default" />
+											</div>
+
+											<div className="flex flex-col gap-[4px]">
+												<div className="h-[22px] bg-inline-error rounded-[2px] px-[4px] flex items-center">
+													<span className="text-caption text-text-primary truncate font-inter">
+														Поехали сегодня в Магикс!
+													</span>
+												</div>
+												<div className="h-[22px] bg-inline-success rounded-[2px] px-[4px] flex items-center">
+													<span className="text-caption text-text-primary truncate font-inter">
+														Поехали сегодня в Магиксию!
+													</span>
+												</div>
+											</div>
+										</>
+									)}
 								</div>
 							</div>
 						</div>
@@ -2217,15 +2356,18 @@ export default function App() {
 								rows={3}
 							/>
 
-							{/* Кнопка отправки */}
+							{/* Кнопка отправки: hitbox = круг 40×40; анимации только от group/send, не от group на поле ввода */}
 							<div className="absolute right-3 bottom-3">
-								<button 
-									title="Send message" 
-									className="group w-[40px] h-[40px] flex items-center justify-center shrink-0"
+								<button
+									type="button"
+									title="Send message"
+									className="group/send flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-0 bg-secondary-hover p-0 outline-none transition-colors hover:bg-primary-main focus-visible:ring-2 focus-visible:ring-primary-main/40"
 								>
-									<div className="w-[40px] h-[40px] bg-secondary-hover rounded-full group-hover:bg-primary-main transition-colors flex items-center justify-center">
-										<div className="w-4 h-4 bg-surface-secondary/30 rounded-sm" />
-									</div>
+									<span
+										className="pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-white transition-transform duration-200 ease-out will-change-transform group-hover/send:scale-110 group-active/send:scale-[0.92]"
+										style={sidebarIconMaskStyle(iconSend)}
+										aria-hidden
+									/>
 								</button>
 							</div>
 
@@ -2509,11 +2651,21 @@ export default function App() {
 												}}
 												onPlay={() => {
 													isPlayingRef.current = true;
+													setIsVideoPlaying(true);
 												}}
 												onPause={() => {
 													isPlayingRef.current = false;
+													setIsVideoPlaying(false);
 												}}
-												onVolumeChange={(e) => setVolume(e.currentTarget.volume)}
+												onEnded={() => {
+													isPlayingRef.current = false;
+													setIsVideoPlaying(false);
+												}}
+												onVolumeChange={(e) => {
+													const vol = e.currentTarget.volume;
+													setVolume(vol);
+													if (vol < 1e-4) setVideoMuted(true);
+												}}
 												onError={() => {
 													console.error('Video load/playback error', activeVideoAbsolutePath, videoSrc);
 												}}
@@ -2553,17 +2705,31 @@ export default function App() {
 												<div className="flex items-center gap-[12px] shrink-0 min-w-0">
 														<button
 															type="button"
-															className="w-6 h-6 bg-secondary-hover rounded-md shrink-0"
+															title={isVideoPlaying ? 'Пауза' : 'Воспроизведение'}
+															aria-label={isVideoPlaying ? 'Пауза' : 'Воспроизведение'}
+															disabled={!videoSrc}
+															className={`group/vplay ${VIDEO_CTRL_BTN_CLASS}`}
 															onClick={() => {
 																const v = videoRef.current;
 																if (!v) return;
 																if (v.paused) void v.play();
 																else v.pause();
 															}}
-														/>
+														>
+															<span
+																className={VIDEO_CTRL_ICON_PLAY}
+																style={sidebarIconMaskStyle(
+																	isVideoPlaying ? iconPause : iconPlay
+																)}
+																aria-hidden
+															/>
+														</button>
 														<button
 															type="button"
-															className="w-6 h-6 bg-secondary-hover rounded-md shrink-0"
+															title="Стоп"
+															aria-label="Стоп"
+															disabled={!videoSrc}
+															className={`group/vstop ${VIDEO_CTRL_BTN_CLASS}`}
 															onClick={() => {
 																const v = videoRef.current;
 																if (!v) return;
@@ -2571,35 +2737,69 @@ export default function App() {
 																v.currentTime = 0;
 																setCurrentPlaybackTime(0);
 															}}
-														/>
+														>
+															<span
+																className={VIDEO_CTRL_ICON_STOP}
+																style={sidebarIconMaskStyle(iconStop)}
+																aria-hidden
+															/>
+														</button>
 														<button
 															type="button"
-															className="w-6 h-6 bg-secondary-hover rounded-sm shrink-0"
+															title={
+																videoMuted || volume < 1e-4
+																	? 'Включить звук'
+																	: 'Выключить звук'
+															}
+															aria-label={
+																videoMuted || volume < 1e-4
+																	? 'Включить звук'
+																	: 'Выключить звук'
+															}
+															disabled={!videoSrc}
+															className={`group/vvol ${VIDEO_CTRL_BTN_CLASS}`}
 															onClick={() => {
 																const v = videoRef.current;
 																if (!v) return;
-																if (!videoMuted) {
-																	volumeBeforeMuteRef.current = v.volume;
-																}
 																const next = !videoMuted;
-																setVideoMuted(next);
-																v.muted = next;
-																if (!next) {
-																	v.volume = volumeBeforeMuteRef.current;
-																	setVolume(volumeBeforeMuteRef.current);
+																if (next) {
+																	volumeBeforeMuteRef.current = v.volume;
+																	v.volume = 0;
+																	setVolume(0);
+																	v.muted = true;
+																	setVideoMuted(true);
+																} else {
+																	const restore = Math.max(
+																		1e-3,
+																		volumeBeforeMuteRef.current
+																	);
+																	v.volume = restore;
+																	setVolume(restore);
+																	v.muted = false;
+																	setVideoMuted(false);
 																}
 															}}
-														/>
+														>
+															<span
+																className={VIDEO_CTRL_ICON_VOL}
+																style={sidebarIconMaskStyle(
+																	videoMuted || volume < 1e-4
+																		? iconVolumeMute
+																		: iconVolume
+																)}
+																aria-hidden
+															/>
+														</button>
 														
 														{/* Слайдер громкости */}
 														<div
-															className="w-16 h-[2px] bg-border-default relative shrink-0 cursor-pointer"
+															className="w-16 h-[4px] bg-border-default relative shrink-0 cursor-pointer"
 															onMouseDown={handleVolumePointerDown}
 														>
 																<div
 																	className="absolute left-0 top-0 h-full bg-primary-disabled"
 																	style={{
-																		width: `${(videoMuted ? 0 : volume) * 100}%`
+																		width: `${volume * 100}%`
 																	}}
 																/>
 														</div>
@@ -2678,13 +2878,15 @@ export default function App() {
 								</button>
 							</div>
 
-							{/* основная зона таймлайна (wheel: горизонтальный скролл; Alt+wheel: зум) */}
-							<div ref={timelineWheelRef} className="flex-1 flex flex-col min-w-0 overflow-hidden">
-								
+							{/* основная зона таймлайна (wheel: горизонтальный скролл; Alt+wheel: зум) — общий паддинг 12px, между таймлайном и зум+скролл gap 12px без разделителя */}
+							<div
+								ref={timelineWheelRef}
+								className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden bg-surface-panel p-3"
+							>
 								{/* Контейнер с волной и субтитрами */}
 								<div
 									ref={timelineScrollRef}
-									className="timeline-pan-no-scrollbar flex-1 relative bg-[#121212] m-3 rounded-md border border-black overflow-x-auto overflow-y-hidden shadow-inner group [overflow-anchor:none]"
+									className="timeline-pan-no-scrollbar relative min-h-0 flex-1 overflow-x-auto overflow-y-hidden rounded-md border border-black bg-[#121212] shadow-inner group [overflow-anchor:none]"
 								>
 									<div
 										ref={timelineInnerRef}
@@ -2818,20 +3020,23 @@ export default function App() {
 									</div>
 								</div>
 
-								{/* Нижняя панель с зумом и скролл баром */}
-								<div className="h-[32px] p-3 flex items-center gap-6 bg-surface-panel border-t border-border-default">
-									
-									{/* зум кнопки */}
-									<div className="flex items-center gap-2">
-										{/* зум аут */}
+								{/* Зум + скроллбар: фон как у левой панели (Insert…) — задаётся родителем timelineWheelRef */}
+								<div className="flex shrink-0 items-center gap-[24px]">
+									<div className="flex items-center gap-3">
 										<button
 											type="button"
-											className="group w-[22px] h-[22px] flex items-center justify-center shrink-0"
+											title="Уменьшить масштаб"
+											aria-label="Уменьшить масштаб"
+											className={`group/tzoomout ${TIMELINE_ZOOM_BTN_CLASS}`}
 											onClick={() =>
 												setTimelineZoomPercent((z) => stepTimelineZoom(z, -1))
 											}
 										>
-											<div className="w-[22px] h-[22px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+											<span
+												className={TIMELINE_ZOOM_OUT_ICON_CLASS}
+												style={sidebarIconMaskStyle(iconZoomOut)}
+												aria-hidden
+											/>
 										</button>
 
 										{/* выпадающее */}
@@ -2855,31 +3060,34 @@ export default function App() {
 											</div>
 										</div>
 
-										{/* зум аут */}
 										<button
 											type="button"
-											className="group w-[22px] h-[22px] flex items-center justify-center shrink-0"
+											title="Увеличить масштаб"
+											aria-label="Увеличить масштаб"
+											className={`group/tzoomin ${TIMELINE_ZOOM_BTN_CLASS}`}
 											onClick={() =>
 												setTimelineZoomPercent((z) => stepTimelineZoom(z, 1))
 											}
 										>
-											<div className="w-[22px] h-[22px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors" />
+											<span
+												className={TIMELINE_ZOOM_IN_ICON_CLASS}
+												style={sidebarIconMaskStyle(iconZoomIn)}
+												aria-hidden
+											/>
 										</button>
 									</div>
 
-									{/* Полоса прокрутки */}
 									<div
-										className="flex-1 h-[4px] bg-border-default rounded-full relative overflow-hidden cursor-pointer"
+										className="relative h-[4px] min-w-0 flex-1 cursor-pointer overflow-hidden rounded-full bg-border-default"
 										onMouseDown={handleTimelineScrubPointerDown}
 									>
 										<div
 											ref={timelineScrollbarThumbRef}
-											className="absolute top-0 h-full bg-primary-disabled rounded-full"
+											className="absolute top-0 h-full rounded-full bg-primary-disabled"
 											style={{ width: '100%', left: '0%' }}
 										/>
 									</div>
 								</div>
-
 							</div>
 						</div>
 					</div>
