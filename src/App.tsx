@@ -129,9 +129,40 @@ function getSourceVideoStem(project: ProjectData, activeFileId: string | null): 
 	if (track?.file_type === 'Video') {
 		return track.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
 	}
+	if (track?.file_type === 'Subtitle') {
+		if (track.linked_file_id) {
+			const v = project.files.find((f) => f.id === track.linked_file_id && f.file_type === 'Video');
+			if (v) return v.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
+		}
+		return track.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
+	}
 	const vid = project.files.find((f) => f.file_type === 'Video');
 	if (vid) return vid.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
-	return track?.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
+	return 'subtitles';
+}
+
+function firstUnpairedVideoIdInProject(files: ProjectFile[]): string | null {
+	for (let i = files.length - 1; i >= 0; i--) {
+		const f = files[i];
+		if (f.file_type !== 'Video') continue;
+		const hasPartner = files.some(
+			(s) => s.file_type === 'Subtitle' && s.linked_file_id === f.id
+		);
+		if (!hasPartner) return f.id;
+	}
+	return null;
+}
+
+function isCompositionTreeFileActive(
+	project: ProjectData | null,
+	activeSubtitleFileId: string | null,
+	file: ProjectFile
+): boolean {
+	if (!project || !activeSubtitleFileId) return false;
+	if (file.id === activeSubtitleFileId) return true;
+	const activeSub = project.files.find((x) => x.id === activeSubtitleFileId);
+	if (file.file_type === 'Video' && activeSub?.linked_file_id === file.id) return true;
+	return false;
 }
 
 function mergeProjectFilesWithDisk(
@@ -154,6 +185,7 @@ function mergeProjectFilesWithDisk(
 			path: d.relative_path,
 			duration: null,
 			subtitle_segments: null,
+			linked_file_id: null,
 			created_at: '',
 			updated_at: ''
 		});
@@ -493,6 +525,12 @@ export default function App() {
 		if (activeSubtitleFileId) {
 			const t = currentProject.files.find((f) => f.id === activeSubtitleFileId);
 			if (t?.file_type === 'Video') return t;
+			if (t?.file_type === 'Subtitle' && t.linked_file_id) {
+				const v = currentProject.files.find(
+					(f) => f.id === t.linked_file_id && f.file_type === 'Video'
+				);
+				if (v) return v;
+			}
 		}
 		return currentProject.files.find((f) => f.file_type === 'Video') ?? null;
 	}, [currentProject, activeSubtitleFileId]);
@@ -832,9 +870,17 @@ export default function App() {
 			undoSegmentsStackRef.current = [];
 			redoSegmentsStackRef.current = [];
 			setCurrentProject(projectData);
-			const firstFileWithSegments = projectData.files.find(
-				(file) => file.subtitle_segments && file.subtitle_segments.length > 0
+			const firstSubWithSegments = projectData.files.find(
+				(file) =>
+					file.file_type === 'Subtitle' &&
+					file.subtitle_segments &&
+					file.subtitle_segments.length > 0
 			);
+			const firstFileWithSegments =
+				firstSubWithSegments ??
+				projectData.files.find(
+					(file) => file.subtitle_segments && file.subtitle_segments.length > 0
+				);
 			const segs = firstFileWithSegments?.subtitle_segments ?? [];
 			setGeneratedSegments(segs);
 			setActiveSubtitleFileId(firstFileWithSegments?.id ?? null);
@@ -861,6 +907,110 @@ export default function App() {
 			}
 		}
 	}, [maybeSaveBeforeSwitchingProject, clearProjectDirty]);
+
+	const activateProjectTrack = useCallback(
+		async (file: ProjectFile) => {
+			flushSubtitleEditorToProject();
+			const cp = currentProjectRef.current;
+			if (!cp) return;
+
+			try {
+				if (file.id.startsWith('disk:') && file.file_type === 'Subtitle') {
+					const pathNorm = file.path.replace(/\\/g, '/');
+					const abs = joinProjectPath(cp.path, pathNorm);
+					const now = new Date().toISOString();
+					const subId = crypto.randomUUID();
+					const vid = firstUnpairedVideoIdInProject(cp.files);
+					const newEntry: ProjectFile = {
+						id: subId,
+						name: file.name,
+						file_type: 'Subtitle',
+						path: pathNorm,
+						linked_file_id: vid,
+						created_at: now,
+						updated_at: now,
+						subtitle_segments: null
+					};
+					let files = cp.files.map((f) =>
+						vid && f.id === vid ? { ...f, linked_file_id: subId, updated_at: now } : f
+					);
+					files = [...files, newEntry];
+					const mid: ProjectData = { ...cp, files, updated_at: now };
+					currentProjectRef.current = mid;
+					setCurrentProject(mid);
+					await projectService.save(mid);
+					await projectService.importExistingSubtitles(abs, cp.path, subId);
+					const opened = await projectService.open(cp.path);
+					currentProjectRef.current = opened;
+					setCurrentProject(opened);
+					undoSegmentsStackRef.current = [];
+					redoSegmentsStackRef.current = [];
+					setActiveSubtitleFileId(subId);
+					const loaded = opened.files.find((f) => f.id === subId)?.subtitle_segments ?? [];
+					setGeneratedSegments(loaded);
+					setSelectedSegmentIndex(loaded.length > 0 ? 0 : -1);
+					return;
+				}
+
+				if (file.file_type === 'Subtitle') {
+					let proj: ProjectData = cp;
+					let segs = file.subtitle_segments ?? [];
+					if (!segs.length && !file.id.startsWith('disk:')) {
+						const abs = joinProjectPath(cp.path, file.path.replace(/\\/g, '/'));
+						segs = await projectService.importExistingSubtitles(abs, cp.path, file.id);
+						const opened = await projectService.open(cp.path);
+						currentProjectRef.current = opened;
+						setCurrentProject(opened);
+						proj = opened;
+					}
+					undoSegmentsStackRef.current = [];
+					redoSegmentsStackRef.current = [];
+					setActiveSubtitleFileId(file.id);
+					const finalSegs = proj.files.find((f) => f.id === file.id)?.subtitle_segments ?? segs;
+					setGeneratedSegments(finalSegs);
+					setSelectedSegmentIndex(finalSegs.length > 0 ? 0 : -1);
+					return;
+				}
+
+				if (file.file_type === 'Video') {
+					if (file.linked_file_id) {
+						const sub = cp.files.find(
+							(f) => f.id === file.linked_file_id && f.file_type === 'Subtitle'
+						);
+						if (sub) {
+							let proj: ProjectData = cp;
+							let segs = sub.subtitle_segments ?? [];
+							if (!segs.length) {
+								const abs = joinProjectPath(cp.path, sub.path.replace(/\\/g, '/'));
+								segs = await projectService.importExistingSubtitles(abs, cp.path, sub.id);
+								const opened = await projectService.open(cp.path);
+								currentProjectRef.current = opened;
+								setCurrentProject(opened);
+								proj = opened;
+							}
+							undoSegmentsStackRef.current = [];
+							redoSegmentsStackRef.current = [];
+							setActiveSubtitleFileId(sub.id);
+							const subRef = proj.files.find((f) => f.id === sub.id);
+							const finalSegs = subRef?.subtitle_segments ?? segs;
+							setGeneratedSegments(finalSegs);
+							setSelectedSegmentIndex(finalSegs.length > 0 ? 0 : -1);
+							return;
+						}
+					}
+					const segs = file.subtitle_segments ?? [];
+					undoSegmentsStackRef.current = [];
+					redoSegmentsStackRef.current = [];
+					setActiveSubtitleFileId(file.id);
+					setGeneratedSegments(segs);
+					setSelectedSegmentIndex(segs.length > 0 ? 0 : -1);
+				}
+			} catch (e) {
+				console.error('activateProjectTrack', e);
+			}
+		},
+		[flushSubtitleEditorToProject]
+	);
 
 	const handleOpenProjectDialog = useCallback(async () => {
 		try {
@@ -2233,14 +2383,32 @@ export default function App() {
 									</span>
 								</div>
 
-								{isVideoFolderOpen && (
+								{isVideoFolderOpen && treeFiles.video.length > 0 && (
 									<div className="flex gap-[11px] ml-[5px]">
 										<div className="w-[1px] bg-border-default shrink-0" />
 										
 										<div className="flex flex-col gap-[8px] flex-1">
 											{treeFiles.video.map((file) => (
-												<div key={file.id} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
-													<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+												<div
+													key={file.id}
+													role="button"
+													tabIndex={0}
+													onClick={() => void activateProjectTrack(file)}
+													onKeyDown={(e) => {
+														if (e.key === 'Enter' || e.key === ' ') {
+															e.preventDefault();
+															void activateProjectTrack(file);
+														}
+													}}
+													className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center"
+												>
+													<span
+														className={`font-inter font-semibold text-[12px] leading-none tracking-normal ${
+															isCompositionTreeFileActive(currentProject, activeSubtitleFileId, file)
+																? 'text-primary-main'
+																: 'text-text-primary'
+														}`}
+													>
 														{file.name}
 													</span>
 												</div>
@@ -2266,8 +2434,26 @@ export default function App() {
 										<div className="w-[1px] bg-border-default shrink-0" />
 										<div className="flex flex-col gap-[8px] flex-1">
 											{treeFiles.subtitles.map((file) => (
-												<div key={file.id} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
-													<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+												<div
+													key={file.id}
+													role="button"
+													tabIndex={0}
+													onClick={() => void activateProjectTrack(file)}
+													onKeyDown={(e) => {
+														if (e.key === 'Enter' || e.key === ' ') {
+															e.preventDefault();
+															void activateProjectTrack(file);
+														}
+													}}
+													className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center"
+												>
+													<span
+														className={`font-inter font-semibold text-[12px] leading-none tracking-normal ${
+															isCompositionTreeFileActive(currentProject, activeSubtitleFileId, file)
+																? 'text-primary-main'
+																: 'text-text-primary'
+														}`}
+													>
 														{file.name}
 													</span>
 												</div>
@@ -3229,9 +3415,16 @@ export default function App() {
 									redoSegmentsStackRef.current = [];
 									setCurrentProject(project);
 									setGeneratedSegments(segments);
-									const withSeg = project.files.find(
-										(f) => f.subtitle_segments && f.subtitle_segments.length > 0
-									);
+									const withSeg =
+										project.files.find(
+											(f) =>
+												f.file_type === 'Subtitle' &&
+												f.subtitle_segments &&
+												f.subtitle_segments.length > 0
+										) ??
+										project.files.find(
+											(f) => (f.subtitle_segments?.length ?? 0) > 0
+										);
 									setActiveSubtitleFileId(withSeg?.id ?? null);
 									setSelectedSegmentIndex(segments.length > 0 ? 0 : -1);
 									if (withSeg?.id) {

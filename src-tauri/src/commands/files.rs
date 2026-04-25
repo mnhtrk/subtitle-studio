@@ -92,23 +92,46 @@ pub async fn import_media(
         None
     };
 
+    let new_id = uuid::Uuid::new_v4().to_string();
     let project_file = ProjectFile {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: new_id.clone(),
         name: file_name.clone(),
         file_type,
         path: format!("{}/{}", dest_subdir, file_name),
         duration,
         subtitle_segments: None,
+        linked_file_id: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
     
     let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
     project.files.push(project_file.clone());
+    project.updated_at = chrono::Utc::now().to_rfc3339();
+
+    match &project_file.file_type {
+        ProjectType::Video => {
+            if let Some(sid) = first_unpaired_subtitle_id(&project) {
+                link_video_subtitle(&mut project, &new_id, &sid);
+            }
+        }
+        ProjectType::Subtitle => {
+            if let Some(vid) = first_unpaired_video_id(&project) {
+                link_video_subtitle(&mut project, &vid, &new_id);
+            }
+        }
+        ProjectType::Config => {}
+    }
+
     project.save_to_file(&app_handle)?;
     
     println!("Файл '{}' импортирован в проект", file_name);
-    Ok(project_file)
+    project
+        .files
+        .iter()
+        .find(|f| f.id == new_id)
+        .cloned()
+        .ok_or_else(|| "Внутренняя ошибка: импортированный файл не найден в проекте".to_string())
 }
 
 #[tauri::command]
@@ -218,6 +241,44 @@ fn is_subtitle_file(path: &Path) -> bool {
     matches!(ext.to_lowercase().as_str(), "srt" | "vtt" | "ass" | "ssa")
 }
 
+fn video_has_subtitle_partner(project: &Project, video_id: &str) -> bool {
+    project.files.iter().any(|f| {
+        f.file_type == ProjectType::Subtitle && f.linked_file_id.as_deref() == Some(video_id)
+    })
+}
+
+fn first_unpaired_video_id(project: &Project) -> Option<String> {
+    for f in project.files.iter().rev() {
+        if f.file_type != ProjectType::Video {
+            continue;
+        }
+        if !video_has_subtitle_partner(project, &f.id) {
+            return Some(f.id.clone());
+        }
+    }
+    None
+}
+
+fn first_unpaired_subtitle_id(project: &Project) -> Option<String> {
+    for f in project.files.iter().rev() {
+        if f.file_type == ProjectType::Subtitle && f.linked_file_id.is_none() {
+            return Some(f.id.clone());
+        }
+    }
+    None
+}
+
+fn link_video_subtitle(project: &mut Project, video_id: &str, subtitle_id: &str) {
+    if let Some(v) = project.files.iter_mut().find(|f| f.id == video_id) {
+        v.linked_file_id = Some(subtitle_id.to_string());
+        v.updated_at = chrono::Utc::now().to_rfc3339();
+    }
+    if let Some(s) = project.files.iter_mut().find(|f| f.id == subtitle_id) {
+        s.linked_file_id = Some(video_id.to_string());
+        s.updated_at = chrono::Utc::now().to_rfc3339();
+    }
+}
+
 // Функции генерации субтитров
 fn generate_srt(segments: &[SubtitleSegment]) -> String {
     let mut result = String::new();
@@ -298,6 +359,7 @@ pub async fn remove_file_from_project(
     };
     
     if let Some(file) = file_to_remove {
+        let partner_id = file.linked_file_id.clone();
         // Удаляем физический файл если требуется
         if delete_physical_file {
             let full_file_path = Path::new(&project.path).join(&file.path);
@@ -305,6 +367,14 @@ pub async fn remove_file_from_project(
                 fs::remove_file(&full_file_path)
                     .map_err(|e| format!("Ошибка удаления файла {}: {}", full_file_path.display(), e))?;
                 println!("Физический файл удалён: {}", full_file_path.display());
+            }
+        }
+
+        if let Some(pid) = partner_id {
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Some(partner) = project.files.iter_mut().find(|f| f.id == pid) {
+                partner.linked_file_id = None;
+                partner.updated_at = now.clone();
             }
         }
         

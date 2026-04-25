@@ -22,6 +22,8 @@ export interface ProjectFile {
   path: string;
   duration?: number | null;
   subtitle_segments?: SubtitleSegment[] | null;
+  /** Связанный файл эпизода: у субтитров — id видео, у видео — id субтитров. */
+  linked_file_id?: string | null;
   created_at: string;
   updated_at: string;
 }

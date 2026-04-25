@@ -3,7 +3,7 @@ use std::path::Path;
 use std::fs;
 use tauri::AppHandle;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum ProjectType {
     Video,
     Subtitle,
@@ -30,6 +30,9 @@ pub struct ProjectFile {
     pub path: String,
     pub duration: Option<f64>,
     pub subtitle_segments: Option<Vec<SubtitleSegment>>,
+    /// ID связанного файла: у Video — субтитры, у Subtitle — видео (один эпизод).
+    #[serde(default)]
+    pub linked_file_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

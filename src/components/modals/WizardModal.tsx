@@ -9,6 +9,59 @@ import {
   GlossaryTermGenerated
 } from '../../services/projectService';
 
+function joinProjectPath(base: string, ...parts: string[]): string {
+  const a = base.replace(/[/\\]+$/, '');
+  const rest = parts.map((p) => p.replace(/^[/\\]+/, '').replace(/\\/g, '/')).join('/');
+  return `${a}/${rest}`;
+}
+
+/** После транскрипции: сегменты на дорожке субтитров, видео только медиа, пара связана + .srt на диске. */
+async function finalizeEpisodePairInProject(
+  projectPath: string,
+  videoId: string,
+  segments: SubtitleSegment[]
+): Promise<{ project: ProjectData; subtitleFileId: string }> {
+  const project = await projectService.open(projectPath);
+  const video = project.files.find((f) => f.id === videoId && f.file_type === 'Video');
+  if (!video) {
+    throw new Error('Video track missing after import');
+  }
+  const stem = video.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
+  const subName = `${stem}.srt`;
+  const subPath = `subtitles/${subName}`;
+  const subId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const subFile: ProjectFile = {
+    id: subId,
+    name: subName,
+    file_type: 'Subtitle',
+    path: subPath,
+    subtitle_segments: segments,
+    linked_file_id: videoId,
+    created_at: now,
+    updated_at: now
+  };
+  const nextFiles = project.files.map((f) =>
+    f.id === videoId
+      ? { ...f, subtitle_segments: null, linked_file_id: subId, updated_at: now }
+      : f
+  );
+  nextFiles.push(subFile);
+  const updated: ProjectData = {
+    ...project,
+    files: nextFiles,
+    updated_at: now
+  };
+  await projectService.save(updated);
+  await projectService.exportSubtitles(
+    projectPath,
+    subId,
+    'srt',
+    joinProjectPath(projectPath, subPath)
+  );
+  return { project: updated, subtitleFileId: subId };
+}
+
 function mergeAutoGlossary(
   existing: GlossaryEntry[],
   generated: GlossaryTermGenerated[]
@@ -155,7 +208,6 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     try {
       console.log('[Wizard] Importing video to project');
       const importedVideo: ProjectFile = await projectService.importMedia(projectPath!, videoPath);
-      setWorkingFileId(importedVideo.id);
 
       let segments: SubtitleSegment[] = [];
       if (sourceType === 'ai') {
@@ -180,7 +232,13 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
         segments = await projectService.importExistingSubtitles(subtitlePath, projectPath!, importedVideo.id);
       }
 
-      let updatedProject = await saveSegmentsToProject(segments, importedVideo.id);
+      const { project: pairedProject, subtitleFileId } = await finalizeEpisodePairInProject(
+        projectPath!,
+        importedVideo.id,
+        segments
+      );
+      setWorkingFileId(subtitleFileId);
+      let updatedProject = pairedProject;
 
       try {
         const targetIso =
