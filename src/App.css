@@ -205,3 +205,53 @@
   width: 0;
   height: 0;
 }
+
+/* Зум-слейдер таймлайна: стиль в духе системных скроллбаров */
+.timeline-zoom-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+
+.timeline-zoom-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  background: linear-gradient(
+    to right,
+    var(--color-progress-bar) 0%,
+    var(--color-progress-bar) var(--timeline-zoom-fill, 0%),
+    var(--color-border-default) var(--timeline-zoom-fill, 0%),
+    var(--color-border-default) 100%
+  );
+  border-radius: 2px;
+}
+
+.timeline-zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 28px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-progress-bar);
+  border: none;
+  margin-top: 0;
+}
+
+.timeline-zoom-slider::-moz-range-track {
+  height: 4px;
+  background: var(--color-border-default);
+  border-radius: 2px;
+}
+
+.timeline-zoom-slider::-moz-range-progress {
+  height: 4px;
+  background: var(--color-progress-bar);
+  border-radius: 2px;
+}
+
+.timeline-zoom-slider::-moz-range-thumb {
+  width: 28px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-progress-bar);
+  border: none;
+}

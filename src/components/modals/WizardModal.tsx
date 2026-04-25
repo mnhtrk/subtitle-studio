@@ -53,6 +53,18 @@ const whisperLanguageCodes: Record<string, string> = {
   German: 'de'
 };
 
+const resolveIsoLanguage = (languageOrCode: string): string | null => {
+  const normalized = languageOrCode.trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized.length === 2) return normalized;
+  if (normalized === 'english') return 'en';
+  if (normalized === 'russian') return 'ru';
+  if (normalized === 'spanish') return 'es';
+  if (normalized === 'french') return 'fr';
+  if (normalized === 'german') return 'de';
+  return null;
+};
+
 export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, onComplete }) => {
   const [currentStep, setCurrentStep] = useState(1);
   const [sourceType, setSourceType] = useState<'ai' | 'file'>('ai');
@@ -147,17 +159,9 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
 
       let segments: SubtitleSegment[] = [];
       if (sourceType === 'ai') {
-        let hasApiKey = await projectService.getApiKeyStatus();
+        const hasApiKey = await projectService.getApiKeyStatus();
         if (!hasApiKey) {
-          const enteredKey = window.prompt('������ OpenAI API key (���������� � sk-):');
-          if (!enteredKey || !enteredKey.trim()) {
-            throw new Error('OpenAI API key �� ������');
-          }
-          await projectService.saveApiKey(enteredKey.trim());
-          hasApiKey = await projectService.getApiKeyStatus();
-          if (!hasApiKey) {
-            throw new Error('�� ������� ��������� OpenAI API key');
-          }
+          throw new Error('OpenAI API key is not set. Please activate the app first.');
         }
 
         const outputAudioPath = `${projectPath!}/config/wizard_audio_${Date.now()}.mp3`;
@@ -179,7 +183,10 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       let updatedProject = await saveSegmentsToProject(segments, importedVideo.id);
 
       try {
-        const targetIso = whisperLanguageCodes[targetLanguage] ?? 'en';
+        const targetIso =
+          resolveIsoLanguage(updatedProject.target_language) ??
+          resolveIsoLanguage(targetLanguage) ??
+          'en';
         const suggested = await projectService.autoGenerateGlossary(segments, {
           min_frequency: 2,
           max_terms: 45,

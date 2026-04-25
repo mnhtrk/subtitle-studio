@@ -13,6 +13,7 @@ import { NewProjectModal } from './components/modals/NewProjectModal';
 import { WizardModal } from './components/modals/WizardModal';
 import { ExportModal } from './components/modals/ExportModal';
 import { GlossaryModal } from './components/modals/GlossaryModal';
+import { ActivationModal } from './components/modals/ActivationModal';
 
 const appWindow = getCurrentWindow();
 
@@ -171,6 +172,7 @@ function formatPlaybackClock(seconds: number): string {
 
 const MIN_SEGMENT_DURATION = 0.05;
 const MAX_SUBTITLE_UNDO = 80;
+const ACTIVATION_COMPLETED_STORAGE_KEY = 'subtitle-studio-activation-completed';
 
 function cloneSubtitleSegments(segs: SubtitleSegment[]): SubtitleSegment[] {
 	return segs.map((s) => ({ ...s }));
@@ -240,11 +242,9 @@ function TimelineSymmetricWaveform({
 			ctx.fillStyle = '#ADFF2F';
 			for (let col = 0; col < w; col++) {
 				const t = w <= 1 ? 0 : col / (w - 1);
-				const idx = t * (n - 1);
-				const i0 = Math.floor(idx);
-				const i1 = Math.min(n - 1, i0 + 1);
-				const f = idx - i0;
-				const v = Math.abs((1 - f) * peaks[i0] + f * peaks[i1]) * norm;
+				// Nearest-neighbor sampling keeps waveform edges crisp at high zoom.
+				const idx = Math.round(t * (n - 1));
+				const v = Math.abs(peaks[Math.max(0, Math.min(n - 1, idx))]) * norm;
 				const amp = Math.min(maxHalf, v * maxHalf * ampGain);
 				const half = Math.max(1, amp);
 				ctx.fillRect(col, mid - half, 1, half * 2);
@@ -303,21 +303,44 @@ const APP_HEADER_BAR_PX = 32;
  */
 const MIN_TIMELINE_PANE_PX = 200;
 
-const TIMELINE_ZOOM_PRESETS = [50, 75, 90, 100, 120, 150, 200, 300, 400] as const;
+const TIMELINE_ZOOM_MIN = 100;
+const TIMELINE_ZOOM_MAX = 10000;
+const TIMELINE_ZOOM_FACTOR = 1.08;
+const TIMELINE_ZOOM_SLIDER_MIN = 0;
+const TIMELINE_ZOOM_SLIDER_MAX = 1000;
+
+function clampTimelineZoom(value: number): number {
+	if (!Number.isFinite(value)) return TIMELINE_ZOOM_MIN;
+	return Math.max(TIMELINE_ZOOM_MIN, Math.min(TIMELINE_ZOOM_MAX, Math.round(value)));
+}
+
+function timelineZoomToSliderValue(zoom: number): number {
+	const clamped = clampTimelineZoom(zoom);
+	const minLog = Math.log(TIMELINE_ZOOM_MIN);
+	const maxLog = Math.log(TIMELINE_ZOOM_MAX);
+	const ratio = (Math.log(clamped) - minLog) / (maxLog - minLog);
+	return Math.round(TIMELINE_ZOOM_SLIDER_MIN + ratio * (TIMELINE_ZOOM_SLIDER_MAX - TIMELINE_ZOOM_SLIDER_MIN));
+}
+
+function sliderValueToTimelineZoom(slider: number): number {
+	const sliderClamped = Math.max(TIMELINE_ZOOM_SLIDER_MIN, Math.min(TIMELINE_ZOOM_SLIDER_MAX, slider));
+	const ratio = (sliderClamped - TIMELINE_ZOOM_SLIDER_MIN) / (TIMELINE_ZOOM_SLIDER_MAX - TIMELINE_ZOOM_SLIDER_MIN);
+	const minLog = Math.log(TIMELINE_ZOOM_MIN);
+	const maxLog = Math.log(TIMELINE_ZOOM_MAX);
+	return clampTimelineZoom(Math.exp(minLog + ratio * (maxLog - minLog)));
+}
+
+function timelineZoomToFillPercent(zoom: number): number {
+	const sliderValue = timelineZoomToSliderValue(zoom);
+	const ratio =
+		(sliderValue - TIMELINE_ZOOM_SLIDER_MIN) /
+		(TIMELINE_ZOOM_SLIDER_MAX - TIMELINE_ZOOM_SLIDER_MIN);
+	return Math.max(0, Math.min(100, ratio * 100));
+}
 
 function stepTimelineZoom(current: number, direction: 1 | -1): number {
-	const sorted = [...TIMELINE_ZOOM_PRESETS];
-	let bestI = 0;
-	let bestD = Infinity;
-	for (let i = 0; i < sorted.length; i++) {
-		const d = Math.abs(sorted[i] - current);
-		if (d < bestD) {
-			bestD = d;
-			bestI = i;
-		}
-	}
-	const nextI = Math.min(sorted.length - 1, Math.max(0, bestI + direction));
-	return sorted[nextI];
+	if (direction > 0) return clampTimelineZoom(current * TIMELINE_ZOOM_FACTOR);
+	return clampTimelineZoom(current / TIMELINE_ZOOM_FACTOR);
 }
 
 export default function App() {
@@ -389,13 +412,17 @@ export default function App() {
 	}, [activeMenu]);
 
 	// --- МОДАЛЬНЫЕ ОКНА ---
-	const [activeModal, setActiveModal] = useState<'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | null>('welcome');
+	const [activeModal, setActiveModal] = useState<
+		'activation' | 'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | null
+	>(null);
 	const [currentProject, setCurrentProject] = useState<ProjectData | null>(null);
 	const [generatedSegments, setGeneratedSegments] = useState<SubtitleSegment[]>([]);
 	const [activeSubtitleFileId, setActiveSubtitleFileId] = useState<string | null>(null);
 	const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number>(-1);
 	const [isConfigFolderOpen, setIsConfigFolderOpen] = useState(false);
 	const [isSubtitlesFolderOpen, setIsSubtitlesFolderOpen] = useState(false);
+	/** Затемнение/подсветка мастера для пустого проекта — только один раз за «сессию» этого проекта (сброс при смене path). */
+	const [wizardSpotlightDismissed, setWizardSpotlightDismissed] = useState(false);
 
 	const videoRef = useRef<HTMLVideoElement | null>(null);
 	const timelineScrollRef = useRef<HTMLDivElement | null>(null);
@@ -485,6 +512,13 @@ export default function App() {
 		() => (generatedSegments.length > 0 ? Math.max(...generatedSegments.map((s) => s.end)) : 0),
 		[generatedSegments]
 	);
+	const shouldHighlightWizardCta = useMemo(() => {
+		if (!currentProject || wizardSpotlightDismissed) return false;
+		const hasProjectSegments = currentProject.files.some(
+			(file) => (file.subtitle_segments?.length ?? 0) > 0
+		);
+		return !hasProjectSegments && generatedSegments.length === 0;
+	}, [currentProject, generatedSegments.length, wizardSpotlightDismissed]);
 
 	const mediaLengthHint = useMemo(() => {
 		const vd = videoDuration > 0 && Number.isFinite(videoDuration) ? videoDuration : 0;
@@ -1288,7 +1322,19 @@ export default function App() {
 		[activeSubtitleFileId, clientXToTimelineTime, setSegmentStartEndLocal, updateSegmentAtIndex]
 	);
 	
-	const openWizard = () => setActiveModal('wizard');
+	const openWizard = async () => {
+		setWizardSpotlightDismissed(true);
+		try {
+			const hasApiKey = await projectService.getApiKeyStatus();
+			if (!hasApiKey) {
+				setActiveModal('activation');
+				return;
+			}
+		} catch (error) {
+			console.error('Failed to check API key status before wizard', error);
+		}
+		setActiveModal('wizard');
+	};
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
@@ -1377,8 +1423,33 @@ export default function App() {
 	}, [activeModal, activeSubtitleFileId]);
 
 	useEffect(() => {
-		setActiveModal('welcome');
+		let disposed = false;
+		const resolveStartupModal = async () => {
+			try {
+				const activationCompleted = localStorage.getItem(ACTIVATION_COMPLETED_STORAGE_KEY) === '1';
+				const hasApiKey = await projectService.getApiKeyStatus();
+				if (disposed) return;
+				if (!activationCompleted || !hasApiKey) {
+					setActiveModal('activation');
+					return;
+				}
+				setActiveModal('welcome');
+			} catch (error) {
+				console.error('Failed to resolve startup modal', error);
+				if (!disposed) {
+					setActiveModal('activation');
+				}
+			}
+		};
+		void resolveStartupModal();
+		return () => {
+			disposed = true;
+		};
 	}, []);
+
+	useEffect(() => {
+		setWizardSpotlightDismissed(false);
+	}, [currentProject?.path]);
 
 	useEffect(() => {
 		setVideoDuration(0);
@@ -1963,102 +2034,119 @@ export default function App() {
 			{/* ОСНОВНОЙ КОНТЕНТ */}
 			<div className="flex h-screen w-full bg-surface-bg text-text-primary overflow-hidden font-inter min-h-0 select-none">
       
-				{/* ЛЕВАЯ ПАНЕЛЬ (САЙДБАР) */}
-				<div className="w-[60px] border-r border-border-default flex flex-col items-center py-6 bg-surface-panel shrink-0 h-full overflow-y-auto no-scrollbar">
-					<div className="my-auto flex flex-col items-center">
-						
-						{/* Верхняя группа кнопок */}
-						<div className="flex flex-col items-center gap-[30px]">
-							<button
-								type="button"
-								title="Создать новый проект"
-								onClick={() => setActiveModal('createProject')}
-								className="group w-7 h-7 flex items-center justify-center shrink-0"
-							>
-								<span
-									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
-									style={sidebarIconMaskStyle(iconNewProject)}
-									aria-hidden
-								/>
-							</button>
+				{/* ЛЕВАЯ ПАНЕЛЬ (САЙДБАР): overflow-visible, чтобы свечение кнопки мастера не резалось; скролл только у верх/ниж блоков */}
+				<div className="w-[60px] border-r border-border-default flex flex-col items-center py-6 bg-surface-panel shrink-0 h-full min-h-0 overflow-visible">
+					<div className="flex flex-1 min-h-0 w-full flex-col items-center overflow-visible">
+						<div className="flex flex-1 min-h-0 w-full flex-col items-center justify-end overflow-y-auto no-scrollbar pb-[14px]">
+							<div className="flex flex-col items-center gap-[30px]">
+								<button
+									type="button"
+									title="Создать новый проект"
+									onClick={() => setActiveModal('createProject')}
+									className="group w-7 h-7 flex items-center justify-center shrink-0"
+								>
+									<span
+										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+										style={sidebarIconMaskStyle(iconNewProject)}
+										aria-hidden
+									/>
+								</button>
 
-							<button
-								type="button"
-								title="Открыть проект"
-								onClick={() => void handleOpenProjectDialog()}
-								className="group w-7 h-7 flex items-center justify-center shrink-0"
-							>
-								<span
-									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
-									style={sidebarIconMaskStyle(iconOpenProject)}
-									aria-hidden
-								/>
-							</button>
+								<button
+									type="button"
+									title="Открыть проект"
+									onClick={() => void handleOpenProjectDialog()}
+									className="group w-7 h-7 flex items-center justify-center shrink-0"
+								>
+									<span
+										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+										style={sidebarIconMaskStyle(iconOpenProject)}
+										aria-hidden
+									/>
+								</button>
 
+								<button
+									type="button"
+									title="Сохранить проект"
+									onClick={() => void handleSaveProject()}
+									disabled={!currentProject}
+									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
+								>
+									<span
+										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+										style={sidebarIconMaskStyle(iconSave)}
+										aria-hidden
+									/>
+								</button>
+							</div>
+						</div>
+
+						{/* Кнопка мастера в круге — вне overflow-y, свечение не обрезается */}
+						<div
+							className={`relative flex h-[76px] w-[76px] shrink-0 items-center justify-center overflow-visible py-[14px] ${
+								shouldHighlightWizardCta ? 'z-[60]' : ''
+							}`}
+						>
+							{shouldHighlightWizardCta && (
+								<span
+									aria-hidden
+									className="pointer-events-none absolute left-1/2 top-1/2 h-[92px] w-[92px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/35 blur-2xl"
+								/>
+							)}
 							<button
 								type="button"
-								title="Сохранить проект"
-								onClick={() => void handleSaveProject()}
-								disabled={!currentProject}
-								className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
+								onClick={openWizard}
+								title="Пошаговый мастер"
+								className={`group relative z-[1] h-[48px] w-[48px] shrink-0 rounded-full flex items-center justify-center transition-colors ${
+									shouldHighlightWizardCta
+										? 'bg-primary-hover shadow-[0_0_28px_rgba(255,255,255,0.45),0_0_56px_rgba(255,255,255,0.22)]'
+										: 'bg-primary-main shadow-md hover:bg-primary-hover'
+								}`}
 							>
 								<span
-									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
-									style={sidebarIconMaskStyle(iconSave)}
+									className={`${SIDEBAR_ICON_CLASS} bg-white`}
+									style={sidebarIconMaskStyle(iconWizard)}
 									aria-hidden
 								/>
 							</button>
 						</div>
 
-						{/* Кнопка мастера в круге */}
-						<button
-							type="button"
-							onClick={openWizard}
-							title="Пошаговый мастер"
-							className="group w-[48px] h-[48px] bg-primary-main rounded-full flex items-center justify-center shadow-md hover:bg-primary-hover transition-colors shrink-0 my-[28px]"
-						>
-							<span
-								className={`${SIDEBAR_ICON_CLASS} bg-white`}
-								style={sidebarIconMaskStyle(iconWizard)}
-								aria-hidden
-							/>
-						</button>
+						<div className="flex flex-1 min-h-0 w-full flex-col items-center justify-start overflow-y-auto no-scrollbar pt-[14px]">
+							<div className="flex flex-col items-center gap-[30px]">
+								<button
+									type="button"
+									title="Экспорт"
+									onClick={() => setActiveModal('export')}
+									className="group w-7 h-7 flex items-center justify-center shrink-0"
+								>
+									<span
+										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+										style={sidebarIconMaskStyle(iconExport)}
+										aria-hidden
+									/>
+								</button>
 
-						{/* Нижняя группа кнопок */}
-						<div className="flex flex-col items-center gap-[30px]">
-							<button
-								type="button"
-								title="Экспорт"
-								onClick={() => setActiveModal('export')}
-								className="group w-7 h-7 flex items-center justify-center shrink-0"
-							>
-								<span
-									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
-									style={sidebarIconMaskStyle(iconExport)}
-									aria-hidden
-								/>
-							</button>
+								<button
+									type="button"
+									title="Глоссарий"
+									onClick={() => setActiveModal('glossary')}
+									className="group w-7 h-7 flex items-center justify-center shrink-0"
+								>
+									<span
+										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+										style={sidebarIconMaskStyle(iconGlossary)}
+										aria-hidden
+									/>
+								</button>
 
-							<button
-								type="button"
-								title="Глоссарий"
-								onClick={() => setActiveModal('glossary')}
-								className="group w-7 h-7 flex items-center justify-center shrink-0"
-							>
-								<span
-									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
-									style={sidebarIconMaskStyle(iconGlossary)}
-									aria-hidden
-								/>
-							</button>
-
-							<button type="button" title="Поиск" className="group w-7 h-7 flex items-center justify-center shrink-0">
-								<span
-									className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
-									style={sidebarIconMaskStyle(iconSearch)}
-									aria-hidden
-								/>
-							</button>
+								<button type="button" title="Поиск" className="group w-7 h-7 flex items-center justify-center shrink-0">
+									<span
+										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
+										style={sidebarIconMaskStyle(iconSearch)}
+										aria-hidden
+									/>
+								</button>
+							</div>
 						</div>
 					</div>
 				</div>
@@ -2688,11 +2776,11 @@ export default function App() {
 								<div className="bg-surface-panel border-t border-border-default flex flex-col shrink-0 p-3 m-0 gap-[24px]">
 										<div className="w-full">
 												<div
-													className="relative w-full h-[4px] bg-border-default cursor-pointer"
+													className="relative w-full h-[4px] rounded-[2px] bg-border-default cursor-pointer overflow-hidden"
 													onMouseDown={handleVideoProgressPointerDown}
 												>
 														<div
-															className="absolute left-0 top-0 h-full bg-[#9FA3B0]"
+															className="absolute left-0 top-0 h-full rounded-[2px] bg-[#9FA3B0]"
 															style={{
 																width: `${timelineTotalDuration ? Math.min(100, (currentPlaybackTime / timelineTotalDuration) * 100) : 0}%`
 															}}
@@ -2793,11 +2881,11 @@ export default function App() {
 														
 														{/* Слайдер громкости */}
 														<div
-															className="w-16 h-[4px] bg-border-default relative shrink-0 cursor-pointer"
+															className="w-16 h-[4px] rounded-[2px] bg-border-default relative shrink-0 cursor-pointer overflow-hidden"
 															onMouseDown={handleVolumePointerDown}
 														>
 																<div
-																	className="absolute left-0 top-0 h-full bg-primary-disabled"
+																	className="absolute left-0 top-0 h-full rounded-[2px] bg-primary-disabled"
 																	style={{
 																		width: `${volume * 100}%`
 																	}}
@@ -2944,7 +3032,8 @@ export default function App() {
 													src={waveformImageSrc}
 													alt=""
 													draggable={false}
-													className="h-full w-full min-h-0 select-none object-fill opacity-95"
+													className="h-full w-full min-h-0 select-none object-fill opacity-95 [image-rendering:pixelated]"
+													style={{ imageRendering: 'pixelated' }}
 												/>
 											</div>
 										) : (
@@ -3039,26 +3128,26 @@ export default function App() {
 											/>
 										</button>
 
-										{/* выпадающее */}
-										<div className="relative flex items-center h-[22px]">
-											<select
-												className="appearance-none h-full bg-surface-bg border border-border-default rounded-[4px] pl-2 pr-7 text-[12px] leading-none text-text-primary font-medium outline-none cursor-pointer hover:border-primary-main transition-colors m-0"
-												value={timelineZoomPercent}
-												onChange={(e) => setTimelineZoomPercent(Number(e.target.value))}
-											>
-												{TIMELINE_ZOOM_PRESETS.map((z) => (
-													<option key={z} value={z}>
-														{z}%
-													</option>
-												))}
-											</select>
-
-											<div className="absolute right-2 pointer-events-none flex items-center">
-												<svg width="8" height="5" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
-													<path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-												</svg>
-											</div>
-										</div>
+										{/* непрерывный (логарифмический) зум как в NLE */}
+										<input
+											type="range"
+											min={TIMELINE_ZOOM_SLIDER_MIN}
+											max={TIMELINE_ZOOM_SLIDER_MAX}
+											step={1}
+											aria-label="Масштаб таймлайна"
+											title="Плавный зум таймлайна"
+											className="timeline-zoom-slider h-[22px] w-[160px] cursor-pointer"
+											style={
+												{
+													'--timeline-zoom-fill': `${timelineZoomToFillPercent(timelineZoomPercent)}%`
+												} as React.CSSProperties
+											}
+											value={timelineZoomToSliderValue(timelineZoomPercent)}
+											onChange={(e) => {
+												const slider = Number(e.target.value);
+												setTimelineZoomPercent(sliderValueToTimelineZoom(slider));
+											}}
+										/>
 
 										<button
 											type="button"
@@ -3095,6 +3184,10 @@ export default function App() {
 				</div>
 			</div>
 
+			{shouldHighlightWizardCta && activeModal === null && (
+				<div className="fixed inset-0 z-[50] bg-black/55 pointer-events-none" />
+			)}
+
 			{/* POPUPS LAYER */}
 			{activeModal && (
 				<div className="fixed inset-0 z-[999] flex items-center justify-center pointer-events-none">
@@ -3108,6 +3201,15 @@ export default function App() {
 								onNewProject={() => setActiveModal('createProject')}
 								onOpenProject={handleOpenProjectDialog}
 								onSelectProject={handleSelectProject}
+							/>
+						)}
+
+						{activeModal === 'activation' && (
+							<ActivationModal
+								onActivated={() => {
+									localStorage.setItem(ACTIVATION_COMPLETED_STORAGE_KEY, '1');
+									setActiveModal('welcome');
+								}}
 							/>
 						)}
 
