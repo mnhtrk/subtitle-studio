@@ -91,19 +91,39 @@ function mergeAutoGlossary(
   return next;
 }
 
+function buildTranscriptionPrompt(
+  userPrompt: string,
+  glossary: GlossaryEntry[]
+): string | undefined {
+  const manual = userPrompt.trim();
+  const glossaryOriginals = glossary
+    .map((e) => e.source.trim())
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.findIndex((x) => x.toLowerCase() === value.toLowerCase()) === index);
+
+  if (manual.length > 0) {
+    if (glossaryOriginals.length === 0) return manual;
+    return `${manual}\n\nImportant names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
+  }
+
+  if (glossaryOriginals.length === 0) return undefined;
+  return `Important names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
+}
+
 interface WizardModalProps {
   onClose: () => void;
   projectPath?: string;
   onComplete: (payload: { project: ProjectData; segments: SubtitleSegment[] }) => void;
 }
 
-const languageOptions = ['English', 'Russian', 'Spanish', 'French', 'German'];
+const languageOptions = ['English', 'Russian', 'Spanish', 'French', 'German', 'Italian'];
 const whisperLanguageCodes: Record<string, string> = {
   English: 'en',
   Russian: 'ru',
   Spanish: 'es',
   French: 'fr',
-  German: 'de'
+  German: 'de',
+  Italian: 'it'
 };
 
 const resolveIsoLanguage = (languageOrCode: string): string | null => {
@@ -115,6 +135,7 @@ const resolveIsoLanguage = (languageOrCode: string): string | null => {
   if (normalized === 'spanish') return 'es';
   if (normalized === 'french') return 'fr';
   if (normalized === 'german') return 'de';
+  if (normalized === 'italian') return 'it';
   return null;
 };
 
@@ -221,9 +242,11 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
         const audioPath = await projectService.extractAudioFromVideo(videoPath, outputAudioPath);
 
         const whisperLanguage = whisperLanguageCodes[sourceLanguage] ?? 'en';
+        const projectForPrompt = await projectService.open(projectPath!);
+        const whisperPrompt = buildTranscriptionPrompt(contextPrompt, projectForPrompt.glossary);
         console.log('[Wizard] Whisper language:', whisperLanguage);
         console.log('[Wizard] Calling OpenAI Whisper');
-        segments = await projectService.transcribeAudio(audioPath, whisperLanguage, contextPrompt);
+        segments = await projectService.transcribeAudio(audioPath, whisperLanguage, whisperPrompt);
       } else {
         if (!subtitlePath) {
           throw new Error('����� ������� ������� ���� ���������');

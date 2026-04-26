@@ -8,9 +8,12 @@ use tokio::sync::mpsc;
 use tauri::Emitter;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
+use tokio::process::Command;
 
 /// Макс. длина вывода промптов/ответов в терминал (UTF-8 символы).
 const DEBUG_LOG_MAX_CHARS: usize = 24_000;
+const WHISPER_MAX_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
+const WHISPER_TARGET_UPLOAD_BYTES: u64 = 24 * 1024 * 1024;
 
 fn log_debug_block(title: &str, body: &str) {
     let count = body.chars().count();
@@ -22,6 +25,79 @@ fn log_debug_block(title: &str, body: &str) {
             "[… усечено вывода: показано ~{DEBUG_LOG_MAX_CHARS} символов из {count}]"
         );
     }
+}
+
+fn infer_audio_mime(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp3" => "audio/mpeg",
+        "m4a" | "mp4" => "audio/mp4",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "webm" => "audio/webm",
+        "flac" => "audio/flac",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn transcode_for_whisper_limit(input_path: &Path) -> Result<(Vec<u8>, String, String), String> {
+    let temp_dir = std::env::temp_dir();
+    let bitrates_kbps = [24, 16, 12, 8];
+
+    for bitrate in bitrates_kbps {
+        let out_name = format!(
+            "subtitle_studio_whisper_{}_{}k.m4a",
+            uuid::Uuid::new_v4(),
+            bitrate
+        );
+        let out_path = temp_dir.join(out_name);
+
+        let output = Command::new("ffmpeg")
+            .arg("-y")
+            .arg("-i")
+            .arg(input_path)
+            .arg("-vn")
+            .arg("-ac")
+            .arg("1")
+            .arg("-ar")
+            .arg("16000")
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-b:a")
+            .arg(format!("{bitrate}k"))
+            .arg(&out_path)
+            .output()
+            .await
+            .map_err(|e| format!("Не удалось запустить ffmpeg для сжатия аудио: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let _ = std::fs::remove_file(&out_path);
+            return Err(format!("ffmpeg сжатие аудио завершилось с ошибкой: {}", stderr));
+        }
+
+        let meta = std::fs::metadata(&out_path)
+            .map_err(|e| format!("Не удалось получить размер сжатого аудио: {}", e))?;
+        let out_size = meta.len();
+        if out_size <= WHISPER_MAX_UPLOAD_BYTES {
+            let data = std::fs::read(&out_path)
+                .map_err(|e| format!("Ошибка чтения сжатого аудио: {}", e))?;
+            let _ = std::fs::remove_file(&out_path);
+            return Ok((data, out_size.to_string(), "audio/mp4".to_string()));
+        }
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    Err(
+        "Аудио слишком большое даже после автоматического сжатия. Сократите длительность файла или разбейте его на части."
+            .to_string(),
+    )
 }
 
 #[tauri::command]
@@ -103,16 +179,35 @@ pub async fn transcribe_audio(
         description: "Подготовка файла".to_string() 
     }).await;
 
-    // Читаем файл
+    // Читаем файл / при необходимости автоматически сжимаем под лимит Whisper
     let _ = progress_tx.send(ProgressEvent::InProgress { 
         step: 1, 
         progress: 0.25, 
         description: "Чтение аудиофайла".to_string() 
     }).await;
-    
-    let file_data = std::fs::read(&file_path)
-        .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
-    let file_size_bytes = file_data.len();
+
+    let source_meta = std::fs::metadata(file_path_buf)
+        .map_err(|e| format!("Ошибка чтения метаданных аудиофайла: {}", e))?;
+    let source_size = source_meta.len();
+
+    let (file_data, file_size_bytes, file_mime): (Vec<u8>, u64, String) =
+        if source_size <= WHISPER_TARGET_UPLOAD_BYTES {
+            let data = std::fs::read(&file_path)
+                .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
+            (
+                data,
+                source_size,
+                infer_audio_mime(file_path_buf).to_string(),
+            )
+        } else {
+            println!(
+                "Whisper upload: исходный файл {} байт > лимита, запускаем автосжатие",
+                source_size
+            );
+            let (data, compressed_size_str, mime) = transcode_for_whisper_limit(file_path_buf).await?;
+            let compressed_size = compressed_size_str.parse::<u64>().unwrap_or(data.len() as u64);
+            (data, compressed_size, mime)
+        };
 
     // Подготавливаем запрос
     let _ = progress_tx.send(ProgressEvent::InProgress { 
@@ -126,8 +221,8 @@ pub async fn transcribe_audio(
     use reqwest::multipart;
     
     let file_part = multipart::Part::bytes(file_data)
-        .file_name("audio.mp3")
-        .mime_str("audio/mpeg")
+        .file_name("audio_upload")
+        .mime_str(&file_mime)
         .map_err(|e| e.to_string())?;
     
     let language_code = language.clone().unwrap_or_else(|| "en".to_string());
@@ -162,9 +257,11 @@ temperature: 0\n\
 response_format: verbose_json\n\
 timestamp_granularities: segment, word\n\
 file: (бинарное содержимое аудио, размер {} байт)\n\
+mime: {}\n\
 \n\
 prompt (опционально):\n{}",
             file_size_bytes,
+            file_mime,
             whisper_prompt_log
                 .as_deref()
                 .unwrap_or("(не задан)")
@@ -215,7 +312,7 @@ prompt (опционально):\n{}",
     Ok(segments)
 }
 
-/// Сегментов за один запрос: иначе ответ упирается в max_tokens и JSON обрезается (EOF while parsing).
+/// Сегментов за один запрос: иначе ответ упирается в лимит completion-токенов и JSON обрезается (EOF while parsing).
 const TRANSLATION_CHUNK_SIZE: usize = 40;
 const TRANSLATION_MAX_TOKENS: u32 = 16384;
 
@@ -242,9 +339,9 @@ async fn translate_segments_chunk(
     log_debug_block(
         &format!("перевод [{log_label}]: запрос"),
         &format!(
-            "model: gpt-4o-mini\n\
+            "model: gpt-5.4-mini\n\
 temperature: 0.3\n\
-max_tokens: {TRANSLATION_MAX_TOKENS}\n\
+max_completion_tokens: {TRANSLATION_MAX_TOKENS}\n\
 response_format: json_object\n\
 \n\
 --- system ---\n\
@@ -260,14 +357,14 @@ response_format: json_object\n\
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.4-mini",
             "messages": [
                 { "role": "system", "content": prompt },
                 { "role": "user", "content": user_content }
             ],
             "response_format": { "type": "json_object" },
             "temperature": 0.3,
-            "max_tokens": TRANSLATION_MAX_TOKENS
+            "max_completion_tokens": TRANSLATION_MAX_TOKENS
         }))
         .send()
         .await
@@ -918,14 +1015,14 @@ async fn localize_untranslated_glossary_terms(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.4-mini",
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": user_content }
             ],
             "response_format": { "type": "json_object" },
             "temperature": 0.1,
-            "max_tokens": 4096
+            "max_completion_tokens": 4096
         }))
         .send()
         .await
@@ -1051,14 +1148,14 @@ pub async fn auto_generate_glossary(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(&api_key)
         .json(&serde_json::json!({
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.4-mini",
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": user_content }
             ],
             "response_format": { "type": "json_object" },
             "temperature": 0.2,
-            "max_tokens": 8192
+            "max_completion_tokens": 8192
         }))
         .send()
         .await
