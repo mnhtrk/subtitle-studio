@@ -1,6 +1,7 @@
 use tauri::Manager;
 use std::path::Path;
 use std::fs;
+use crate::commands::audio::media_duration_seconds;
 use crate::project::{Project, ProjectFile, ProjectType, SubtitleSegment};
 use crate::cache::Cache;
 use crate::types::RecentProject;
@@ -27,7 +28,7 @@ pub async fn open_project(
     cache.cache_project_structure(&project.id, &project).await?;
     update_recent_projects(&path, &app_handle)?;
     
-    println!("📂 Проект '{}' открыт", project.name);
+    println!("Проект '{}' открыт", project.name);
     Ok(project)
 }
 
@@ -40,7 +41,7 @@ pub async fn save_project(
         .save_to_file(&app_handle)
         .map_err(|e| format!("Ошибка сохранения проекта: {}", e))?;
     
-    println!("💾 Проект '{}' сохранён", project.name);
+    println!("Проект '{}' сохранён", project.name);
     Ok(())
 }
 
@@ -85,23 +86,52 @@ pub async fn import_media(
         ProjectType::Config
     };
     
+    let duration = if matches!(file_type, ProjectType::Video) {
+        media_duration_seconds(&dest_path).await.ok()
+    } else {
+        None
+    };
+
+    let new_id = uuid::Uuid::new_v4().to_string();
     let project_file = ProjectFile {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: new_id.clone(),
         name: file_name.clone(),
         file_type,
         path: format!("{}/{}", dest_subdir, file_name),
-        duration: None,
+        duration,
         subtitle_segments: None,
+        linked_file_id: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
     
     let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
     project.files.push(project_file.clone());
+    project.updated_at = chrono::Utc::now().to_rfc3339();
+
+    match &project_file.file_type {
+        ProjectType::Video => {
+            if let Some(sid) = first_unpaired_subtitle_id(&project) {
+                link_video_subtitle(&mut project, &new_id, &sid);
+            }
+        }
+        ProjectType::Subtitle => {
+            if let Some(vid) = first_unpaired_video_id(&project) {
+                link_video_subtitle(&mut project, &vid, &new_id);
+            }
+        }
+        ProjectType::Config => {}
+    }
+
     project.save_to_file(&app_handle)?;
     
-    println!("📥 Файл '{}' импортирован в проект", file_name);
-    Ok(project_file)
+    println!("Файл '{}' импортирован в проект", file_name);
+    project
+        .files
+        .iter()
+        .find(|f| f.id == new_id)
+        .cloned()
+        .ok_or_else(|| "Внутренняя ошибка: импортированный файл не найден в проекте".to_string())
 }
 
 #[tauri::command]
@@ -131,9 +161,13 @@ pub async fn export_subtitles(
         _ => return Err(format!("Неподдерживаемый формат: {}", format)),
     };
     
+    if let Some(parent) = Path::new(&output_path).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    
     fs::write(&output_path, content).map_err(|e| e.to_string())?;
     
-    println!("📤 Субтитры экспортированы: {}", output_path);
+    println!("Субтитры экспортированы: {}", output_path);
     Ok(output_path)
 }
 
@@ -205,6 +239,44 @@ fn is_video_file(path: &Path) -> bool {
 fn is_subtitle_file(path: &Path) -> bool {
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     matches!(ext.to_lowercase().as_str(), "srt" | "vtt" | "ass" | "ssa")
+}
+
+fn video_has_subtitle_partner(project: &Project, video_id: &str) -> bool {
+    project.files.iter().any(|f| {
+        f.file_type == ProjectType::Subtitle && f.linked_file_id.as_deref() == Some(video_id)
+    })
+}
+
+fn first_unpaired_video_id(project: &Project) -> Option<String> {
+    for f in project.files.iter().rev() {
+        if f.file_type != ProjectType::Video {
+            continue;
+        }
+        if !video_has_subtitle_partner(project, &f.id) {
+            return Some(f.id.clone());
+        }
+    }
+    None
+}
+
+fn first_unpaired_subtitle_id(project: &Project) -> Option<String> {
+    for f in project.files.iter().rev() {
+        if f.file_type == ProjectType::Subtitle && f.linked_file_id.is_none() {
+            return Some(f.id.clone());
+        }
+    }
+    None
+}
+
+fn link_video_subtitle(project: &mut Project, video_id: &str, subtitle_id: &str) {
+    if let Some(v) = project.files.iter_mut().find(|f| f.id == video_id) {
+        v.linked_file_id = Some(subtitle_id.to_string());
+        v.updated_at = chrono::Utc::now().to_rfc3339();
+    }
+    if let Some(s) = project.files.iter_mut().find(|f| f.id == subtitle_id) {
+        s.linked_file_id = Some(video_id.to_string());
+        s.updated_at = chrono::Utc::now().to_rfc3339();
+    }
 }
 
 // Функции генерации субтитров
@@ -287,13 +359,22 @@ pub async fn remove_file_from_project(
     };
     
     if let Some(file) = file_to_remove {
+        let partner_id = file.linked_file_id.clone();
         // Удаляем физический файл если требуется
         if delete_physical_file {
             let full_file_path = Path::new(&project.path).join(&file.path);
             if full_file_path.exists() {
                 fs::remove_file(&full_file_path)
                     .map_err(|e| format!("Ошибка удаления файла {}: {}", full_file_path.display(), e))?;
-                println!("🗑️ Физический файл удалён: {}", full_file_path.display());
+                println!("Физический файл удалён: {}", full_file_path.display());
+            }
+        }
+
+        if let Some(pid) = partner_id {
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Some(partner) = project.files.iter_mut().find(|f| f.id == pid) {
+                partner.linked_file_id = None;
+                partner.updated_at = now.clone();
             }
         }
         
@@ -304,7 +385,7 @@ pub async fn remove_file_from_project(
             
             // Сохраняем проект
             project.save_to_file(&app_handle)?;
-            println!("🗑️ Файл '{}' удалён из проекта", file.name);
+            println!("Файл '{}' удалён из проекта", file.name);
             
             Ok(())
         } else {
@@ -323,7 +404,7 @@ pub async fn import_existing_subtitles(
     file_id: String,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<SubtitleSegment>, String> {
-    println!("📥 Импорт существующих субтитров: {}", subtitle_path);
+    println!("Импорт существующих субтитров: {}", subtitle_path);
     
     let subtitle_path_buf = Path::new(&subtitle_path);
     if !subtitle_path_buf.exists() {
@@ -354,7 +435,7 @@ pub async fn import_existing_subtitles(
         return Err("Не удалось распарсить субтитры".to_string());
     }
     
-    println!("✅ Импортировано {} сегментов", segments.len());
+    println!("Импортировано {} сегментов", segments.len());
     
     // Обновляем файл в проекте
     let project_path_buf = Path::new(&project_path);
@@ -366,7 +447,7 @@ pub async fn import_existing_subtitles(
         project.updated_at = chrono::Utc::now().to_rfc3339();
         
         project.save_to_file(&app_handle)?;
-        println!("💾 Субтитры сохранены в проект");
+        println!("Субтитры сохранены в проект");
     }
     
     Ok(segments)
@@ -386,7 +467,7 @@ pub async fn backup_project(
     options: Option<BackupOptions>,
     _app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    println!("💾 Создание резервной копии проекта: {}", project_path);
+    println!("Создание резервной копии проекта: {}", project_path);
     
     let project_path_buf = Path::new(&project_path);
     if !project_path_buf.exists() {
@@ -434,7 +515,7 @@ pub async fn backup_project(
         .map_err(|e| format!("Ошибка завершения архива: {}", e))?;
     
     let backup_path_str = backup_file_path.to_string_lossy().to_string();
-    println!("✅ Резервная копия создана: {}", backup_path_str);
+    println!("Резервная копия создана: {}", backup_path_str);
     
     Ok(backup_path_str)
 }
@@ -483,4 +564,44 @@ fn add_directory_to_zip(
     }
     
     Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProjectDiskFile {
+    pub relative_path: String,
+    pub name: String,
+}
+
+/// Файлы на диске в `config/`, `video/`, `subtitles/` для дерева проекта
+#[tauri::command]
+pub async fn list_project_directory_files(project_path: String) -> Result<Vec<ProjectDiskFile>, String> {
+    let base = Path::new(&project_path);
+    if !base.is_dir() {
+        return Err("Папка проекта не найдена".to_string());
+    }
+    let mut out: Vec<ProjectDiskFile> = Vec::new();
+    for sub in ["config", "video", "subtitles"] {
+        let dir = base.join(sub);
+        if !dir.is_dir() {
+            continue;
+        }
+        let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.is_file() {
+                let name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let relative_path = format!("{}/{}", sub, name);
+                out.push(ProjectDiskFile {
+                    relative_path,
+                    name,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(out)
 }

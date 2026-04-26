@@ -33,6 +33,8 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         
+				.plugin(tauri_plugin_dialog::init())
+
         .invoke_handler(tauri::generate_handler![
             commands::files::open_project,
             commands::files::save_project,
@@ -53,9 +55,14 @@ fn main() {
             commands::media::get_media_info,
             commands::files::remove_file_from_project,
             commands::project::create_empty_segments,
+            commands::project::insert_subtitle_segment,
+            commands::project::delete_subtitle_segment,
             commands::project::get_project_statistics,
             commands::project::find_and_replace_in_subtitles,
             commands::audio::generate_waveform,
+            commands::audio::generate_waveform_png,
+            commands::audio::probe_media_duration,
+            commands::files::list_project_directory_files,
             commands::files::import_existing_subtitles,
             commands::sync::sync_subtitles_with_video,
             commands::quality::check_translation_quality,

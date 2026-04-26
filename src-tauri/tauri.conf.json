@@ -15,14 +15,24 @@
         "width": 1400,
         "height": 900,
         "minWidth": 1200,
-        "minHeight": 800,
+        "minHeight": 400,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true
+        "decorations": false,
+				"transparent": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$DESKTOP/**",
+          "$DOCUMENT/**",
+          "$DOWNLOAD/**",
+          "$HOME/**"
+        ]
+      }
     }
   },
   "bundle": {
@@ -40,5 +50,6 @@
       },
       "allowDowngrades": false
     }
+		
   }
 }

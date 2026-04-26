@@ -23,7 +23,7 @@ pub async fn sync_subtitles_with_video(
     options: Option<SyncOptions>,
     app_handle: tauri::AppHandle,
 ) -> Result<SyncResult, String> {
-    println!("⏱️ Синхронизация субтитров с видео: {}", video_path);
+    println!("Синхронизация субтитров с видео: {}", video_path);
     
     let video_path_buf = Path::new(&video_path);
     if !video_path_buf.exists() {
@@ -52,9 +52,9 @@ pub async fn sync_subtitles_with_video(
             // Применяем коррекцию
             corrected_segments = apply_drift_correction(segments, drift);
             corrections_applied = corrected_segments.len() as u32;
-            println!("✅ Применена коррекция дрейфа: {} сек", drift);
+            println!("Применена коррекция дрейфа: {} сек", drift);
         } else {
-            println!("⚠️ Обнаружен дрейф: {} сек (превышает лимит {} сек)", 
+            println!("Обнаружен дрейф: {} сек (превышает лимит {} сек)", 
                     drift, options.max_drift);
         }
     }
@@ -110,8 +110,7 @@ async fn extract_audio_for_sync(
 }
 
 async fn detect_speech_timestamps(audio_path: &str) -> Result<Vec<(f64, f64)>, String> {
-    // Для простоты используем базовый алгоритм обнаружения речи
-    // В реальном приложении можно использовать WebRTC VAD или другие библиотеки
+
     
     use std::fs::File;
     use std::io::Read;

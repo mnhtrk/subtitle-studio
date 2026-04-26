@@ -5,6 +5,10 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-close",
+    "core:window:allow-toggle-maximize",
     
     "fs:default",
     "fs:allow-read-file",
@@ -13,21 +17,12 @@
     "fs:allow-create",
     "fs:allow-remove",
     "fs:allow-rename",
-    
-    "fs:scope-app",
-    "fs:scope-appconfig",
     "fs:scope-appdata",
-    "fs:scope-audio",
-    "fs:scope-desktop",
-    "fs:scope-document",
-    "fs:scope-download",
-    "fs:scope-home",
-    "fs:scope-picture",
-    "fs:scope-public",
-    "fs:scope-temp",
     "fs:scope-video",
+    "fs:scope-audio",
+    "fs:scope-document",
+    "fs:scope-desktop",
     
-    "shell:default",
     "shell:allow-open",
     "shell:allow-execute",
     
@@ -35,6 +30,10 @@
     "sql:allow-load",
     "sql:allow-execute",
     "sql:allow-select",
-    "sql:allow-close"
+    "sql:allow-close",
+
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-message"
   ]
 }
