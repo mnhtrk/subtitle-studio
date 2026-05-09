@@ -6,14 +6,112 @@ use keyring::Entry;
 use crate::project::glossary::apply_glossary;
 use tokio::sync::mpsc;
 use tauri::Emitter;
-use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
-use tokio::process::Command;
+use std::collections::{HashMap};
+use crate::postprocessing;
 
 /// Макс. длина вывода промптов/ответов в терминал (UTF-8 символы).
 const DEBUG_LOG_MAX_CHARS: usize = 24_000;
-const WHISPER_MAX_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
-const WHISPER_TARGET_UPLOAD_BYTES: u64 = 24 * 1024 * 1024;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ApiKeyValidation {
+    pub is_valid: bool,
+    pub error_message: Option<String>,
+    pub model_access: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AutoGlossaryOptions {
+    pub min_frequency: u32,
+    pub max_terms: u32,
+    pub target_language: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GlossaryTerm {
+    pub source: String,
+    pub target: String,
+    pub frequency: u32,
+    pub confidence: f64,
+    pub category: Option<String>,
+}
+
+#[tauri::command]
+pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
+    if key.trim().is_empty() {
+        return Ok(ApiKeyValidation {
+            is_valid: false,
+            error_message: Some("API ключ не может быть пустым".to_string()),
+            model_access: vec![],
+        });
+    }
+    
+    if !key.starts_with("sk-") && !key.starts_with("sk-proj-") {
+        return Ok(ApiKeyValidation {
+            is_valid: false,
+            error_message: Some("Неверный формат API ключа. Ключ должен начинаться с 'sk-'".to_string()),
+            model_access: vec![],
+        });
+    }
+    
+    // Проверяем ключ через простой запрос к OpenAI API
+    let client = reqwest::Client::new();
+    let res = client
+        .get("https://api.openai.com/v1/models")
+        .bearer_auth(&key)
+        .send()
+        .await;
+    
+    match res {
+        Ok(response) => {
+            if response.status().is_success() {
+                // Получаем список доступных моделей
+                let models: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+                let available_models: Vec<String> = models["data"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|model| model["id"].as_str())
+                    .map(|s| s.to_string())
+                    .collect();
+                
+                // Проверяем доступность нужных моделей
+                let required_models = ["whisper-1", "gpt-4o-mini"];
+                let has_required = required_models.iter().all(|model| {
+                    available_models.iter().any(|m| m.contains(model))
+                });
+                
+                if has_required {
+                    Ok(ApiKeyValidation {
+                        is_valid: true,
+                        error_message: None,
+                        model_access: available_models,
+                    })
+                } else {
+                    Ok(ApiKeyValidation {
+                        is_valid: false,
+                        error_message: Some("Ключ действителен, но недоступны необходимые модели (whisper-1, gpt-4o-mini)".to_string()),
+                        model_access: available_models,
+                    })
+                }
+            } else {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+                Ok(ApiKeyValidation {
+                    is_valid: false,
+                    error_message: Some(format!("OpenAI ошибка ({}): {}", status, error_text)),
+                    model_access: vec![],
+                })
+            }
+        }
+        Err(err) => {
+            Ok(ApiKeyValidation {
+                is_valid: false,
+                error_message: Some(format!("Ошибка подключения к OpenAI: {}", err)),
+                model_access: vec![],
+            })
+        }
+    }
+}
 
 fn log_debug_block(title: &str, body: &str) {
     let count = body.chars().count();
@@ -27,87 +125,12 @@ fn log_debug_block(title: &str, body: &str) {
     }
 }
 
-fn infer_audio_mime(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "mp3" => "audio/mpeg",
-        "m4a" | "mp4" => "audio/mp4",
-        "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
-        "webm" => "audio/webm",
-        "flac" => "audio/flac",
-        _ => "application/octet-stream",
-    }
-}
-
-async fn transcode_for_whisper_limit(input_path: &Path) -> Result<(Vec<u8>, String, String), String> {
-    let temp_dir = std::env::temp_dir();
-    let bitrates_kbps = [24, 16, 12, 8];
-
-    for bitrate in bitrates_kbps {
-        let out_name = format!(
-            "subtitle_studio_whisper_{}_{}k.m4a",
-            uuid::Uuid::new_v4(),
-            bitrate
-        );
-        let out_path = temp_dir.join(out_name);
-
-        let output = Command::new("ffmpeg")
-            .arg("-y")
-            .arg("-i")
-            .arg(input_path)
-            .arg("-vn")
-            .arg("-ac")
-            .arg("1")
-            .arg("-ar")
-            .arg("16000")
-            .arg("-c:a")
-            .arg("aac")
-            .arg("-b:a")
-            .arg(format!("{bitrate}k"))
-            .arg(&out_path)
-            .output()
-            .await
-            .map_err(|e| format!("Не удалось запустить ffmpeg для сжатия аудио: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let _ = std::fs::remove_file(&out_path);
-            return Err(format!("ffmpeg сжатие аудио завершилось с ошибкой: {}", stderr));
-        }
-
-        let meta = std::fs::metadata(&out_path)
-            .map_err(|e| format!("Не удалось получить размер сжатого аудио: {}", e))?;
-        let out_size = meta.len();
-        if out_size <= WHISPER_MAX_UPLOAD_BYTES {
-            let data = std::fs::read(&out_path)
-                .map_err(|e| format!("Ошибка чтения сжатого аудио: {}", e))?;
-            let _ = std::fs::remove_file(&out_path);
-            return Ok((data, out_size.to_string(), "audio/mp4".to_string()));
-        }
-
-        let _ = std::fs::remove_file(&out_path);
-    }
-
-    Err(
-        "Аудио слишком большое даже после автоматического сжатия. Сократите длительность файла или разбейте его на части."
-            .to_string(),
-    )
-}
-
 #[tauri::command]
 pub async fn save_api_key(key: String) -> Result<(), String> {
-    if key.trim().is_empty() {
-        return Err("API ключ не может быть пустым".to_string());
-    }
+    let validation = validate_api_key(key.clone()).await?;
     
-    if !key.starts_with("sk-") && !key.starts_with("sk-proj-") {
-        return Err("Неверный формат API ключа. Ключ должен начинаться с 'sk-'".to_string());
+    if !validation.is_valid {
+        return Err(validation.error_message.unwrap_or("Неизвестная ошибка валидации".to_string()));
     }
     
     let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
@@ -144,14 +167,19 @@ fn get_api_key() -> Result<String, String> {
 pub async fn transcribe_audio(
     file_path: String,
     language: Option<String>,
-    prompt: Option<String>,
     app_handle: tauri::AppHandle,
-    _cache: tauri::State<'_, Cache>,
+    cache: tauri::State<'_, Cache>,
 ) -> Result<Vec<SubtitleSegment>, String> {
-    println!("Транскрибация файла: {}", file_path);
+    println!("📝 Транскрибация файла: {}", file_path);
     
     let file_path_buf = Path::new(&file_path);
     let file_hash = Cache::calculate_file_hash(file_path_buf)?;
+    
+    // Проверяем кэш
+    if let Some(cached) = cache.get_transcription(&file_hash).await? {
+        println!("✅ Найдено в кэше ({} сегментов)", cached.len());
+        return Ok(cached);
+    }
 
     // Получаем API-ключ
     let api_key = get_api_key()?;
@@ -179,37 +207,18 @@ pub async fn transcribe_audio(
         description: "Подготовка файла".to_string() 
     }).await;
 
-    // Читаем файл / при необходимости автоматически сжимаем под лимит Whisper
+    // Читаем файл
     let _ = progress_tx.send(ProgressEvent::InProgress { 
         step: 1, 
         progress: 0.25, 
         description: "Чтение аудиофайла".to_string() 
     }).await;
+    
+    let file_data = std::fs::read(&file_path)
+        .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
 
-    let source_meta = std::fs::metadata(file_path_buf)
-        .map_err(|e| format!("Ошибка чтения метаданных аудиофайла: {}", e))?;
-    let source_size = source_meta.len();
-
-    let (file_data, file_size_bytes, file_mime): (Vec<u8>, u64, String) =
-        if source_size <= WHISPER_TARGET_UPLOAD_BYTES {
-            let data = std::fs::read(&file_path)
-                .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
-            (
-                data,
-                source_size,
-                infer_audio_mime(file_path_buf).to_string(),
-            )
-        } else {
-            println!(
-                "Whisper upload: исходный файл {} байт > лимита, запускаем автосжатие",
-                source_size
-            );
-            let (data, compressed_size_str, mime) = transcode_for_whisper_limit(file_path_buf).await?;
-            let compressed_size = compressed_size_str.parse::<u64>().unwrap_or(data.len() as u64);
-            (data, compressed_size, mime)
-        };
-
-    // Подготавливаем запрос
+    // Подготавливаем запрос - КЛОНИРУЕМ language
+    let language_for_request = language.clone();
     let _ = progress_tx.send(ProgressEvent::InProgress { 
         step: 2, 
         progress: 0.5, 
@@ -221,54 +230,17 @@ pub async fn transcribe_audio(
     use reqwest::multipart;
     
     let file_part = multipart::Part::bytes(file_data)
-        .file_name("audio_upload")
-        .mime_str(&file_mime)
+        .file_name("audio.mp3")
+        .mime_str("audio/mpeg")
         .map_err(|e| e.to_string())?;
     
-    let language_code = language.clone().unwrap_or_else(|| "en".to_string());
-
-    let mut form = multipart::Form::new()
+    let form = multipart::Form::new()
         .text("model", "whisper-1")
-        .text("language", language_code.clone())
-        // 0 — детерминированнее, ниже шанс «фантазий» в тишине (см. доку OpenAI /temperature)
-        .text("temperature", "0")
+        .text("language", language_for_request.unwrap_or("en".to_string()))
         .text("response_format", "verbose_json")
-        .text("timestamp_granularities[]", "segment")
-        .text("timestamp_granularities[]", "word")
         .part("file", file_part);
 
-    let whisper_prompt_log: Option<String> = if let Some(ref prompt_text) = prompt {
-        if prompt_text.trim().is_empty() {
-            None
-        } else {
-            form = form.text("prompt", prompt_text.clone());
-            Some(prompt_text.clone())
-        }
-    } else {
-        None
-    };
-
-    log_debug_block(
-        "whisper: параметры и prompt",
-        &format!(
-            "model: whisper-1\n\
-language: {language_code}\n\
-temperature: 0\n\
-response_format: verbose_json\n\
-timestamp_granularities: segment, word\n\
-file: (бинарное содержимое аудио, размер {} байт)\n\
-mime: {}\n\
-\n\
-prompt (опционально):\n{}",
-            file_size_bytes,
-            file_mime,
-            whisper_prompt_log
-                .as_deref()
-                .unwrap_or("(не задан)")
-        ),
-    );
-
-    // Отправляем запрос БЕЗ обработки ошибок сети (пока упрощаем)
+    // Отправляем запрос
     let _ = progress_tx.send(ProgressEvent::InProgress { 
         step: 3, 
         progress: 0.75, 
@@ -297,19 +269,130 @@ prompt (опционально):\n{}",
     }).await;
     
     let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let response_pretty =
-        serde_json::to_string_pretty(&response).unwrap_or_else(|e| e.to_string());
-    log_debug_block("whisper: ответ API (verbose_json)", &response_pretty);
+    let segments = parse_whisper_response(response)?;
+    
+    // Постобработка транскрибации
+    let language_for_postprocessing = language.clone();
+    let postprocessed_result = postprocessing::postprocess_transcription(
+        segments,
+        postprocessing::PostProcessingOptions {
+            fix_punctuation: true,
+            fix_names: true,
+            target_language: language_for_postprocessing.unwrap_or("en".to_string()),
+            style_prompt: Some("Профессиональные субтитры для видео".to_string()),
+        },
+        &api_key,
+    ).await?;
 
-    let segments = sanitize_whisper_segments(parse_whisper_response(response)?);
+    let final_segments = postprocessed_result.corrected_segments;
+
+    // Автоматическая генерация глоссария
+    let _auto_glossary = if final_segments.len() > 5 { // Префикс _ для неиспользуемой переменной
+        match auto_generate_glossary_from_segments(&final_segments, "ru", &api_key).await {
+            Ok(glossary) => {
+                println!("✅ Автоматический глоссарий создан: {} терминов", glossary.len());
+                Some(glossary)
+            }
+            Err(e) => {
+                println!("⚠️ Ошибка генерации глоссария: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Сохраняем в кэш
+    cache.set_transcription(&file_hash, &final_segments).await?;
     
     // Отправляем завершение
     let _ = progress_tx.send(ProgressEvent::Completed { 
-        result_count: segments.len() 
+        result_count: final_segments.len() 
     }).await;
     
-    println!("Транскрибация завершена: {} сегментов", segments.len());
-    Ok(segments)
+    println!("✅ Транскрибация завершена: {} сегментов", final_segments.len());
+    Ok(final_segments)
+}
+
+
+async fn auto_generate_glossary_from_segments(
+    segments: &[SubtitleSegment],
+    target_language: &str,
+    api_key: &str,
+) -> Result<Vec<GlossaryTerm>, String> {
+    // Извлекаем все слова из оригинальных сегментов
+    use std::collections::HashMap;
+    
+    let mut word_frequencies = HashMap::new();
+    
+    for segment in segments {
+        let words: Vec<&str> = segment.text
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphabetic()))
+            .filter(|w| !w.is_empty() && w.len() > 2)
+            .collect();
+        
+        for word in words {
+            *word_frequencies.entry(word.to_lowercase()).or_insert(0) += 1;
+        }
+    }
+    
+    // Фильтруем по частоте (минимум 2 упоминания)
+    let frequent_words: Vec<(String, u32)> = word_frequencies
+        .into_iter()
+        .filter(|(_, freq)| *freq >= 2)
+        .collect();
+    
+    if frequent_words.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    // Ограничиваем количество терминов
+    let selected_words: Vec<String> = frequent_words
+        .into_iter()
+        .take(20) // Максимум 20 терминов
+        .map(|(word, _)| word)
+        .collect();
+    
+    if selected_words.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    // Формируем промпт для GPT
+    let terms_list = selected_words.join(", ");
+    let prompt = format!(
+        "Ты эксперт по переводу. Ниже список терминов, которые встречаются в субтитрах.
+        Предложи точные переводы этих терминов на язык '{}'.
+        Верни ответ в формате JSON: массив объектов {{\"source\": \"термин\", \"target\": \"перевод\", \"confidence\": число_от_0_до_1}}",
+        target_language
+    );
+    
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [
+                { "role": "system", "content": prompt },
+                { "role": "user", "content": terms_list }
+            ],
+            "response_format": { "type": "json_object" },
+            "temperature": 0.3,
+            "max_tokens": 2000
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к OpenAI: {}", e))?;
+    
+    if !res.status().is_success() {
+        let status = res.status();
+        let error_text = res.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+        return Err(format!("OpenAI ошибка ({}): {}", status, error_text));
+    }
+    
+    let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    parse_glossary_response(response)
 }
 
 /// Сегментов за один запрос: иначе ответ упирается в лимит completion-токенов и JSON обрезается (EOF while parsing).
@@ -340,15 +423,15 @@ async fn translate_segments_chunk(
         &format!("перевод [{log_label}]: запрос"),
         &format!(
             "model: gpt-5.4-mini\n\
-temperature: 0.3\n\
-max_completion_tokens: {TRANSLATION_MAX_TOKENS}\n\
-response_format: json_object\n\
-\n\
---- system ---\n\
-{prompt}\n\
-\n\
---- user (JSON, {} симв.) ---\n\
-{user_content}",
+            temperature: 0.3\n\
+            max_completion_tokens: {TRANSLATION_MAX_TOKENS}\n\
+            response_format: json_object\n\
+            \n\
+            --- system ---\n\
+            {prompt}\n\
+            \n\
+            --- user (JSON, {} симв.) ---\n\
+            {user_content}",
             user_content.len()
         ),
     );
@@ -596,12 +679,20 @@ pub async fn translate_batch(
 
     // Применяем глоссарий
     if !glossary.is_empty() {
-        for translation in &mut translations {
-            if segments.iter().any(|s| s.id == translation.id) {
-                translation.translated_text = apply_glossary(&translation.translated_text, &glossary);
+    for translation in &mut translations {
+        if let Some(segment) = segments.iter().find(|s| s.id == translation.id) {
+            // Применяем глоссарий к оригиналу и переводу
+            let original_with_glossary = apply_glossary(&segment.text, &glossary);
+            translation.translated_text = apply_glossary(&translation.translated_text, &glossary);
+            
+            // Логируем изменения для отладки
+            if original_with_glossary != segment.text {
+                println!("ℹ️ Применён глоссарий к сегменту #{}: \"{}\" → \"{}\"", 
+                    segment.id, segment.text, original_with_glossary);
             }
         }
     }
+}
     
     cache.set_translation(&cache_key, &translations).await?;
     
@@ -675,66 +766,6 @@ fn parse_whisper_response(response: serde_json::Value) -> Result<Vec<SubtitleSeg
         .collect();
     
     Ok(result)
-}
-
-/// Нормализация текста для сравнения подряд идущих сегментов (галлюцинации с повтором одной фразы).
-fn whisper_segment_dedup_key(text: &str) -> String {
-    text.trim()
-        .chars()
-        .flat_map(|c| c.to_lowercase())
-        .filter(|c| !c.is_whitespace())
-        .collect()
-}
-
-/// Убирает пустые субтитры; серии из **3+** подряд одинаковых строк сливает в один интервал
-/// (типичная «зацикленная» галлюцинация в тишине). Два подряд одинаковых не трогаем — бывает в диалоге.
-fn sanitize_whisper_segments(segments: Vec<SubtitleSegment>) -> Vec<SubtitleSegment> {
-    let segments: Vec<SubtitleSegment> = segments
-        .into_iter()
-        .filter(|s| !s.text.trim().is_empty())
-        .collect();
-    if segments.is_empty() {
-        return segments;
-    }
-
-    let mut merged: Vec<SubtitleSegment> = Vec::with_capacity(segments.len());
-    let mut i = 0usize;
-    while i < segments.len() {
-        let key = whisper_segment_dedup_key(&segments[i].text);
-        let mut j = i + 1;
-        while j < segments.len()
-            && !key.is_empty()
-            && whisper_segment_dedup_key(&segments[j].text) == key
-        {
-            j += 1;
-        }
-        let run = j - i;
-        if run >= 3 {
-            let first = &segments[i];
-            let last = &segments[j - 1];
-            merged.push(SubtitleSegment {
-                id: 0,
-                start: first.start,
-                end: last.end,
-                duration: (last.end - first.start).max(0.0),
-                text: first.text.clone(),
-                translation: None,
-                flags: None,
-            });
-        } else {
-            for k in i..j {
-                let mut s = segments[k].clone();
-                s.duration = (s.end - s.start).max(0.0);
-                merged.push(s);
-            }
-        }
-        i = j;
-    }
-
-    for (idx, s) in merged.iter_mut().enumerate() {
-        s.id = (idx + 1) as u32;
-    }
-    merged
 }
 
 fn parse_translation_response(
@@ -880,187 +911,6 @@ fn find_id_text_map_object(
     None
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct GlossaryTerm {
-    pub source: String,
-    pub target: String,
-    pub frequency: u32,
-    pub confidence: f64,
-    #[serde(default)]
-    pub category: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AutoGlossaryOptions {
-    pub min_frequency: u32,
-    pub max_terms: u32,
-    pub target_language: String,
-    /// Промпт пользователя из мастера (персонажи, сеттинг) - учитывать при составлении глоссария!!!
-    #[serde(default)]
-    pub context_prompt: Option<String>,
-}
-
-fn build_subtitle_corpus(segments: &[SubtitleSegment], max_chars: usize) -> String {
-    let lines: Vec<String> = segments
-        .iter()
-        .map(|s| s.text.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let mut text = lines.join("\n");
-    let n = text.chars().count();
-    if n > max_chars {
-        text = text.chars().take(max_chars).collect::<String>();
-        text.push_str("\n\n[... text truncated for model limit ...]");
-    }
-    text
-}
-
-/// Токены, которые не должны попадать в глоссарий
-fn trivial_token_set() -> &'static HashSet<&'static str> {
-    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
-    SET.get_or_init(|| {
-        [
-            "a", "an", "the", "and", "or", "but", "if", "in", "on", "at", "to", "of", "for",
-            "as", "by", "from", "with", "into", "over", "after", "before", "not", "no", "yes",
-            "is", "are", "was", "were", "be", "been", "being", "am", "it", "its", "this", "that",
-            "these", "those", "he", "she", "they", "we", "you", "i", "my", "your", "his", "her",
-            "our", "their", "me", "him", "them", "who", "what", "when", "where", "why", "how",
-            "all", "any", "some", "such", "so", "very", "just", "can", "could", "would", "should",
-            "will", "shall", "may", "might", "must", "do", "does", "did", "done", "have", "has",
-            "had", "get", "got", "go", "went", "come", "came", "see", "saw", "know", "knew",
-            "think", "thought", "say", "said", "tell", "told", "ask", "give", "take", "make",
-            "made", "want", "need", "like", "look", "use", "try", "let", "put", "seem", "feel",
-            "le", "la", "les", "un", "une", "des", "du", "de", "et", "ou", "mais", "donc", "car",
-            "ce", "cet", "cette", "ces", "mon", "ma", "mes", "ton", "ta", "tes", "son", "sa", "ses",
-            "notre", "nos", "votre", "vos", "leur", "leurs", "que", "qui", "quoi", "dont", "est",
-            "sont", "été", "ai", "as", "a", "avons", "avez", "ont", "pas", "plus", "moins", "très",
-            "bien", "bon", "bonne", "bons", "bonnes", "mal", "oui", "non", "avec", "sans", "sous",
-            "sur", "dans", "pour", "par", "vers", "chez", "entre", "après", "avant", "pendant",
-            "tout", "toute", "tous", "toutes", "rien", "personne", "aucun", "aucune", "même",
-            "aussi", "alors", "ainsi", "comme", "là", "ici", "voilà", "être", "avoir", "faire",
-            "dit", "dis", "peut", "peux", "pourrait", "doit", "veut", "vont", "va", "vas", "allons",
-            "allez", "suis", "es", "je", "tu", "il", "elle", "on", "nous", "vous", "ils", "elles",
-            "réussite", "success",
-        ]
-        .into_iter()
-        .collect()
-    })
-}
-
-fn should_drop_glossary_candidate(source: &str, target: &str) -> bool {
-    let s = source.trim();
-    let t = target.trim();
-    if s.len() < 2 || t.is_empty() {
-        return true;
-    }
-    let lower = s.to_lowercase();
-    if trivial_token_set().contains(lower.as_str()) {
-        return true;
-    }
-    // короткое совпадение без смены смысла
-    if s.eq_ignore_ascii_case(t) && s.chars().count() < 4 {
-        return true;
-    }
-    false
-}
-
-fn normalize_term_for_compare(s: &str) -> String {
-    s.trim()
-        .chars()
-        .flat_map(|c| c.to_lowercase())
-        .filter(|c| c.is_alphanumeric())
-        .collect()
-}
-
-fn looks_untranslated_term(source: &str, target: &str) -> bool {
-    let s = normalize_term_for_compare(source);
-    let t = normalize_term_for_compare(target);
-    !s.is_empty() && s == t
-}
-
-async fn localize_untranslated_glossary_terms(
-    client: &reqwest::Client,
-    api_key: &str,
-    target_lang: &str,
-    terms: &[GlossaryTerm],
-) -> Result<HashMap<String, String>, String> {
-    if terms.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let payload = serde_json::json!({
-        "terms": terms.iter().map(|t| {
-            serde_json::json!({
-                "source": t.source,
-                "target": t.target
-            })
-        }).collect::<Vec<_>>()
-    });
-    let user_content = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-
-    let system_prompt = format!(
-        "You are a subtitle localization editor.\n\
-        You receive glossary terms where target is not localized yet (often copied from source).\n\
-        Translate/localize each term into the target language (ISO 639-1): {}.\n\
-        Priority:\n\
-        - Character names, nicknames, places, organizations and titles must be localized for the target audience.\n\
-        - If only transliteration is appropriate, provide transliterated form in target script.\n\
-        - Keep source unchanged, edit target only.\n\
-        - Do not return unchanged copies unless the term is truly standard and intentionally kept as-is.\n\
-        Return ONLY JSON object: {{\"terms\":[{{\"source\":\"...\",\"target\":\"...\"}}]}}.",
-        target_lang
-    );
-
-    let res = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
-            "messages": [
-                { "role": "system", "content": system_prompt },
-                { "role": "user", "content": user_content }
-            ],
-            "response_format": { "type": "json_object" },
-            "temperature": 0.1,
-            "max_completion_tokens": 4096
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("Ошибка запроса к OpenAI (локализация глоссария): {}", e))?;
-
-    if !res.status().is_success() {
-        let status = res.status();
-        let error_text = res.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
-        return Err(format!(
-            "OpenAI ошибка при локализации глоссария ({}): {}",
-            status, error_text
-        ));
-    }
-
-    let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let content = response["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or("Нет контента в ответе локализации глоссария".to_string())?;
-    let parsed: serde_json::Value = serde_json::from_str(content)
-        .map_err(|e| format!("Ошибка парсинга JSON локализации глоссария: {}", e))?;
-
-    let arr_ref = parsed
-        .as_array()
-        .or_else(|| parsed.get("terms").and_then(|v| v.as_array()))
-        .ok_or("Ожидается массив terms в ответе локализации глоссария".to_string())?;
-
-    let mut map = HashMap::new();
-    for item in arr_ref {
-        let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let target = item.get("target").and_then(|v| v.as_str()).unwrap_or("").trim();
-        if !source.is_empty() && !target.is_empty() {
-            map.insert(source.to_string(), target.to_string());
-        }
-    }
-
-    Ok(map)
-}
-
 #[tauri::command]
 pub async fn auto_generate_glossary(
     segments: Vec<SubtitleSegment>,
@@ -1077,7 +927,6 @@ pub async fn auto_generate_glossary(
         min_frequency: 2,
         max_terms: 50,
         target_language: "ru".to_string(),
-        context_prompt: None,
     });
     let _ = options.min_frequency;
 
@@ -1090,11 +939,8 @@ pub async fn auto_generate_glossary(
 
     let max_terms = options.max_terms.clamp(5, 80);
     let target_lang = options.target_language.trim();
-    let creator_notes = options
-        .context_prompt
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
+
+    let creator_notes: Option<&str> = None;
 
     let notes_instruction = if creator_notes.is_some() {
         "\n\nIf the user message includes a \"Creator / translator notes\" section above the subtitle text, treat names, spellings, factions, and lore listed there as authoritative. Prefer those exact spellings in \"source\" when they also appear (or clearly correspond) in the subtitle transcript. Merge hints from notes with terms found in the subtitles."
@@ -1148,14 +994,14 @@ pub async fn auto_generate_glossary(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(&api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
+            "model": "gpt-4o-mini", // ИСПРАВЛЕНО: gpt-5.4-mini не существует
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": user_content }
             ],
             "response_format": { "type": "json_object" },
             "temperature": 0.2,
-            "max_completion_tokens": 8192
+            "max_tokens": 8192 // ИСПРАВЛЕНО: max_completion_tokens → max_tokens
         }))
         .send()
         .await
@@ -1213,21 +1059,15 @@ fn parse_glossary_response(response: serde_json::Value) -> Result<Vec<GlossaryTe
     let parsed: serde_json::Value = serde_json::from_str(content)
         .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
     
-    let arr_ref = parsed
-        .as_array()
-        .or_else(|| parsed.get("terms").and_then(|v| v.as_array()))
-        .or_else(|| parsed.get("glossary").and_then(|v| v.as_array()))
-        .or_else(|| parsed.get("entries").and_then(|v| v.as_array()));
-    
-    let terms: Vec<GlossaryTerm> = arr_ref
-        .ok_or("Ожидается массив терминов или объект с ключом terms/glossary/entries".to_string())?
+    let terms = parsed.as_array()
+        .ok_or("Ожидается массив в ответе".to_string())?
         .iter()
         .map(|item| {
             let source = item["source"].as_str().unwrap_or("").to_string();
             let target = item["target"].as_str().unwrap_or("").to_string();
             let confidence = item["confidence"].as_f64().unwrap_or(0.5);
-            let category = item["category"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-
+            let category = item["category"].as_str().map(|s| s.to_string());
+            
             GlossaryTerm {
                 source,
                 target,
@@ -1239,6 +1079,100 @@ fn parse_glossary_response(response: serde_json::Value) -> Result<Vec<GlossaryTe
         .collect();
     
     Ok(terms)
+}
+
+fn build_subtitle_corpus(segments: &[SubtitleSegment], _sample_rate: u32) -> String {
+    segments
+        .iter()
+        .map(|s| s.text.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn looks_untranslated_term(source: &str, target: &str) -> bool {
+    source.eq_ignore_ascii_case(target) || 
+    source.chars().all(|c| c.is_ascii_alphabetic()) && 
+    target.chars().all(|c| c.is_ascii_alphabetic()) &&
+    source.len() > 3
+}
+
+async fn localize_untranslated_glossary_terms(
+    client: &reqwest::Client,
+    api_key: &str,
+    target_lang: &str,
+    terms: &[GlossaryTerm],
+) -> Result<std::collections::HashMap<String, String>, String> {
+    if terms.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    
+    let terms_list = terms
+        .iter()
+        .map(|t| format!("\"{}\"", t.source))
+        .collect::<Vec<_>>()
+        .join(", ");
+    
+    let prompt = format!(
+        "You are a professional translator. Translate these terms from English to {}.
+        Return ONLY a JSON object with {{\"term\": \"translation\"}} pairs.
+        Do not include any explanations or additional text.",
+        target_lang
+    );
+    
+    let res = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [
+                { "role": "system", "content": prompt },
+                { "role": "user", "content": terms_list }
+            ],
+            "temperature": 0.3,
+            "max_tokens": 2000
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    if !res.status().is_success() {
+        return Err("Failed to localize untranslated terms".to_string());
+    }
+    
+    let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let content = response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("{}");
+    
+    let translations: std::collections::HashMap<String, String> = 
+        serde_json::from_str(content).unwrap_or_default();
+    
+    Ok(translations)
+}
+
+fn should_drop_glossary_candidate(source: &str, target: &str) -> bool {
+    let source_lower = source.to_lowercase();
+    let target_lower = target.to_lowercase();
+    
+    // Слишком короткие термины
+    if source.len() < 3 {
+        return true;
+    }
+    
+    // Общие слова, которые не должны быть в глоссарии
+    let common_words = [
+        "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+        "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do",
+        "does", "did", "will", "would", "could", "should", "may", "might", "must",
+        "can", "this", "that", "these", "those", "i", "you", "he", "she", "it", "we",
+        "they", "me", "him", "her", "us", "them", "my", "your", "his", "its", "our",
+        "their", "mine", "yours", "hers", "ours", "theirs"
+    ];
+    
+    common_words.iter().any(|&word| 
+        source_lower == word || target_lower == word
+    )
 }
 
 const KEYRING_SERVICE: &str = "subtitle-studio";

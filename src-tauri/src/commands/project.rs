@@ -4,6 +4,7 @@ use crate::cache::Cache;
 use crate::types::ProjectStructure;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
+
 #[tauri::command]
 pub async fn create_project(
     name: String,
