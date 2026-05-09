@@ -7,8 +7,8 @@ mod commands;
 mod cache;
 mod project;
 mod types;
-mod utils;
 mod subtitle_parser; 
+mod postprocessing;
 
 use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
@@ -70,6 +70,8 @@ fn main() {
             commands::files::backup_project,
             commands::notifications::show_notification,
             commands::notifications::log_message,
+            commands::ai::validate_api_key,
+            commands::agent::chat_with_agent,
         ])
         
         .setup(|app| {

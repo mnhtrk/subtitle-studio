@@ -3,7 +3,7 @@ use std::fs;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use crate::project::{Project, SubtitleSegment};
-use crate::types::TranslationResult;  // ← Импорт из общего модуля
+use crate::types::TranslationResult;
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
 

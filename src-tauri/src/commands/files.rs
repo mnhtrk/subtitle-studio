@@ -6,7 +6,6 @@ use crate::project::{Project, ProjectFile, ProjectType, SubtitleSegment};
 use crate::cache::Cache;
 use crate::types::RecentProject;
 use crate::subtitle_parser;
-use zip::{ZipWriter, write::FileOptions};
 use std::io::Write;
 use serde::{Deserialize, Serialize};
 

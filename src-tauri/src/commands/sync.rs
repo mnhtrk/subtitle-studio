@@ -124,7 +124,6 @@ async fn detect_speech_timestamps(audio_path: &str) -> Result<Vec<(f64, f64)>, S
     
     // Простой алгоритм: находим сегменты с амплитудой выше порога
     const SAMPLE_RATE: u32 = 16000;
-    const CHANNELS: u32 = 1;
     const BYTES_PER_SAMPLE: usize = 2; // 16-bit
     
     let samples: Vec<i16> = buffer
