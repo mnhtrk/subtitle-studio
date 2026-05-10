@@ -1,6 +1,5 @@
 use tauri::Manager;
 use crate::project::{Project, GlossaryEntry, SubtitleSegment};
-use crate::cache::Cache;
 use crate::types::ProjectStructure;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
@@ -25,35 +24,24 @@ pub async fn create_project(
 pub async fn get_project_structure(
     project_id: String,
     app_handle: tauri::AppHandle,
-    cache: tauri::State<'_, Cache>,
 ) -> Result<ProjectStructure, String> {
-    if let Some(cached_project) = cache.get_project_structure(&project_id).await? {
-        let structure = ProjectStructure {
-            project: cached_project.clone(),
-            files: cached_project.files.clone(),
-        };
-        return Ok(structure);
-    }
-    
     let projects_dir = app_handle.path().document_dir()
         .map_err(|e| e.to_string())?
         .join("SubtitleStudio");
-    
+
     let project_path = projects_dir.join(&project_id);
-    
+
     if !project_path.exists() {
         return Err(format!("Папка проекта не найдена: {:?}", project_path));
     }
-    
+
     let project = Project::load_from_file(&project_path, &app_handle)?;
-    
+
     let structure = ProjectStructure {
         project: project.clone(),
         files: project.files.clone(),
     };
-    
-    cache.cache_project_structure(&project_id, &project).await?;
-    
+
     Ok(structure)
 }
 

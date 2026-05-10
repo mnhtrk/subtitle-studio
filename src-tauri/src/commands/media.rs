@@ -28,22 +28,27 @@ pub async fn extract_audio_from_video(
         return Err("FFmpeg не установлен в системе".to_string());
     }
     
-    // Формируем команду FFmpeg
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-i")
         .arg(&video_path)
-        .arg("-vn")           // Отключаем видео дорожку
-        .arg("-acodec")       // Кодек аудио
-        .arg("libmp3lame")    // Используем MP3 кодек
-        .arg("-b:a")          // Битрейт
-        .arg("192k")          // 192 kbps качество
-        .arg("-y")            // Перезаписывать без подтверждения
+        .arg("-vn")
+        .arg("-ac")
+        .arg("1")
+        .arg("-ar")
+        .arg("16000")
+        .arg("-acodec")
+        .arg("libmp3lame")
+        .arg("-b:a")
+        .arg("64k")
+        .arg("-y")
         .arg(&output_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    
-    println!("Выполнение команды: ffmpeg -i {} -vn -acodec libmp3lame -b:a 192k -y {}", 
-             video_path, output_path);
+
+    println!(
+        "Выполнение команды: ffmpeg -i {} -vn -ac 1 -ar 16000 -acodec libmp3lame -b:a 64k -y {}",
+        video_path, output_path
+    );
     
     // Запускаем процесс
     let output = cmd.output().await.map_err(|e| {

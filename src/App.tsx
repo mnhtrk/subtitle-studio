@@ -12,12 +12,13 @@ import { WelcomeModal } from './components/modals/WelcomeModal';
 import { NewProjectModal } from './components/modals/NewProjectModal';
 import { WizardModal } from './components/modals/WizardModal';
 import { ExportModal } from './components/modals/ExportModal';
-import { GlossaryModal } from './components/modals/GlossaryModal';
+import { GlossaryModal, type GlossaryReplacementChange } from './components/modals/GlossaryModal';
 import { ActivationModal } from './components/modals/ActivationModal';
 
 const appWindow = getCurrentWindow();
 
 import { projectService, ProjectData, ProjectFile, SubtitleSegment } from './services/projectService';
+import { agentService, AgentAction } from './services/agentService';
 import {
 	deleteSegmentById,
 	insertEmptySegment,
@@ -418,7 +419,48 @@ export default function App() {
 	const [isResizing, setIsResizing] = useState(false); // состояние ресайза дерева проекта
 	const [isAiAgentResizing, setIsAiAgentResizing] = useState(false); // состояние ресайза агента
 	const [isVideoFolderOpen, setIsVideoFolderOpen] = useState(true); // открыта ли папка в дереве
-	const [agentEmbedDiffExpanded, setAgentEmbedDiffExpanded] = useState(true);
+
+	// --- ЧАТ С AI-АГЕНТОМ ---
+	type ChatAttachedSegment = {
+		id: number;
+		start: number;
+		end: number;
+		text: string;
+		translation?: string | null;
+	};
+	type ChatEditDiff = {
+		id: number;
+		start: number;
+		end: number;
+		field: 'translation' | 'text';
+		oldText: string;
+		newText: string;
+	};
+	type ChatEditStatus = 'pending' | 'kept' | 'reverted';
+	type ChatMessage =
+		| {
+				id: string;
+				role: 'user';
+				text: string;
+				attachedSegment?: ChatAttachedSegment;
+		  }
+		| {
+				id: string;
+				role: 'assistant';
+				text: string;
+				edits?: ChatEditDiff[];
+				editSnapshot?: SubtitleSegment[];
+				editStatus?: ChatEditStatus;
+				isError?: boolean;
+		  };
+
+	const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+	const [chatInput, setChatInput] = useState('');
+	const [pendingAttachedSegment, setPendingAttachedSegment] = useState<ChatAttachedSegment | null>(null);
+	const [isAgentBusy, setIsAgentBusy] = useState(false);
+	const [expandedDiffIds, setExpandedDiffIds] = useState<Set<string>>(new Set());
+	const chatScrollRef = useRef<HTMLDivElement | null>(null);
+	const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 
 	// --- ТЕМА И МЕНЮ ---
 	const [isDarkTheme, setIsDarkTheme] = useState(() => {
@@ -519,6 +561,35 @@ export default function App() {
 	const clearProjectDirty = useCallback(() => {
 		projectDirtyRef.current = false;
 	}, []);
+
+	const hydrateAgentChatFromProject = useCallback((project: ProjectData | null) => {
+		setChatMessages(
+			(project && Array.isArray(project.agent_chat) ? project.agent_chat : []) as ChatMessage[]
+		);
+		setChatInput('');
+		setPendingAttachedSegment(null);
+		setExpandedDiffIds(new Set());
+		setIsAgentBusy(false);
+	}, []);
+
+	useEffect(() => {
+		const cp = currentProjectRef.current;
+		if (!cp) return;
+
+		const previous = Array.isArray(cp.agent_chat) ? cp.agent_chat : [];
+		const previousJson = JSON.stringify(previous);
+		const nextJson = JSON.stringify(chatMessages);
+		if (previousJson === nextJson) return;
+
+		const nextProject: ProjectData = {
+			...cp,
+			agent_chat: chatMessages,
+			updated_at: new Date().toISOString()
+		};
+		currentProjectRef.current = nextProject;
+		setCurrentProject(nextProject);
+		markProjectDirty();
+	}, [chatMessages, markProjectDirty]);
 
 	const activeVideoFile = useMemo(() => {
 		if (!currentProject) return null;
@@ -710,8 +781,11 @@ export default function App() {
 
 	const handleSaveProject = useCallback(async (): Promise<boolean> => {
 		flushSubtitleEditorToProject();
-		const cp = currentProjectRef.current;
-		if (!cp) return false;
+		const current = currentProjectRef.current;
+		if (!current) return false;
+		const cp: ProjectData = { ...current, agent_chat: chatMessages };
+		currentProjectRef.current = cp;
+		setCurrentProject(cp);
 		try {
 			await projectService.save(cp);
 			for (const f of cp.files) {
@@ -730,7 +804,7 @@ export default function App() {
 			}
 			return false;
 		}
-	}, [clearProjectDirty, exportSrtForProject, flushSubtitleEditorToProject]);
+	}, [chatMessages, clearProjectDirty, exportSrtForProject, flushSubtitleEditorToProject]);
 
 	const maybeSaveBeforeSwitchingProject = useCallback(async (): Promise<boolean> => {
 		flushSubtitleEditorToProject();
@@ -774,12 +848,13 @@ export default function App() {
 		setGeneratedSegments([]);
 		setActiveSubtitleFileId(null);
 		setSelectedSegmentIndex(-1);
+		hydrateAgentChatFromProject(null);
 		undoSegmentsStackRef.current = [];
 		redoSegmentsStackRef.current = [];
 		clearProjectDirty();
 		setActiveMenu(null);
 		setActiveModal(null);
-	}, [handleSaveProject, clearProjectDirty, flushSubtitleEditorToProject]);
+	}, [handleSaveProject, clearProjectDirty, flushSubtitleEditorToProject, hydrateAgentChatFromProject]);
 
 	const pushSubtitleHistorySnapshot = useCallback(() => {
 		if (!activeSubtitleFileId) return;
@@ -870,6 +945,7 @@ export default function App() {
 			undoSegmentsStackRef.current = [];
 			redoSegmentsStackRef.current = [];
 			setCurrentProject(projectData);
+			hydrateAgentChatFromProject(projectData);
 			const firstSubWithSegments = projectData.files.find(
 				(file) =>
 					file.file_type === 'Subtitle' &&
@@ -906,7 +982,7 @@ export default function App() {
 				);
 			}
 		}
-	}, [maybeSaveBeforeSwitchingProject, clearProjectDirty]);
+	}, [maybeSaveBeforeSwitchingProject, clearProjectDirty, hydrateAgentChatFromProject]);
 
 	const activateProjectTrack = useCallback(
 		async (file: ProjectFile) => {
@@ -1044,6 +1120,433 @@ export default function App() {
 	const handleAiAgentMore = useCallback(() => {
 		// TODO: дополнительные опции чата
 	}, []);
+
+	const toggleDiffExpanded = useCallback((messageId: string) => {
+		setExpandedDiffIds((prev) => {
+			const next = new Set(prev);
+			if (next.has(messageId)) next.delete(messageId);
+			else next.add(messageId);
+			return next;
+		});
+	}, []);
+
+	const buildChatEditDiffs = useCallback(
+		(
+			updated: SubtitleSegment[],
+			baseline: SubtitleSegment[],
+			fields: 'translation' | 'both' = 'translation'
+		): ChatEditDiff[] => {
+			const byId = new Map(baseline.map((s) => [s.id, s] as const));
+			const diffs: ChatEditDiff[] = [];
+			for (const next of updated) {
+				const prev = byId.get(next.id);
+				if (!prev) continue;
+				const textChanged = prev.text !== next.text;
+				if (fields === 'both' && textChanged) {
+					diffs.push({
+						id: next.id,
+						start: next.start,
+						end: next.end,
+						field: 'text',
+						oldText: prev.text,
+						newText: next.text
+					});
+				}
+				const trChanged = (prev.translation ?? '') !== (next.translation ?? '');
+				if (trChanged) {
+					diffs.push({
+						id: next.id,
+						start: next.start,
+						end: next.end,
+						field: 'translation',
+						oldText: prev.translation ?? '',
+						newText: next.translation ?? ''
+					});
+				}
+			}
+			diffs.sort((a, b) => {
+				if (a.start !== b.start) return a.start - b.start;
+				if (a.id !== b.id) return a.id - b.id;
+				return a.field === b.field ? 0 : a.field === 'text' ? -1 : 1;
+			});
+			return diffs;
+		},
+		[]
+	);
+
+	const replaceCaseInsensitive = useCallback((text: string, from: string, to: string): string => {
+		if (!from) return text;
+		const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		// Граница «не буква/цифра/_» с поддержкой Юникода — чтобы не цеплять подстроку внутри слова.
+		try {
+			const pattern = new RegExp(
+				`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`,
+				'giu'
+			);
+			return text.replace(pattern, to);
+		} catch {
+			return text;
+		}
+	}, []);
+
+	const buildGlossaryReplacementEdits = useCallback(
+		(changes: GlossaryReplacementChange[], baseline: SubtitleSegment[]): SubtitleSegment[] => {
+			if (changes.length === 0) return [];
+			const updated: SubtitleSegment[] = [];
+
+			for (const segment of baseline) {
+				let nextText = segment.text;
+				let nextTranslation = segment.translation ?? null;
+
+				for (const change of changes) {
+					if (change.oldSource && change.newSource && change.oldSource !== change.newSource) {
+						nextText = replaceCaseInsensitive(nextText, change.oldSource, change.newSource);
+					}
+					if (
+						nextTranslation &&
+						change.oldTarget &&
+						change.newTarget &&
+						change.oldTarget !== change.newTarget
+					) {
+						nextTranslation = replaceCaseInsensitive(nextTranslation, change.oldTarget, change.newTarget);
+					}
+				}
+
+				if (nextText !== segment.text || (nextTranslation ?? '') !== (segment.translation ?? '')) {
+					updated.push({
+						...segment,
+						text: nextText,
+						translation: nextTranslation
+					});
+				}
+			}
+
+			return updated;
+		},
+		[replaceCaseInsensitive]
+	);
+
+	/** Заменить сегменты по id (вернёт пары [новый_сегмент, исходный_сегмент] для всех применённых). */
+	const applySegmentEdits = useCallback(
+		(updated: SubtitleSegment[]): { applied: SubtitleSegment[]; originals: SubtitleSegment[] } => {
+			const cp = currentProjectRef.current;
+			if (!cp || !activeSubtitleFileId) return { applied: [], originals: [] };
+
+			const baseline = segmentsRef.current ?? [];
+			const baselineById = new Map(baseline.map((s) => [s.id, s] as const));
+			const updatedById = new Map(updated.map((s) => [s.id, s] as const));
+
+			const originals: SubtitleSegment[] = [];
+			const applied: SubtitleSegment[] = [];
+
+			const nextList = baseline.map((seg) => {
+				const u = updatedById.get(seg.id);
+				if (!u) return seg;
+				const merged: SubtitleSegment = {
+					...seg,
+					text: u.text ?? seg.text,
+					translation: u.translation ?? seg.translation
+				};
+				if (
+					(merged.text ?? '') === (seg.text ?? '') &&
+					(merged.translation ?? '') === (seg.translation ?? '')
+				) {
+					return seg;
+				}
+				originals.push(baselineById.get(seg.id) ?? seg);
+				applied.push(merged);
+				return merged;
+			});
+
+			if (applied.length === 0) return { applied: [], originals: [] };
+
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: nextList } : f
+				)
+			};
+			currentProjectRef.current = nextProject;
+			setCurrentProject(nextProject);
+			setGeneratedSegments(nextList);
+			markProjectDirty();
+			return { applied, originals };
+		},
+		[activeSubtitleFileId, markProjectDirty]
+	);
+
+	const applyGlossaryReplacementToSubtitles = useCallback(
+		async (changes: GlossaryReplacementChange[]) => {
+			const baseline = segmentsRef.current ?? [];
+			const project = currentProjectRef.current;
+			if (changes.length === 0 || baseline.length === 0) return;
+
+			const mergeUpdates = (
+				baseList: SubtitleSegment[],
+				patches: SubtitleSegment[]
+			): SubtitleSegment[] => {
+				if (patches.length === 0) return baseList;
+				const map = new Map(baseList.map((s) => [s.id, s] as const));
+				for (const patch of patches) {
+					const prev = map.get(patch.id);
+					if (!prev) continue;
+					const merged: SubtitleSegment = {
+						...prev,
+						text: patch.text ?? prev.text,
+						translation: patch.translation ?? prev.translation
+					};
+					map.set(patch.id, merged);
+				}
+				return baseList.map((s) => map.get(s.id) ?? s);
+			};
+
+			const addNoMatchesMessage = () => {
+				setChatMessages((prev) => [
+					...prev,
+					{
+						id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+						role: 'assistant',
+						text: 'Глоссарий сохранён, но подходящих реплик для обновления не найдено.'
+					}
+				]);
+			};
+
+			const applyAndShow = (
+				combinedList: SubtitleSegment[],
+				messageText: string
+			): boolean => {
+				const updated = combinedList.filter((next) => {
+					const prev = baseline.find((s) => s.id === next.id);
+					if (!prev) return false;
+					return (
+						prev.text !== next.text ||
+						(prev.translation ?? '') !== (next.translation ?? '')
+					);
+				});
+				if (updated.length === 0) return false;
+
+				const edits = buildChatEditDiffs(updated, baseline, 'both');
+				if (edits.length === 0) return false;
+
+				const { originals } = applySegmentEdits(updated);
+				if (originals.length === 0) return false;
+
+				setChatMessages((prev) => [
+					...prev,
+					{
+						id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+						role: 'assistant',
+						text: messageText,
+						edits,
+						editSnapshot: originals,
+						editStatus: 'pending'
+					}
+				]);
+				return true;
+			};
+
+			const changesText = changes
+				.map((change, index) => {
+					const parts: string[] = [];
+					if (change.oldSource && change.newSource && change.oldSource !== change.newSource) {
+						parts.push(`Original text: "${change.oldSource}" -> "${change.newSource}"`);
+					}
+					if (change.oldTarget && change.newTarget && change.oldTarget !== change.newTarget) {
+						parts.push(`Translation: "${change.oldTarget}" -> "${change.newTarget}"`);
+					}
+					if (parts.length === 0) return '';
+					const ctx = change.newContext || change.oldContext;
+					if (ctx) parts.push(`Context: ${ctx}`);
+					return `${index + 1}. ${parts.join('; ')}`;
+				})
+				.filter((line) => line.length > 0)
+				.join('\n');
+
+			const hiddenPrompt = `Исправь реплики согласно изменениям глоссария.
+
+Изменения глоссария:
+${changesText}
+
+Правила:
+- Прочитай ВСЕ переданные сегменты от первого до последнего, не пропуская ни одного.
+- Учитывай поле Context каждого термина: оно описывает, что это за слово (имя, локация, бренд), род, склоняется ли. Используй это, чтобы корректно подобрать форму при замене и не путать с похожими словами.
+- Заменяй только реальные вхождения целых слов (или их падежных форм). НЕ заменяй подстроки, попавшие случайно внутрь другого слова: например, имя "Айся" не должно заменяться внутри слова "возвращайся".
+- Если термин помечен как несклоняемый — оставляй замену в исходной форме. Если склоняется — подбирай корректное окончание под падеж в реплике.
+- Найди в original text и translation все вхождения, включая склонения, формы с окончаниями, падежи, единственное и множественное число, разные регистры.
+- Например, если термин был "Фонтеросса", учитывай формы "Фонтероссы", "Фонтероссу", "Фонтероссе", "Фонтероссой".
+- Если меняется вариант original text — обнови поле text. Если меняется вариант перевода — обнови поле translation.
+- Не показывай рассуждения. Верни только изменённые сегменты с полным новым текстом.`;
+
+			setIsAgentBusy(true);
+			try {
+				// 1) Сначала локальная точная замена — гарантированно ловит явные вхождения.
+				const localPatches = buildGlossaryReplacementEdits(changes, baseline);
+				let combinedList = mergeUpdates(baseline, localPatches);
+
+				// 2) Затем агент проходит уже по локально обновлённой версии — ловит склонения / формы.
+				const response = await agentService.chat(hiddenPrompt, {
+					project_id: project?.id ?? null,
+					current_segments: combinedList,
+					current_glossary: project?.glossary ?? null,
+					target_language: project?.target_language ?? null
+				});
+				const action = response.action as AgentAction | null | undefined;
+				if (action && 'EditSegments' in action) {
+					combinedList = mergeUpdates(combinedList, action.EditSegments.segments);
+				}
+
+				const message =
+					(response.message && response.message.trim().length > 0
+						? response.message.trim()
+						: `Обновил реплики по изменениям в глоссарии: ${changes.length}.`);
+
+				if (!applyAndShow(combinedList, message)) {
+					addNoMatchesMessage();
+				}
+			} catch (err) {
+				const fallbackPatches = buildGlossaryReplacementEdits(changes, baseline);
+				const fallbackList = mergeUpdates(baseline, fallbackPatches);
+				if (applyAndShow(fallbackList, `Обновил реплики по изменениям в глоссарии: ${changes.length}.`)) {
+					return;
+				}
+				const detail = err instanceof Error ? err.message : String(err);
+				setChatMessages((prev) => [
+					...prev,
+					{
+						id: `e_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+						role: 'assistant',
+						text: `Не удалось обновить реплики по глоссарию: ${detail}`,
+						isError: true
+					}
+				]);
+			} finally {
+				setIsAgentBusy(false);
+			}
+		},
+		[applySegmentEdits, buildChatEditDiffs, buildGlossaryReplacementEdits]
+	);
+
+	const handleKeepEdits = useCallback((messageId: string) => {
+		setChatMessages((prev) =>
+			prev.map((m) =>
+				m.id === messageId && m.role === 'assistant' ? { ...m, editStatus: 'kept' } : m
+			)
+		);
+	}, []);
+
+	const handleUndoEdits = useCallback((messageId: string) => {
+		const target = chatMessages.find((m) => m.id === messageId);
+		if (!target || target.role !== 'assistant' || !target.editSnapshot) return;
+		applySegmentEdits(target.editSnapshot);
+		setChatMessages((prev) =>
+			prev.map((m) =>
+				m.id === messageId && m.role === 'assistant' ? { ...m, editStatus: 'reverted' } : m
+			)
+		);
+	}, [chatMessages, applySegmentEdits]);
+
+	const formatChatTimecode = useCallback((sec: number): string => {
+		if (!Number.isFinite(sec) || sec < 0) return '00:00:00';
+		const total = Math.floor(sec);
+		const h = Math.floor(total / 3600);
+		const m = Math.floor((total % 3600) / 60);
+		const s = total % 60;
+		return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+	}, []);
+
+	const handleAskAgentAboutSelectedSegment = useCallback(() => {
+		const seg = generatedSegments[selectedSegmentIndex];
+		if (!seg) return;
+		setPendingAttachedSegment({
+			id: seg.id,
+			start: seg.start,
+			end: seg.end,
+			text: seg.text,
+			translation: seg.translation ?? null
+		});
+		requestAnimationFrame(() => chatInputRef.current?.focus());
+	}, [generatedSegments, selectedSegmentIndex]);
+
+	const handleSendChatMessage = useCallback(async () => {
+		const text = chatInput.trim();
+		if (!text || isAgentBusy) return;
+
+		const userMsg: ChatMessage = {
+			id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+			role: 'user',
+			text,
+			attachedSegment: pendingAttachedSegment ?? undefined
+		};
+		setChatMessages((prev) => [...prev, userMsg]);
+		setChatInput('');
+		setPendingAttachedSegment(null);
+		setIsAgentBusy(true);
+
+		try {
+			const baseline = segmentsRef.current ?? [];
+			const project = currentProjectRef.current;
+			const messageForAgent = pendingAttachedSegment
+				? `${text}\n\nПрикрепленная реплика:\n#${pendingAttachedSegment.id} [${formatChatTimecode(pendingAttachedSegment.start)}]\nOriginal: ${pendingAttachedSegment.text}\nTranslation: ${pendingAttachedSegment.translation ?? ''}`
+				: text;
+			const response = await agentService.chat(messageForAgent, {
+				project_id: project?.id ?? null,
+				current_segments: baseline,
+				current_glossary: project?.glossary ?? null,
+				target_language: project?.target_language ?? null
+			});
+
+			let edits: ChatEditDiff[] | undefined;
+			let snapshot: SubtitleSegment[] | undefined;
+			const action = response.action as AgentAction | null | undefined;
+			if (action && 'EditSegments' in action) {
+				const updatedSegments = action.EditSegments.segments;
+				edits = buildChatEditDiffs(updatedSegments, baseline);
+				if (edits.length > 0) {
+					const { originals } = applySegmentEdits(updatedSegments);
+					snapshot = originals;
+				}
+			}
+
+			const aiMsg: ChatMessage = {
+				id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+				role: 'assistant',
+				text: response.message ?? '',
+				edits: edits && edits.length > 0 ? edits : undefined,
+				editSnapshot: snapshot,
+				editStatus: snapshot && snapshot.length > 0 ? 'pending' : undefined
+			};
+			setChatMessages((prev) => [...prev, aiMsg]);
+		} catch (err) {
+			const detail = err instanceof Error ? err.message : String(err);
+			setChatMessages((prev) => [
+				...prev,
+				{
+					id: `e_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+					role: 'assistant',
+					text: `Не удалось получить ответ от агента: ${detail}`,
+					isError: true
+				}
+			]);
+		} finally {
+			setIsAgentBusy(false);
+		}
+	}, [chatInput, isAgentBusy, pendingAttachedSegment, formatChatTimecode, buildChatEditDiffs, applySegmentEdits]);
+
+	const handleChatInputKeyDown = useCallback(
+		(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+			if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+				e.preventDefault();
+				void handleSendChatMessage();
+			}
+		},
+		[handleSendChatMessage]
+	);
+
+	useLayoutEffect(() => {
+		const el = chatScrollRef.current;
+		if (!el) return;
+		el.scrollTop = el.scrollHeight;
+	}, [chatMessages, isAgentBusy]);
 
 	const menuItems = useMemo(
 		() => [
@@ -2528,114 +3031,223 @@ export default function App() {
 					</div>
 
 					{/* Блок чата */}
-					<div className="flex-1 overflow-y-auto p-[12px] bg-surface-bg flex flex-col gap-4">
-						
-						{/* Сообщение пользователя Справа */}
-						<div className="self-end max-w-[90%] flex flex-col items-end">
-							<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
-								<p className="text-body-reg text-text-primary font-inter leading-tight">
-									Помоги понять контекст этой фразы: "She's really hitting her stride with this new project."
-								</p>
+					<div
+						ref={chatScrollRef}
+						className="flex-1 overflow-auto p-[12px] bg-surface-bg flex flex-col gap-4 subtitle-table-scroll"
+					>
+						{chatMessages.length === 0 && !isAgentBusy && (
+							<div className="m-auto text-center text-caption font-inter text-text-primary/50 px-4">
+								Задайте вопрос агенту или попросите изменить реплики
 							</div>
-						</div>
+						)}
 
-						{/* Сообщение агента Слева */}
-						<div className="self-start max-w-[95%] flex flex-col items-start">
-							<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px] select-text">
-								<p className="text-body-reg text-text-primary font-inter leading-tight">
-									Конечно! Эта идиома означает, что человек вошел в ритм и начал работать эффективно. Вот варианты перевода:
-								</p>
-
-								{/* Встраиваемая реплика (diff-карточка) */}
-								<div className="mt-3 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
-									<div className="flex items-center justify-between gap-2">
-										<button
-											type="button"
-											title={agentEmbedDiffExpanded ? 'Свернуть' : 'Развернуть'}
-											aria-expanded={agentEmbedDiffExpanded}
-											onClick={() => setAgentEmbedDiffExpanded((v) => !v)}
-											className="group flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-primary transition-colors hover:bg-text-primary/15"
-										>
-											<span
-												className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
-												style={sidebarIconMaskStyle(
-													agentEmbedDiffExpanded ? iconArrowUp : iconArrowDown
-												)}
-												aria-hidden
-											/>
-										</button>
-										<div className="flex gap-[12px] shrink-0">
-											<button
-												type="button"
-												className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors"
-											>
-												Undo
-											</button>
-											<button
-												type="button"
-												className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors"
-											>
-												Keep
-											</button>
+						{chatMessages.map((msg) => {
+							if (msg.role === 'user') {
+								return (
+									<div key={msg.id} className="self-end max-w-[90%] flex flex-col items-end">
+										<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[10px] select-text">
+											<p className="text-body-reg text-text-primary font-inter leading-tight whitespace-pre-wrap">
+												{msg.text}
+											</p>
+											{msg.attachedSegment && (
+												<div className="mt-3 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
+													<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+														<span className="whitespace-nowrap">#{msg.attachedSegment.id}</span>
+														<span className="whitespace-nowrap">
+															[ {formatChatTimecode(msg.attachedSegment.start)} ]
+														</span>
+														<div className="flex-1 h-[1px] bg-border-default" />
+													</div>
+													<div className="flex flex-col gap-[4px]">
+														<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+															<span className="text-caption text-text-primary font-inter break-words">
+																{msg.attachedSegment.translation || 'Без перевода'}
+															</span>
+														</div>
+														<div className="min-h-[22px] bg-panel-header rounded-[2px] p-[4px] flex items-center">
+															<span className="text-caption text-text-primary font-inter break-words">
+																{msg.attachedSegment.text}
+															</span>
+														</div>
+													</div>
+												</div>
+											)}
 										</div>
 									</div>
+								);
+							}
 
-									{!agentEmbedDiffExpanded && (
-										<p className="text-caption font-inter text-text-primary/70">1 change</p>
-									)}
+							const expanded = expandedDiffIds.has(msg.id);
+							return (
+								<div key={msg.id} className="self-start max-w-[95%] flex flex-col items-start">
+									<div
+										className={`rounded-[10px] rounded-bl-none p-[10px] select-text ${
+											msg.isError ? 'bg-inline-error' : 'bg-surface-panel'
+										}`}
+									>
+										{msg.text && (
+											<p className="text-body-reg text-text-primary font-inter leading-tight whitespace-pre-wrap">
+												{msg.text}
+											</p>
+										)}
 
-									{agentEmbedDiffExpanded && (
-										<>
-											{/* Метаданные ID, Таймкод и Тонкая Линия */}
-											<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
-												<span className="whitespace-nowrap">#152</span>
-												<span className="whitespace-nowrap">[ 00:01:03 ]</span>
-												<div className="flex-1 h-[1px] bg-border-default" />
-											</div>
-
-											<div className="flex flex-col gap-[4px]">
-												<div className="h-[22px] bg-inline-error rounded-[2px] px-[4px] flex items-center">
-													<span className="text-caption text-text-primary truncate font-inter">
-														Поехали сегодня в Магикс!
-													</span>
+										{msg.edits && msg.edits.length > 0 && (
+											<div
+												className={`bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full ${
+													msg.text ? 'mt-3' : ''
+												}`}
+											>
+												<div className="flex items-center justify-between gap-2">
+													<button
+														type="button"
+														title={expanded ? 'Свернуть' : 'Развернуть'}
+														aria-expanded={expanded}
+														onClick={() => toggleDiffExpanded(msg.id)}
+														className="group flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-primary transition-colors hover:bg-text-primary/15"
+													>
+														<span
+															className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
+															style={sidebarIconMaskStyle(expanded ? iconArrowUp : iconArrowDown)}
+															aria-hidden
+														/>
+													</button>
+													<div className="flex gap-[12px] shrink-0 items-center">
+														{msg.editStatus === 'pending' && (
+															<>
+																<button
+																	type="button"
+																	onClick={() => handleUndoEdits(msg.id)}
+																	className="text-caption font-inter text-text-secondary px-[8px] py-[2px] rounded-[6px] transition-all duration-150 hover:bg-inline-error hover:text-text-primary active:scale-90 active:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inline-error/60"
+																>
+																	Undo
+																</button>
+																<button
+																	type="button"
+																	onClick={() => handleKeepEdits(msg.id)}
+																	className="text-caption font-inter text-text-secondary px-[8px] py-[2px] rounded-[6px] transition-all duration-150 hover:bg-inline-success hover:text-text-primary active:scale-90 active:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inline-success/60"
+																>
+																	Keep
+																</button>
+															</>
+														)}
+														{msg.editStatus === 'kept' && (
+															<span className="text-caption font-inter text-text-primary/60">
+																Kept
+															</span>
+														)}
+														{msg.editStatus === 'reverted' && (
+															<span className="text-caption font-inter text-text-primary/60">
+																Reverted
+															</span>
+														)}
+													</div>
 												</div>
-												<div className="h-[22px] bg-inline-success rounded-[2px] px-[4px] flex items-center">
-													<span className="text-caption text-text-primary truncate font-inter">
-														Поехали сегодня в Магиксию!
-													</span>
-												</div>
+
+												{!expanded && (
+													<p className="text-caption font-inter text-text-primary/70">
+														{msg.edits.length}{' '}
+														{msg.edits.length === 1 ? 'change' : 'changes'}
+													</p>
+												)}
+
+												{expanded && (
+													<div className="flex flex-col gap-[10px]">
+														{msg.edits.map((d) => (
+															<div key={`${d.id}-${d.field}`} className="flex flex-col gap-[6px]">
+																<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+																	<span className="whitespace-nowrap">#{d.id}</span>
+																	<span className="whitespace-nowrap">
+																		[ {formatChatTimecode(d.start)} ]
+																	</span>
+																	<div className="flex-1 h-[1px] bg-border-default" />
+																</div>
+																<div className="flex flex-col gap-[4px]">
+																	<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center">
+																		<span className="text-caption text-text-primary font-inter break-words">
+																			{d.oldText}
+																		</span>
+																	</div>
+																	<div className="min-h-[22px] bg-inline-success rounded-[2px] p-[4px] flex items-center">
+																		<span className="text-caption text-text-primary font-inter break-words">
+																			{d.newText}
+																		</span>
+																	</div>
+																</div>
+															</div>
+														))}
+													</div>
+												)}
 											</div>
-										</>
-									)}
+										)}
+									</div>
+								</div>
+							);
+						})}
+
+						{isAgentBusy && (
+							<div className="self-start max-w-[95%]">
+								<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px]">
+									<p className="text-body-reg text-text-primary/60 font-inter leading-tight">
+										Агент думает...
+									</p>
 								</div>
 							</div>
-						</div>
-
-						<div className="self-end max-w-[90%]">
-							<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[8px] select-text">
-								<p className="text-body-reg text-text-primary font-inter leading-tight">
-									Измени во всех репликах слово Магикс на Магиксия.
-								</p>
-							</div>
-						</div>
+						)}
 					</div>
 
 					{/* Нижнее поле ввода */}
 					<div className="p-3 bg-surface-bg shrink-0">
 						<div className="relative flex flex-col bg-surface-secondary border border-border-default rounded-[10px] group transition-all focus-within:border-primary-main/50 shadow-sm min-h-[96px]">
-							
-							<textarea 
+							{pendingAttachedSegment && (
+								<div className="mx-3 mt-3 mb-1 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px]">
+									<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+										<span className="whitespace-nowrap">#{pendingAttachedSegment.id}</span>
+										<span className="whitespace-nowrap">
+											[ {formatChatTimecode(pendingAttachedSegment.start)} ]
+										</span>
+										<div className="flex-1 h-[1px] bg-border-default" />
+										<button
+											type="button"
+											title="Убрать реплику"
+											onClick={() => setPendingAttachedSegment(null)}
+											className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors"
+										>
+											Remove
+										</button>
+									</div>
+									<div className="flex flex-col gap-[4px]">
+										<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+											<span className="text-caption text-text-primary font-inter break-words">
+												{pendingAttachedSegment.translation || 'Без перевода'}
+											</span>
+										</div>
+										<div className="min-h-[22px] bg-panel-header rounded-[2px] p-[4px] flex items-center">
+											<span className="text-caption text-text-primary font-inter break-words">
+												{pendingAttachedSegment.text}
+											</span>
+										</div>
+									</div>
+								</div>
+							)}
+
+							<textarea
+								ref={chatInputRef}
+								value={chatInput}
+								onChange={(e) => setChatInput(e.target.value)}
+								onKeyDown={handleChatInputKeyDown}
+								disabled={isAgentBusy}
 								placeholder="Помоги, пожалуйста, перевести..."
-								className="w-full h-full p-3 pr-[56px] bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto no-scrollbar"
+								className="w-full h-full p-3 pr-[56px] bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto no-scrollbar disabled:opacity-60"
 								rows={3}
 							/>
 
-							{/* Кнопка отправки: hitbox = круг 40×40; анимации только от group/send, не от group на поле ввода */}
 							<div className="absolute right-3 bottom-3">
 								<button
 									type="button"
 									title="Send message"
-									className="group/send flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-0 bg-secondary-hover p-0 outline-none transition-colors hover:bg-primary-main focus-visible:ring-2 focus-visible:ring-primary-main/40"
+									onClick={() => void handleSendChatMessage()}
+									disabled={isAgentBusy || chatInput.trim().length === 0}
+									className="group/send flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-0 bg-secondary-hover p-0 outline-none transition-colors hover:bg-primary-main focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-50"
 								>
 									<span
 										className="pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-white transition-transform duration-200 ease-out will-change-transform group-hover/send:scale-110 group-active/send:scale-[0.92]"
@@ -2823,7 +3435,12 @@ export default function App() {
 												Next &gt;
 											</button>
 										</div>
-										<button className="w-full h-[24px] py-[4px] bg-primary-main hover:bg-primary-hover text-white text-caption rounded-sm transition-colors">
+										<button
+											type="button"
+											onClick={handleAskAgentAboutSelectedSegment}
+											disabled={selectedSegmentIndex < 0 || !generatedSegments[selectedSegmentIndex]}
+											className="w-full h-[24px] py-[4px] bg-primary-main hover:bg-primary-hover disabled:opacity-40 text-white text-caption rounded-sm transition-colors"
+										>
 											Ask agent
 										</button>
 									</div>
@@ -3445,8 +4062,27 @@ export default function App() {
 						{activeModal === 'glossary' && (
 							<GlossaryModal
 								projectPath={currentProject?.path ?? null}
-								onSaved={(glossary) => {
-									setCurrentProject((p) => (p ? { ...p, glossary } : null));
+								initialEntries={currentProject?.glossary ?? []}
+								onSaved={(glossary, changes) => {
+									setCurrentProject((p) => {
+										if (!p) return null;
+										const next = { ...p, glossary };
+										currentProjectRef.current = next;
+										return next;
+									});
+									markProjectDirty();
+
+									if (changes.length === 0) return;
+									if ((segmentsRef.current ?? []).length === 0) return;
+
+									void (async () => {
+										const confirmed = await ask(
+											'Хотите, чтобы агент обновил перевод по изменениям глоссария?',
+											{ title: 'Update subtitles', kind: 'info' }
+										);
+										if (!confirmed) return;
+										await applyGlossaryReplacementToSubtitles(changes);
+									})();
 								}}
 								onClose={() => setActiveModal(null)}
 							/>

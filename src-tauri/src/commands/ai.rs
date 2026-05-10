@@ -1,15 +1,18 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use crate::cache::Cache;
 use crate::project::{SubtitleSegment, GlossaryEntry};
 use keyring::Entry;
 use crate::project::glossary::apply_glossary;
 use tokio::sync::mpsc;
 use tauri::Emitter;
 use std::collections::{HashMap};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use crate::postprocessing;
 
-/// Макс. длина вывода промптов/ответов в терминал (UTF-8 символы).
+const WHISPER_MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
+/// Целевой размер одного куска при разбиении большого файла (18мб)
+const WHISPER_CHUNK_TARGET_BYTES: u64 = 18 * 1024 * 1024;
+
 const DEBUG_LOG_MAX_CHARS: usize = 24_000;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -24,6 +27,8 @@ pub struct AutoGlossaryOptions {
     pub min_frequency: u32,
     pub max_terms: u32,
     pub target_language: String,
+    #[serde(default, alias = "contextPrompt")]
+    pub context_prompt: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -53,7 +58,7 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
         });
     }
     
-    // Проверяем ключ через простой запрос к OpenAI API
+    // Проверяем api ключ
     let client = reqwest::Client::new();
     let res = client
         .get("https://api.openai.com/v1/models")
@@ -74,8 +79,7 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
                     .map(|s| s.to_string())
                     .collect();
                 
-                // Проверяем доступность нужных моделей
-                let required_models = ["whisper-1", "gpt-4o-mini"];
+                let required_models = ["whisper-1", "gpt-5.4-mini"];
                 let has_required = required_models.iter().all(|model| {
                     available_models.iter().any(|m| m.contains(model))
                 });
@@ -89,7 +93,7 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
                 } else {
                     Ok(ApiKeyValidation {
                         is_valid: false,
-                        error_message: Some("Ключ действителен, но недоступны необходимые модели (whisper-1, gpt-4o-mini)".to_string()),
+                        error_message: Some("Ключ действителен, но недоступны необходимые модели (whisper-1, gpt-5.4-mini)".to_string()),
                         model_access: available_models,
                     })
                 }
@@ -167,31 +171,19 @@ fn get_api_key() -> Result<String, String> {
 pub async fn transcribe_audio(
     file_path: String,
     language: Option<String>,
+    prompt: Option<String>,
+    glossary: Option<Vec<GlossaryEntry>>,
     app_handle: tauri::AppHandle,
-    cache: tauri::State<'_, Cache>,
 ) -> Result<Vec<SubtitleSegment>, String> {
     println!("📝 Транскрибация файла: {}", file_path);
-    
-    let file_path_buf = Path::new(&file_path);
-    let file_hash = Cache::calculate_file_hash(file_path_buf)?;
-    
-    // Проверяем кэш
-    if let Some(cached) = cache.get_transcription(&file_hash).await? {
-        println!("✅ Найдено в кэше ({} сегментов)", cached.len());
-        return Ok(cached);
-    }
 
-    // Получаем API-ключ
     let api_key = get_api_key()?;
-    
-    // Создаём канал для отправки прогресса
+
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(10);
-    
-    // Клонируем app_handle для отправки событий
+
     let app_handle_clone = app_handle.clone();
-    let operation_id = format!("transcribe_{}", file_hash);
+    let operation_id = format!("transcribe_{}", uuid::Uuid::new_v4());
     
-    // Запускаем отправку прогресса в фоне
     tokio::spawn(async move {
         while let Some(event) = progress_rx.recv().await {
             let _ = app_handle_clone.emit("ai_progress", ProgressPayload {
@@ -201,100 +193,172 @@ pub async fn transcribe_audio(
         }
     });
     
-    // Отправляем начальное событие
     let _ = progress_tx.send(ProgressEvent::Started { 
         total_steps: 4, 
         description: "Подготовка файла".to_string() 
     }).await;
 
-    // Читаем файл
-    let _ = progress_tx.send(ProgressEvent::InProgress { 
-        step: 1, 
-        progress: 0.25, 
-        description: "Чтение аудиофайла".to_string() 
+    let _ = progress_tx.send(ProgressEvent::InProgress {
+        step: 1,
+        progress: 0.15,
+        description: "Подготовка аудио".to_string()
     }).await;
-    
-    let file_data = std::fs::read(&file_path)
+
+    let file_metadata = std::fs::metadata(&file_path)
         .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
+    let file_size_bytes = file_metadata.len();
 
-    // Подготавливаем запрос - КЛОНИРУЕМ language
-    let language_for_request = language.clone();
-    let _ = progress_tx.send(ProgressEvent::InProgress { 
-        step: 2, 
-        progress: 0.5, 
-        description: "Отправка в OpenAI".to_string() 
-    }).await;
-    
+    let language_code = language.clone().unwrap_or_else(|| "en".to_string());
+    let whisper_prompt: Option<String> = match prompt.as_ref() {
+        Some(p) if !p.trim().is_empty() => Some(p.clone()),
+        _ => None,
+    };
+
     let client = reqwest::Client::new();
-    
-    use reqwest::multipart;
-    
-    let file_part = multipart::Part::bytes(file_data)
-        .file_name("audio.mp3")
-        .mime_str("audio/mpeg")
-        .map_err(|e| e.to_string())?;
-    
-    let form = multipart::Form::new()
-        .text("model", "whisper-1")
-        .text("language", language_for_request.unwrap_or("en".to_string()))
-        .text("response_format", "verbose_json")
-        .part("file", file_part);
 
-    // Отправляем запрос
-    let _ = progress_tx.send(ProgressEvent::InProgress { 
-        step: 3, 
-        progress: 0.75, 
-        description: "Ожидание ответа от OpenAI".to_string() 
-    }).await;
-    
-    let res = client
-        .post("https://api.openai.com/v1/audio/transcriptions")
-        .bearer_auth(&api_key)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("Ошибка запроса к OpenAI: {}", e))?;
+    let raw_segments: Vec<SubtitleSegment> = if file_size_bytes <= WHISPER_MAX_FILE_BYTES {
+        // Одиночный запрос: файл умещается в лимит Whisper.
+        let _ = progress_tx.send(ProgressEvent::InProgress {
+            step: 2,
+            progress: 0.45,
+            description: "Отправка в OpenAI".to_string()
+        }).await;
 
-    if !res.status().is_success() {
-        let status = res.status();
-        let error_text = res.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
-        return Err(format!("OpenAI ошибка ({}): {}", status, error_text));
-    }
+        let file_data = std::fs::read(&file_path)
+            .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
 
-    // Парсим ответ
-    let _ = progress_tx.send(ProgressEvent::InProgress { 
-        step: 4, 
-        progress: 0.9, 
-        description: "Обработка результата".to_string() 
-    }).await;
-    
-    let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let segments = parse_whisper_response(response)?;
-    
-    // Постобработка транскрибации
+        let segments = whisper_call(
+            &client,
+            &api_key,
+            file_data,
+            &language_code,
+            whisper_prompt.as_deref(),
+            "single",
+        ).await?;
+
+        let _ = progress_tx.send(ProgressEvent::InProgress {
+            step: 3,
+            progress: 0.85,
+            description: "Обработка результата".to_string()
+        }).await;
+
+        segments
+    } else {
+        let duration = crate::commands::audio::media_duration_seconds(Path::new(&file_path))
+            .await
+            .map_err(|e| format!("Не удалось получить длительность аудио: {}", e))?;
+        if duration <= 0.0 {
+            return Err("Файл аудио имеет нулевую длительность".to_string());
+        }
+
+        let chunk_count = ((file_size_bytes + WHISPER_CHUNK_TARGET_BYTES - 1)
+            / WHISPER_CHUNK_TARGET_BYTES) as usize;
+        let chunk_count = chunk_count.max(2);
+        let chunk_seconds = (duration / chunk_count as f64).max(1.0);
+
+        println!(
+            "Аудио ~{:.1} МБ, {:.1} c — режем на {} кусков по ~{:.1} c",
+            file_size_bytes as f64 / (1024.0 * 1024.0),
+            duration,
+            chunk_count,
+            chunk_seconds
+        );
+
+        let temp_dir = std::env::temp_dir()
+            .join(format!("whisper_chunks_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Не удалось создать временную папку: {}", e))?;
+
+        let mut all_segments: Vec<SubtitleSegment> = Vec::new();
+
+        for i in 0..chunk_count {
+            let chunk_start = (i as f64) * chunk_seconds;
+            let chunk_path: PathBuf = temp_dir.join(format!("chunk_{:03}.mp3", i));
+
+            let progress = 0.15 + (i as f64 / chunk_count as f64) * 0.70;
+            let _ = progress_tx.send(ProgressEvent::InProgress {
+                step: 2,
+                progress,
+                description: format!(
+                    "Транскрибация: кусок {} из {}",
+                    i + 1,
+                    chunk_count
+                ),
+            }).await;
+
+            extract_audio_chunk(
+                Path::new(&file_path),
+                &chunk_path,
+                chunk_start,
+                chunk_seconds,
+            ).await?;
+
+            let chunk_data = std::fs::read(&chunk_path)
+                .map_err(|e| format!("Ошибка чтения куска {}: {}", i + 1, e))?;
+            println!(
+                "  🎧 кусок {}/{}: {:.1} МБ",
+                i + 1,
+                chunk_count,
+                chunk_data.len() as f64 / (1024.0 * 1024.0)
+            );
+
+            let chunk_segments = whisper_call(
+                &client,
+                &api_key,
+                chunk_data,
+                &language_code,
+                whisper_prompt.as_deref(),
+                &format!("chunk {}/{}", i + 1, chunk_count),
+            ).await?;
+
+            for mut seg in chunk_segments {
+                seg.start += chunk_start;
+                seg.end += chunk_start;
+                seg.duration = (seg.end - seg.start).max(0.0);
+                all_segments.push(seg);
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let _ = progress_tx.send(ProgressEvent::InProgress {
+            step: 3,
+            progress: 0.9,
+            description: "Обработка результата".to_string()
+        }).await;
+
+        for (i, seg) in all_segments.iter_mut().enumerate() {
+            seg.id = (i + 1) as u32;
+        }
+        all_segments
+    };
+
+    let segments = sanitize_whisper_segments(raw_segments);
+
     let language_for_postprocessing = language.clone();
     let postprocessed_result = postprocessing::postprocess_transcription(
         segments,
         postprocessing::PostProcessingOptions {
             fix_punctuation: true,
             fix_names: true,
-            target_language: language_for_postprocessing.unwrap_or("en".to_string()),
+            target_language: language_for_postprocessing.unwrap_or_else(|| language_code.clone()),
             style_prompt: Some("Профессиональные субтитры для видео".to_string()),
+            name_hints: whisper_prompt.clone(),
+            glossary: glossary.unwrap_or_default(),
         },
         &api_key,
     ).await?;
 
     let final_segments = postprocessed_result.corrected_segments;
 
-    // Автоматическая генерация глоссария
-    let _auto_glossary = if final_segments.len() > 5 { // Префикс _ для неиспользуемой переменной
+    let _auto_glossary = if final_segments.len() > 5 {
         match auto_generate_glossary_from_segments(&final_segments, "ru", &api_key).await {
             Ok(glossary) => {
-                println!("✅ Автоматический глоссарий создан: {} терминов", glossary.len());
+                println!("Автоматический глоссарий создан: {} терминов", glossary.len());
                 Some(glossary)
             }
             Err(e) => {
-                println!("⚠️ Ошибка генерации глоссария: {}", e);
+                println!("Ошибка генерации глоссария: {}", e);
                 None
             }
         }
@@ -302,15 +366,11 @@ pub async fn transcribe_audio(
         None
     };
 
-    // Сохраняем в кэш
-    cache.set_transcription(&file_hash, &final_segments).await?;
-    
-    // Отправляем завершение
-    let _ = progress_tx.send(ProgressEvent::Completed { 
-        result_count: final_segments.len() 
+    let _ = progress_tx.send(ProgressEvent::Completed {
+        result_count: final_segments.len()
     }).await;
     
-    println!("✅ Транскрибация завершена: {} сегментов", final_segments.len());
+    println!("Транскрибация завершена: {} сегментов", final_segments.len());
     Ok(final_segments)
 }
 
@@ -320,7 +380,6 @@ async fn auto_generate_glossary_from_segments(
     target_language: &str,
     api_key: &str,
 ) -> Result<Vec<GlossaryTerm>, String> {
-    // Извлекаем все слова из оригинальных сегментов
     use std::collections::HashMap;
     
     let mut word_frequencies = HashMap::new();
@@ -337,7 +396,6 @@ async fn auto_generate_glossary_from_segments(
         }
     }
     
-    // Фильтруем по частоте (минимум 2 упоминания)
     let frequent_words: Vec<(String, u32)> = word_frequencies
         .into_iter()
         .filter(|(_, freq)| *freq >= 2)
@@ -347,7 +405,6 @@ async fn auto_generate_glossary_from_segments(
         return Ok(Vec::new());
     }
     
-    // Ограничиваем количество терминов
     let selected_words: Vec<String> = frequent_words
         .into_iter()
         .take(20) // Максимум 20 терминов
@@ -358,7 +415,7 @@ async fn auto_generate_glossary_from_segments(
         return Ok(Vec::new());
     }
     
-    // Формируем промпт для GPT
+    // промпт для GPT
     let terms_list = selected_words.join(", ");
     let prompt = format!(
         "Ты эксперт по переводу. Ниже список терминов, которые встречаются в субтитрах.
@@ -372,14 +429,14 @@ async fn auto_generate_glossary_from_segments(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.4-mini",
             "messages": [
                 { "role": "system", "content": prompt },
                 { "role": "user", "content": terms_list }
             ],
             "response_format": { "type": "json_object" },
             "temperature": 0.3,
-            "max_tokens": 2000
+            "max_completion_tokens": 2000
         }))
         .send()
         .await
@@ -475,32 +532,14 @@ pub async fn translate_batch(
     glossary: Vec<GlossaryEntry>,
     style_prompt: String,
     app_handle: tauri::AppHandle,
-    cache: tauri::State<'_, Cache>,
 ) -> Result<Vec<crate::types::TranslationResult>, String> {
     println!("Перевод {} сегментов на {}...", segments.len(), target_language);
-    
-    let cache_key = Cache::generate_translation_cache_key(
-        &segments,
-        &glossary,
-        &target_language,
-        &style_prompt,
-    )?;
-    
-    // Проверяем кэш
-    if let Some(cached) = cache.get_translation(&cache_key).await? {
-        println!(
-            "Найдено в кэше перевода ({} сегментов) — запросы к OpenAI не выполняются",
-            cached.len()
-        );
-        return Ok(cached);
-    }
 
     let api_key = get_api_key()?;
-    
-    // Создаём канал для прогресса
+
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(10);
     let app_handle_clone = app_handle.clone();
-    let operation_id = format!("translate_{}", cache_key);
+    let operation_id = format!("translate_{}", uuid::Uuid::new_v4());
     
     tokio::spawn(async move {
         while let Some(event) = progress_rx.recv().await {
@@ -649,9 +688,13 @@ pub async fn translate_batch(
     }
 
     for s in &segments {
-        if !merged_by_id.contains_key(&s.id) {
+        let needs_fallback = match merged_by_id.get(&s.id) {
+            Some(t) => t.trim().is_empty() && !s.text.trim().is_empty(),
+            None => true,
+        };
+        if needs_fallback {
             eprintln!(
-                "[translate] id={}: нет перевода от API, подставлен оригинал субтитра",
+                "[translate] id={}: нет/пустой перевод от API, подставлен оригинал субтитра",
                 s.id
             );
             merged_by_id.insert(s.id, s.text.clone());
@@ -687,17 +730,15 @@ pub async fn translate_batch(
             
             // Логируем изменения для отладки
             if original_with_glossary != segment.text {
-                println!("ℹ️ Применён глоссарий к сегменту #{}: \"{}\" → \"{}\"", 
+                println!("ℹПрименён глоссарий к сегменту #{}: \"{}\" → \"{}\"", 
                     segment.id, segment.text, original_with_glossary);
             }
         }
     }
 }
     
-    cache.set_translation(&cache_key, &translations).await?;
-    
-    let _ = progress_tx.send(ProgressEvent::Completed { 
-        result_count: translations.len() 
+    let _ = progress_tx.send(ProgressEvent::Completed {
+        result_count: translations.len()
     }).await;
     
     println!("Перевод завершён: {} сегментов", translations.len());
@@ -724,6 +765,158 @@ fn json_seconds(v: &serde_json::Value) -> f64 {
         .or_else(|| v.as_u64().map(|n| n as f64))
         .or_else(|| v.as_i64().map(|n| n as f64))
         .unwrap_or(0.0)
+}
+
+/// Один запрос к Whisper API (verbose_json) для уже подготовленного буфера mp3
+/// Возвращает сырые сегменты без дедупликации и со start/end относительно
+/// начала переданного буфера.
+async fn whisper_call(
+    client: &reqwest::Client,
+    api_key: &str,
+    file_data: Vec<u8>,
+    language_code: &str,
+    prompt: Option<&str>,
+    log_label: &str,
+) -> Result<Vec<SubtitleSegment>, String> {
+    use reqwest::multipart;
+
+    let file_size_bytes = file_data.len();
+
+    let file_part = multipart::Part::bytes(file_data)
+        .file_name("audio.mp3")
+        .mime_str("audio/mpeg")
+        .map_err(|e| e.to_string())?;
+
+    let mut form = multipart::Form::new()
+        .text("model", "whisper-1")
+        .text("language", language_code.to_string())
+        .text("temperature", "0")
+        .text("response_format", "verbose_json")
+        .text("timestamp_granularities[]", "segment")
+        .text("timestamp_granularities[]", "word")
+        .part("file", file_part);
+
+    if let Some(p) = prompt {
+        if !p.trim().is_empty() {
+            form = form.text("prompt", p.to_string());
+        }
+    }
+
+    log_debug_block(
+        &format!("whisper [{log_label}]: запрос"),
+        &format!(
+            "model: whisper-1\n\
+language: {language_code}\n\
+temperature: 0\n\
+response_format: verbose_json\n\
+timestamp_granularities: segment, word\n\
+file: ({file_size_bytes} байт)\n\
+\n\
+prompt (опционально):\n{}",
+            prompt.unwrap_or("(не задан)")
+        ),
+    );
+
+    let res = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к OpenAI: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let error_text = res.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+        return Err(format!("OpenAI ошибка ({}): {}", status, error_text));
+    }
+
+    let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let response_pretty = serde_json::to_string_pretty(&response).unwrap_or_else(|e| e.to_string());
+    log_debug_block(
+        &format!("whisper [{log_label}]: ответ API (verbose_json)"),
+        &response_pretty,
+    );
+
+    parse_whisper_response(response)
+}
+
+/// Извлекает фрагмент аудио в новый mp3-файл через ffmpeg (-c copy
+/// без перекодирования — быстро) start_seconds ставится перед `-i`
+/// (input seek), что для CBR mp3 даёт точный и быстрый разрез.
+async fn extract_audio_chunk(
+    input_path: &Path,
+    output_path: &Path,
+    start_seconds: f64,
+    duration_seconds: f64,
+) -> Result<(), String> {
+    use tokio::process::Command;
+
+    let status = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-ss")
+        .arg(format!("{:.3}", start_seconds))
+        .arg("-t")
+        .arg(format!("{:.3}", duration_seconds))
+        .arg("-i")
+        .arg(input_path)
+        .arg("-c")
+        .arg("copy")
+        .arg(output_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map_err(|e| format!("Ошибка запуска ffmpeg: {}", e))?;
+
+    if !status.success() {
+        return Err(format!(
+            "ffmpeg не смог извлечь кусок аудио (start={:.3}, duration={:.3})",
+            start_seconds, duration_seconds
+        ));
+    }
+
+    if !output_path.exists() {
+        return Err("ffmpeg не создал файл куска аудио".to_string());
+    }
+
+    Ok(())
+}
+
+/// Whisper иногда повторяет один и тот же текст в нескольких подряд идущих сегментах
+/// (особенно при тишине / хвостах) — режем дубликаты по нормализованному ключу.
+fn whisper_segment_dedup_key(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn sanitize_whisper_segments(segments: Vec<SubtitleSegment>) -> Vec<SubtitleSegment> {
+    if segments.len() < 2 {
+        return segments;
+    }
+    let mut out: Vec<SubtitleSegment> = Vec::with_capacity(segments.len());
+    let mut prev_key: Option<String> = None;
+    for seg in segments {
+        let key = whisper_segment_dedup_key(&seg.text);
+        if key.is_empty() {
+            out.push(seg);
+            prev_key = Some(key);
+            continue;
+        }
+        if prev_key.as_deref() == Some(key.as_str()) {
+            continue;
+        }
+        prev_key = Some(key);
+        out.push(seg);
+    }
+    for (i, seg) in out.iter_mut().enumerate() {
+        seg.id = (i + 1) as u32;
+    }
+    out
 }
 
 fn parse_whisper_response(response: serde_json::Value) -> Result<Vec<SubtitleSegment>, String> {
@@ -779,33 +972,27 @@ fn parse_translation_response(
     let parsed: serde_json::Value = serde_json::from_str(&normalized_content)
         .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
 
-    // 1) Пробуем извлечь напрямую/по известным ключам или рекурсивно в глубину
+    // Если структура ответа правильная (массив переводов либо id->text карта),
+    // отдаём то, что распарсилось, даже если внутри попались пустые
+    // translated_text — это валидный ответ модели, а не ошибка.
+    // Пустоты будут заменены оригиналом в translate_batch.
     if let Some(candidate_array) = find_translation_array(&parsed) {
         let mut results = parse_translation_items(candidate_array);
-        if !results.is_empty() {
-            results.sort_by_key(|item| item.id);
-            return Ok(results);
-        }
+        results.sort_by_key(|item| item.id);
+        return Ok(results);
     }
 
-    // 2) Fallback: объект формата { "1": "text", "2": "text" } где угодно во вложенности
     if let Some(map_obj) = find_id_text_map_object(&parsed) {
         let mut results = map_obj
             .iter()
             .filter_map(|(key, value)| {
                 let id = key.parse::<u32>().ok()?;
                 let translated_text = value.as_str()?.trim().to_string();
-                if translated_text.is_empty() {
-                    return None;
-                }
                 Some(crate::types::TranslationResult { id, translated_text })
             })
             .collect::<Vec<_>>();
-
-        if !results.is_empty() {
-            results.sort_by_key(|item| item.id);
-            return Ok(results);
-        }
+        results.sort_by_key(|item| item.id);
+        return Ok(results);
     }
 
     Err(format!(
@@ -854,7 +1041,7 @@ fn parse_translation_items(items: &[serde_json::Value]) -> Vec<crate::types::Tra
                 .trim()
                 .to_string();
 
-            if id == 0 || translated_text.is_empty() {
+            if id == 0 {
                 None
             } else {
                 Some(crate::types::TranslationResult { id, translated_text })
@@ -927,6 +1114,7 @@ pub async fn auto_generate_glossary(
         min_frequency: 2,
         max_terms: 50,
         target_language: "ru".to_string(),
+        context_prompt: None,
     });
     let _ = options.min_frequency;
 
@@ -940,7 +1128,11 @@ pub async fn auto_generate_glossary(
     let max_terms = options.max_terms.clamp(5, 80);
     let target_lang = options.target_language.trim();
 
-    let creator_notes: Option<&str> = None;
+    let creator_notes = options
+        .context_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|notes| !notes.is_empty());
 
     let notes_instruction = if creator_notes.is_some() {
         "\n\nIf the user message includes a \"Creator / translator notes\" section above the subtitle text, treat names, spellings, factions, and lore listed there as authoritative. Prefer those exact spellings in \"source\" when they also appear (or clearly correspond) in the subtitle transcript. Merge hints from notes with terms found in the subtitles."
@@ -994,14 +1186,14 @@ pub async fn auto_generate_glossary(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(&api_key)
         .json(&serde_json::json!({
-            "model": "gpt-4o-mini", // ИСПРАВЛЕНО: gpt-5.4-mini не существует
+            "model": "gpt-5.4-mini",
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": user_content }
             ],
             "response_format": { "type": "json_object" },
             "temperature": 0.2,
-            "max_tokens": 8192 // ИСПРАВЛЕНО: max_completion_tokens → max_tokens
+            "max_completion_tokens": 8192
         }))
         .send()
         .await
@@ -1058,23 +1250,37 @@ fn parse_glossary_response(response: serde_json::Value) -> Result<Vec<GlossaryTe
     
     let parsed: serde_json::Value = serde_json::from_str(content)
         .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
-    
-    let terms = parsed.as_array()
-        .ok_or("Ожидается массив в ответе".to_string())?
+
+    let terms_value = parsed
+        .as_array()
+        .or_else(|| parsed.get("terms").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("glossary").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("entries").and_then(|v| v.as_array()))
+        .ok_or_else(|| {
+            format!(
+                "Ожидается массив терминов или объект с ключом terms/glossary/entries. Ответ: {}",
+                content.chars().take(600).collect::<String>()
+            )
+        })?;
+
+    let terms = terms_value
         .iter()
-        .map(|item| {
-            let source = item["source"].as_str().unwrap_or("").to_string();
-            let target = item["target"].as_str().unwrap_or("").to_string();
+        .filter_map(|item| {
+            let source = item["source"].as_str().unwrap_or("").trim().to_string();
+            let target = item["target"].as_str().unwrap_or("").trim().to_string();
+            if source.is_empty() || target.is_empty() {
+                return None;
+            }
             let confidence = item["confidence"].as_f64().unwrap_or(0.5);
             let category = item["category"].as_str().map(|s| s.to_string());
-            
-            GlossaryTerm {
+
+            Some(GlossaryTerm {
                 source,
                 target,
                 frequency: 0,
                 confidence,
                 category,
-            }
+            })
         })
         .collect();
     
@@ -1124,13 +1330,13 @@ async fn localize_untranslated_glossary_terms(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.4-mini",
             "messages": [
                 { "role": "system", "content": prompt },
                 { "role": "user", "content": terms_list }
             ],
             "temperature": 0.3,
-            "max_tokens": 2000
+            "max_completion_tokens": 2000
         }))
         .send()
         .await
