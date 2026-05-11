@@ -43,6 +43,7 @@ export interface ProjectData {
   target_language: string;
   files: ProjectFile[];
   glossary: GlossaryEntry[];
+  agent_chat?: unknown[];
   created_at: string;
   updated_at: string;
 }
@@ -61,7 +62,6 @@ export interface AutoGlossaryOptions {
   min_frequency?: number;
   max_terms?: number;
   target_language: string;
-  /** Промпт шага «Context» в мастере (персонажи, сеттинг) — учитывается при автоглоссарии. */
   contextPrompt?: string;
 }
 
@@ -117,8 +117,13 @@ export const projectService = {
     return await invoke('extract_audio_from_video', { videoPath, outputPath });
   },
 
-  transcribeAudio: async (filePath: string, language?: string, prompt?: string): Promise<SubtitleSegment[]> => {
-    return await invoke('transcribe_audio', { filePath, language, prompt });
+  transcribeAudio: async (
+    filePath: string,
+    language?: string,
+    prompt?: string,
+    glossary?: GlossaryEntry[]
+  ): Promise<SubtitleSegment[]> => {
+    return await invoke('transcribe_audio', { filePath, language, prompt, glossary });
   },
 
   importExistingSubtitles: async (
@@ -183,7 +188,6 @@ export const projectService = {
     });
   },
 
-  /** Вставить пустой сегмент [start, end], список на диске пересортирован по времени. */
   insertSubtitleSegment: async (
     projectPath: string,
     fileId: string,

@@ -3,7 +3,6 @@ use std::path::Path;
 use std::fs;
 use crate::commands::audio::media_duration_seconds;
 use crate::project::{Project, ProjectFile, ProjectType, SubtitleSegment};
-use crate::cache::Cache;
 use crate::types::RecentProject;
 use crate::subtitle_parser;
 use std::io::Write;
@@ -13,20 +12,18 @@ use serde::{Deserialize, Serialize};
 pub async fn open_project(
     path: String,
     app_handle: tauri::AppHandle,
-    cache: tauri::State<'_, Cache>,
 ) -> Result<Project, String> {
     let project_path = Path::new(&path);
-    
+
     if !project_path.exists() {
         return Err(format!("Папка проекта не найдена: {}", path));
     }
-    
+
     let project = Project::load_from_file(project_path, &app_handle)
         .map_err(|e| format!("Ошибка загрузки проекта: {}", e))?;
-    
-    cache.cache_project_structure(&project.id, &project).await?;
+
     update_recent_projects(&path, &app_handle)?;
-    
+
     println!("Проект '{}' открыт", project.name);
     Ok(project)
 }

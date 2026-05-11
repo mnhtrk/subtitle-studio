@@ -116,14 +116,39 @@ interface WizardModalProps {
   onComplete: (payload: { project: ProjectData; segments: SubtitleSegment[] }) => void;
 }
 
-const languageOptions = ['English', 'Russian', 'Spanish', 'French', 'German', 'Italian'];
+const languageOptions = [
+  'English',
+  'Russian',
+  'Spanish',
+  'French',
+  'German',
+  'Italian',
+  'Portuguese',
+  'Chinese',
+  'Japanese',
+  'Korean',
+  'Arabic',
+  'Hindi',
+  'Turkish',
+  'Polish',
+  'Ukrainian'
+];
 const whisperLanguageCodes: Record<string, string> = {
   English: 'en',
   Russian: 'ru',
   Spanish: 'es',
   French: 'fr',
   German: 'de',
-  Italian: 'it'
+  Italian: 'it',
+  Portuguese: 'pt',
+  Chinese: 'zh',
+  Japanese: 'ja',
+  Korean: 'ko',
+  Arabic: 'ar',
+  Hindi: 'hi',
+  Turkish: 'tr',
+  Polish: 'pl',
+  Ukrainian: 'uk'
 };
 
 const resolveIsoLanguage = (languageOrCode: string): string | null => {
@@ -136,6 +161,15 @@ const resolveIsoLanguage = (languageOrCode: string): string | null => {
   if (normalized === 'french') return 'fr';
   if (normalized === 'german') return 'de';
   if (normalized === 'italian') return 'it';
+  if (normalized === 'portuguese') return 'pt';
+  if (normalized === 'chinese') return 'zh';
+  if (normalized === 'japanese') return 'ja';
+  if (normalized === 'korean') return 'ko';
+  if (normalized === 'arabic') return 'ar';
+  if (normalized === 'hindi') return 'hi';
+  if (normalized === 'turkish') return 'tr';
+  if (normalized === 'polish') return 'pl';
+  if (normalized === 'ukrainian') return 'uk';
   return null;
 };
 
@@ -246,7 +280,12 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
         const whisperPrompt = buildTranscriptionPrompt(contextPrompt, projectForPrompt.glossary);
         console.log('[Wizard] Whisper language:', whisperLanguage);
         console.log('[Wizard] Calling OpenAI Whisper');
-        segments = await projectService.transcribeAudio(audioPath, whisperLanguage, whisperPrompt);
+        segments = await projectService.transcribeAudio(
+          audioPath,
+          whisperLanguage,
+          whisperPrompt,
+          projectForPrompt.glossary
+        );
       } else {
         if (!subtitlePath) {
           throw new Error('����� ������� ������� ���� ���������');

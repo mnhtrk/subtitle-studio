@@ -18,6 +18,8 @@ pub struct Project {
     pub target_language: String,
     pub files: Vec<ProjectFile>,
     pub glossary: Vec<GlossaryEntry>,
+    #[serde(default)]
+    pub agent_chat: Vec<serde_json::Value>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -109,6 +111,7 @@ impl Project {
             target_language,
             files: vec![],
             glossary: vec![],
+            agent_chat: vec![],
             created_at: now.clone(),
             updated_at: now,
         };

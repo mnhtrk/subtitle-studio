@@ -1,10 +1,43 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog'; //выбор папки
 import { projectService } from '../../services/projectService';
+
+const languageOptions = [
+  'English',
+  'Russian',
+  'Spanish',
+  'French',
+  'German',
+  'Italian',
+  'Portuguese',
+  'Chinese',
+  'Japanese',
+  'Korean',
+  'Arabic',
+  'Hindi',
+  'Turkish',
+  'Polish',
+  'Ukrainian'
+];
 
 interface NewProjectModalProps {
   onClose: () => void;
   onProjectCreated: (project: any) => void;
+}
+
+function sanitizeProjectFolderName(raw: string): string {
+  return raw
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[. ]+$/g, '')
+    .trim();
+}
+
+function joinPath(parent: string, child: string): string {
+  if (!parent) return child;
+  const trimmed = parent.replace(/[\\/]+$/g, '');
+  const sep = trimmed.includes('\\') && !trimmed.includes('/') ? '\\' : '/';
+  return `${trimmed}${sep}${child}`;
 }
 
 export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onProjectCreated }) => {
@@ -13,42 +46,51 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
   const [targetLang, setTargetLang] = useState('English');
   const [isCreating, setIsCreating] = useState(false);
 
-  // Функция выбора папки через системное окно
-  const handleSelectFolder = async (e: React.MouseEvent) => {
-		e.preventDefault();
-		e.stopPropagation();
-		console.log("Вызов диалога..."); //дебаг
-		
-		try {
-			const selected = await open({
-				directory: true,
-				multiple: false,
-				title: 'Select Project Directory'
-			});
-			console.log("Выбрано:", selected);
-			if (selected && typeof selected === 'string') {
-				setLocation(selected);
-			}
-		} catch (err) {
-			console.error("Ошибка диалога:", err);
-		}
-	};
+  const sanitizedFolderName = useMemo(() => sanitizeProjectFolderName(name), [name]);
+  const previewPath = useMemo(
+    () => (location && sanitizedFolderName ? joinPath(location, sanitizedFolderName) : ''),
+    [location, sanitizedFolderName]
+  );
 
-  // Отправка данных в Rust
+  const handleSelectFolder = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Select Project Directory'
+      });
+      if (selected && typeof selected === 'string') {
+        setLocation(selected);
+      }
+    } catch (err) {
+      console.error('Ошибка диалога:', err);
+    }
+  };
+
   const handleCreate = async () => {
-    if (!name || !location) {
-      alert("Please fill in all fields");
+    if (!name.trim() || !location) {
+      alert('Please fill in all fields');
+      return;
+    }
+    if (!sanitizedFolderName) {
+      alert('Project name contains only invalid characters. Please use letters, digits, spaces or dashes.');
       return;
     }
 
+    const finalPath = joinPath(location, sanitizedFolderName);
+
     setIsCreating(true);
     try {
-      const newProject = await projectService.create(name, location, targetLang);
+      const newProject = await projectService.create(name.trim(), finalPath, targetLang);
       onProjectCreated(newProject);
       onClose();
     } catch (err) {
       console.error(err);
-      alert("Failed to create project");
+      const detail = err instanceof Error ? err.message : String(err);
+      alert(`Failed to create project: ${detail}`);
     } finally {
       setIsCreating(false);
     }
@@ -109,6 +151,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
                     </svg>
                   </div>
                 </div>
+                {previewPath && (
+                  <p className="text-caption text-text-secondary leading-tight break-all">
+                    Will be created at: <span className="text-text-primary">{previewPath}</span>
+                  </p>
+                )}
               </div>
 
               <div className="flex flex-col gap-[8px]">
@@ -118,11 +165,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
                   onChange={(e) => setTargetLang(e.target.value)}
                   className="w-full px-[12px] py-[10px] bg-secondary-main border border-border-default rounded-[8px] text-body-reg text-text-primary focus:outline-none focus:border-primary-main transition-colors"
                 >
-                  <option value="English">English</option>
-                  <option value="Russian">Russian</option>
-                  <option value="Spanish">Spanish</option>
-                  <option value="French">French</option>
-                  <option value="German">German</option>
+                  {languageOptions.map((lang) => (
+                    <option key={lang} value={lang}>
+                      {lang}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>

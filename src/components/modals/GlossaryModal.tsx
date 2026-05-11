@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { GlossaryEntry, projectService } from '../../services/projectService';
+import React, { useEffect, useState } from 'react';
+import { GlossaryEntry } from '../../services/projectService';
 
 interface GlossaryRow {
   entryId?: string;
@@ -11,7 +11,18 @@ interface GlossaryRow {
 interface GlossaryModalProps {
   onClose: () => void;
   projectPath: string | null;
-  onSaved?: (glossary: GlossaryEntry[]) => void;
+  initialEntries: GlossaryEntry[];
+  onSaved?: (glossary: GlossaryEntry[], changes: GlossaryReplacementChange[]) => void;
+}
+
+export interface GlossaryReplacementChange {
+  id: string;
+  oldSource: string;
+  newSource: string;
+  oldTarget: string;
+  newTarget: string;
+  oldContext: string;
+  newContext: string;
 }
 
 const emptyRows = (n: number): GlossaryRow[] =>
@@ -29,43 +40,66 @@ function entriesToRows(entries: GlossaryEntry[]): GlossaryRow[] {
   while (mapped.length < 8) {
     mapped.push({ original: '', translated: '', context: '' });
   }
+  const last = mapped[mapped.length - 1];
+  if (
+    last.original.trim() !== '' ||
+    last.translated.trim() !== '' ||
+    last.context.trim() !== ''
+  ) {
+    mapped.push({ original: '', translated: '', context: '' });
+  }
   return mapped;
+}
+
+function collectReplacementChanges(
+  previous: GlossaryEntry[],
+  next: GlossaryEntry[]
+): GlossaryReplacementChange[] {
+  const previousById = new Map(previous.map((entry) => [entry.id, entry]));
+  return next
+    .map((entry) => {
+      const prev = previousById.get(entry.id);
+      if (!prev) return null;
+
+      const oldSource = prev.source.trim();
+      const newSource = entry.source.trim();
+      const oldTarget = prev.target.trim();
+      const newTarget = entry.target.trim();
+      const oldContext = (prev.context ?? prev.description ?? '').trim();
+      const newContext = (entry.context ?? entry.description ?? '').trim();
+
+      if (oldSource === newSource && oldTarget === newTarget) {
+        return null;
+      }
+
+      return {
+        id: entry.id,
+        oldSource,
+        newSource,
+        oldTarget,
+        newTarget,
+        oldContext,
+        newContext
+      };
+    })
+    .filter((change): change is GlossaryReplacementChange => Boolean(change));
 }
 
 export const GlossaryModal: React.FC<GlossaryModalProps> = ({
   onClose,
   projectPath,
+  initialEntries,
   onSaved
 }) => {
-  const [rows, setRows] = useState<GlossaryRow[]>(() => emptyRows(8));
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [rows, setRows] = useState<GlossaryRow[]>(() => entriesToRows(initialEntries));
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  const load = useCallback(async () => {
-    if (!projectPath) {
-      setRows(emptyRows(8));
-      setLoadError(null);
-      return;
-    }
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const entries = await projectService.getGlossary(projectPath);
-      setRows(entriesToRows(entries));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setLoadError(msg);
-      setRows(emptyRows(8));
-    } finally {
-      setLoading(false);
-    }
-  }, [projectPath]);
+  const [loadedEntries, setLoadedEntries] = useState<GlossaryEntry[]>(initialEntries);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    setRows(entriesToRows(initialEntries));
+    setLoadedEntries(initialEntries);
+    setSaveError(null);
+  }, [initialEntries]);
 
   const handleUpdate = (index: number, field: keyof GlossaryRow, value: string) => {
     const newRows = [...rows];
@@ -78,9 +112,8 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
     setRows(newRows);
   };
 
-  const handleSave = async () => {
+  const handleSave = () => {
     if (!projectPath) return;
-    setSaving(true);
     setSaveError(null);
     try {
       const entries: GlossaryEntry[] = rows
@@ -92,18 +125,17 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
           description: null,
           context: r.context.trim() || null
         }));
-      await projectService.updateGlossary(projectPath, entries);
-      onSaved?.(entries);
-      await load();
+      const changes = collectReplacementChanges(loadedEntries, entries);
+      onSaved?.(entries, changes);
+      setLoadedEntries(entries);
+      setRows(entriesToRows(entries));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setSaveError(msg);
-    } finally {
-      setSaving(false);
     }
   };
 
-  const canSave = Boolean(projectPath) && !loading && !saving;
+  const canSave = Boolean(projectPath);
 
   return (
     <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
@@ -128,10 +160,9 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
           <p className="text-body-reg text-text-secondary">
             Define how the AI agent should translate specific names or terms.
           </p>
-          {(loadError || saveError || !projectPath) && (
+          {(saveError || !projectPath) && (
             <p className="text-caption text-amber-600/90 mt-2">
               {!projectPath && 'Open a project to edit the glossary.'}
-              {loadError && ` ${loadError}`}
               {saveError && ` ${saveError}`}
             </p>
           )}
@@ -166,7 +197,6 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
                         onChange={(e) => handleUpdate(i, 'original', e.target.value)}
                         className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-primary placeholder:text-text-secondary/60"
                         placeholder="Type term..."
-                        disabled={loading}
                       />
                     </td>
                     <td className="p-0 border-r border-border-default">
@@ -176,7 +206,6 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
                         onChange={(e) => handleUpdate(i, 'translated', e.target.value)}
                         className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-primary placeholder:text-text-secondary/60"
                         placeholder="Translation..."
-                        disabled={loading}
                       />
                     </td>
                     <td className="p-0">
@@ -186,7 +215,6 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
                         onChange={(e) => handleUpdate(i, 'context', e.target.value)}
                         className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-secondary placeholder:text-text-secondary/60"
                         placeholder="Optional context..."
-                        disabled={loading}
                       />
                     </td>
                   </tr>
@@ -203,7 +231,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
             disabled={!canSave}
             className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover disabled:opacity-40 disabled:pointer-events-none text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
           >
-            {saving ? '…' : 'Save changes'}
+            Save changes
           </button>
         </div>
       </div>
