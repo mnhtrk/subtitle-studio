@@ -174,18 +174,30 @@ fn parse_simple_replace_request(message: &str) -> Option<(String, String)> {
 
     let after_marker = message.get(marker.0 + marker.1.len()..)?.trim();
     let after_marker = trim_replace_scope_words(after_marker);
-    let lower_after = after_marker.to_lowercase();
-    let sep_idx = lower_after.find(" на ").or_else(|| lower_after.find(" to "))?;
+    let (sep_idx, to_sep_len) = find_replace_separator(after_marker)?;
 
-    let from = clean_replace_term(&after_marker[..sep_idx]);
-    let to_sep_len = if lower_after[sep_idx..].starts_with(" на ") { 4 } else { 4 };
-    let to = clean_replace_term(&after_marker[sep_idx + to_sep_len..]);
+    let from = clean_replace_term(after_marker.get(..sep_idx)?);
+    let to = clean_replace_term(after_marker.get(sep_idx + to_sep_len..)?);
 
     if from.is_empty() || to.is_empty() || from.eq_ignore_ascii_case(&to) {
         return None;
     }
 
     Some((from, to))
+}
+
+fn find_replace_separator(value: &str) -> Option<(usize, usize)> {
+    for (idx, _) in value.char_indices() {
+        let tail = value.get(idx..)?;
+        let lower_tail = tail.to_lowercase();
+        if lower_tail.starts_with(" на ") {
+            return Some((idx, " на ".len()));
+        }
+        if lower_tail.starts_with(" to ") {
+            return Some((idx, " to ".len()));
+        }
+    }
+    None
 }
 
 fn trim_replace_scope_words(value: &str) -> &str {

@@ -1,6 +1,6 @@
 import type { SubtitleSegment } from '../services/projectService';
 
-function sortAndRenumberSubtitleIds(segments: SubtitleSegment[]): SubtitleSegment[] {
+export function sortAndRenumberSubtitleIds(segments: SubtitleSegment[]): SubtitleSegment[] {
 	const sorted = [...segments].sort((a, b) => {
 		if (a.start !== b.start) return a.start - b.start;
 		return a.id - b.id;

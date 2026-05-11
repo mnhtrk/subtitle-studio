@@ -209,10 +209,53 @@ pub async fn transcribe_audio(
     let file_size_bytes = file_metadata.len();
 
     let language_code = language.clone().unwrap_or_else(|| "en".to_string());
-    let whisper_prompt: Option<String> = match prompt.as_ref() {
-        Some(p) if !p.trim().is_empty() => Some(p.clone()),
-        _ => None,
+    let glossary_entries = glossary.unwrap_or_default();
+    let mut glossary_originals: Vec<String> = Vec::new();
+    for entry in &glossary_entries {
+        let source = entry.source.trim();
+        if source.is_empty() {
+            continue;
+        }
+        if !glossary_originals
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(source))
+        {
+            glossary_originals.push(source.to_string());
+        }
+    }
+
+    let base_prompt = prompt
+        .as_ref()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string());
+    let base_prompt_lower = base_prompt
+        .as_deref()
+        .unwrap_or("")
+        .to_lowercase();
+    let missing_glossary_originals: Vec<String> = glossary_originals
+        .into_iter()
+        .filter(|source| !base_prompt_lower.contains(&source.to_lowercase()))
+        .collect();
+    let glossary_prompt = if missing_glossary_originals.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Important names/terms to keep exactly:\n{}",
+            missing_glossary_originals.join(", ")
+        ))
     };
+    let whisper_prompt: Option<String> = match (base_prompt, glossary_prompt) {
+        (Some(base), Some(glossary_block)) => Some(format!("{}\n\n{}", base, glossary_block)),
+        (Some(base), None) => Some(base),
+        (None, Some(glossary_block)) => Some(glossary_block),
+        (None, None) => None,
+    };
+
+    println!(
+        "[transcribe_audio] whisper prompt assembled from user prompt + {} glossary original terms",
+        missing_glossary_originals.len()
+    );
 
     let client = reqwest::Client::new();
 
@@ -344,7 +387,7 @@ pub async fn transcribe_audio(
             target_language: language_for_postprocessing.unwrap_or_else(|| language_code.clone()),
             style_prompt: Some("Профессиональные субтитры для видео".to_string()),
             name_hints: whisper_prompt.clone(),
-            glossary: glossary.unwrap_or_default(),
+            glossary: glossary_entries,
         },
         &api_key,
     ).await?;
@@ -565,11 +608,21 @@ pub async fn translate_batch(
     let glossary_text = if !glossary.is_empty() {
         let entries = glossary
             .iter()
-            .map(|e| format!("• \"{}\" → \"{}\"{}", 
-                e.source, 
-                e.target,
-                e.description.as_ref().map(|d| format!(" — {}", d)).unwrap_or_default()
-            ))
+            .map(|e| {
+                let mut notes = Vec::new();
+                if let Some(description) = e.description.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+                    notes.push(description.to_string());
+                }
+                if let Some(context) = e.context.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+                    notes.push(format!("Meaning/Context: {}", context));
+                }
+                let notes_text = if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", notes.join("; "))
+                };
+                format!("• \"{}\" → \"{}\"{}", e.source, e.target, notes_text)
+            })
             .collect::<Vec<_>>()
             .join("\n");
         format!(

@@ -31,7 +31,11 @@ export const ActivationModal: React.FC<ActivationModalProps> = ({ onActivated })
   };
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
+    <div
+      className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-auto"
+      onMouseDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
       <div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
         <div className="flex flex-col mb-8">
           <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[32px] text-text-primary mb-2">

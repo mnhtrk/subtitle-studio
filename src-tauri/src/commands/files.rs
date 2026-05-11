@@ -47,6 +47,7 @@ pub async fn import_media(
     file_path: String,
     app_handle: tauri::AppHandle,
 ) -> Result<ProjectFile, String> {
+    println!("[import_media] start: {}", file_path);
     let project_path_buf = Path::new(&project_path);
     let source_file = Path::new(&file_path);
     
@@ -72,7 +73,9 @@ pub async fn import_media(
         .to_string();
     
     let dest_path = dest_dir.join(&file_name);
+    println!("[import_media] copying to: {}", dest_path.display());
     fs::copy(source_file, &dest_path).map_err(|e| e.to_string())?;
+    println!("[import_media] copy done: {}", dest_path.display());
     
     let file_type = if is_video_file(source_file) {
         ProjectType::Video
@@ -121,7 +124,7 @@ pub async fn import_media(
 
     project.save_to_file(&app_handle)?;
     
-    println!("Файл '{}' импортирован в проект", file_name);
+    println!("[import_media] saved project entry: {}", file_name);
     project
         .files
         .iter()
@@ -138,6 +141,10 @@ pub async fn export_subtitles(
     output_path: String,
     _app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
+    println!(
+        "[export_subtitles] start: file_id={}, format={}, output={}",
+        file_id, format, output_path
+    );
     let project_path_buf = Path::new(&project_path);
     let project = Project::load_from_file(project_path_buf, &_app_handle)?;
     
@@ -161,9 +168,10 @@ pub async fn export_subtitles(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     
+    println!("[export_subtitles] writing {} segments", segments.len());
     fs::write(&output_path, content).map_err(|e| e.to_string())?;
     
-    println!("Субтитры экспортированы: {}", output_path);
+    println!("[export_subtitles] done: {}", output_path);
     Ok(output_path)
 }
 
@@ -393,6 +401,167 @@ pub async fn remove_file_from_project(
 }
 
 #[tauri::command]
+pub async fn delete_episode_from_project(
+    project_path: String,
+    video_id: String,
+    app_handle: tauri::AppHandle,
+) -> Result<Project, String> {
+    let project_path_buf = Path::new(&project_path);
+    let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
+
+    let video = project
+        .files
+        .iter()
+        .find(|f| f.id == video_id && matches!(f.file_type, ProjectType::Video))
+        .cloned()
+        .ok_or_else(|| "Видео-файл не найден в проекте".to_string())?;
+
+    let subtitle = if let Some(sid) = video.linked_file_id.as_ref() {
+        project.files.iter().find(|f| f.id == *sid && matches!(f.file_type, ProjectType::Subtitle)).cloned()
+    } else {
+        project
+            .files
+            .iter()
+            .find(|f| matches!(f.file_type, ProjectType::Subtitle) && f.linked_file_id.as_deref() == Some(video_id.as_str()))
+            .cloned()
+    };
+
+    let root = Path::new(&project.path);
+
+    let video_full = root.join(&video.path);
+    if video_full.exists() {
+        if let Err(e) = fs::remove_file(&video_full) {
+            eprintln!("Не удалось удалить видео {}: {}", video_full.display(), e);
+        }
+    }
+
+    if let Some(sub) = subtitle.as_ref() {
+        let sub_full = root.join(&sub.path);
+        if sub_full.exists() {
+            if let Err(e) = fs::remove_file(&sub_full) {
+                eprintln!("Не удалось удалить субтитры {}: {}", sub_full.display(), e);
+            }
+        }
+    }
+
+    let cfg_dir = root.join("config");
+    let mut cfg_candidates: Vec<std::path::PathBuf> = vec![
+        cfg_dir.join(format!("waveform_{}.png", video.id)),
+        cfg_dir.join(format!("waveform_{}.json", video.id)),
+        cfg_dir.join(format!("waveform_cache_{}.json", video.id)),
+    ];
+    // Удаляем также общую вейвформу, если она была сгенерирована до перехода на per-episode.
+    if project
+        .files
+        .iter()
+        .filter(|f| matches!(f.file_type, ProjectType::Video))
+        .count() <= 1
+    {
+        cfg_candidates.push(cfg_dir.join("waveform.png"));
+        cfg_candidates.push(cfg_dir.join("waveform_cache.json"));
+    }
+    for p in cfg_candidates {
+        if p.exists() {
+            if let Err(e) = fs::remove_file(&p) {
+                eprintln!("Не удалось удалить артефакт {}: {}", p.display(), e);
+            }
+        }
+    }
+
+    let mut remove_ids: Vec<String> = vec![video.id.clone()];
+    if let Some(sub) = subtitle.as_ref() {
+        remove_ids.push(sub.id.clone());
+    }
+    project.files.retain(|f| !remove_ids.contains(&f.id));
+    let removed_set: std::collections::HashSet<&str> = remove_ids.iter().map(|s| s.as_str()).collect();
+    let now = chrono::Utc::now().to_rfc3339();
+    for f in project.files.iter_mut() {
+        if let Some(lid) = f.linked_file_id.as_deref() {
+            if removed_set.contains(lid) {
+                f.linked_file_id = None;
+                f.updated_at = now.clone();
+            }
+        }
+    }
+    project.updated_at = now;
+    project.save_to_file(&app_handle)?;
+    Ok(project)
+}
+
+#[tauri::command]
+pub async fn delete_project_file_artifact(
+    project_path: String,
+    relative_path: String,
+) -> Result<bool, String> {
+    let project_path_buf = Path::new(&project_path);
+    let normalized = relative_path.replace('\\', "/");
+    let mut current = project_path_buf.to_path_buf();
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return Err("Недопустимый путь".to_string());
+        }
+        current.push(segment);
+    }
+    if !current.starts_with(project_path_buf) {
+        return Err("Путь вне проекта".to_string());
+    }
+    if !current.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&current)
+        .map_err(|e| format!("Не удалось удалить файл {}: {}", current.display(), e))?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn parse_subtitle_file(
+    file_path: String,
+    format: Option<String>,
+) -> Result<Vec<SubtitleSegment>, String> {
+    println!("[parse_subtitle_file] start: {}", file_path);
+    let path_buf = Path::new(&file_path);
+    if !path_buf.exists() {
+        return Err(format!("Файл субтитров не найден: {}", file_path));
+    }
+
+    let detected_format = if let Some(fmt) = format {
+        match fmt.to_lowercase().as_str() {
+            "srt" => subtitle_parser::SubtitleFormat::SRT,
+            "vtt" => subtitle_parser::SubtitleFormat::VTT,
+            "ass" => subtitle_parser::SubtitleFormat::ASS,
+            "ssa" => subtitle_parser::SubtitleFormat::SSA,
+            _ => return Err(format!("Неподдерживаемый формат: {}", fmt)),
+        }
+    } else {
+        subtitle_parser::detect_format(path_buf)?
+    };
+    println!("[parse_subtitle_file] detected format: {:?}", detected_format);
+
+    println!("[parse_subtitle_file] reading file");
+    let content = fs::read_to_string(path_buf)
+        .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
+    println!(
+        "[parse_subtitle_file] read done: {} bytes, {} lines",
+        content.len(),
+        content.lines().count()
+    );
+
+    println!("[parse_subtitle_file] parsing and cleaning tags");
+    let segments = subtitle_parser::parse_subtitles(&content, detected_format)?;
+    println!("[parse_subtitle_file] parse done: {} segments", segments.len());
+
+    if segments.is_empty() {
+        return Err("Не удалось распарсить субтитры".to_string());
+    }
+
+    println!("[parse_subtitle_file] done");
+    Ok(segments)
+}
+
+#[tauri::command]
 pub async fn import_existing_subtitles(
     subtitle_path: String,
     format: Option<String>,
@@ -426,10 +595,6 @@ pub async fn import_existing_subtitles(
     
     // Парсим субтитры
     let segments = subtitle_parser::parse_subtitles(&content, detected_format)?;
-    
-    if segments.is_empty() {
-        return Err("Не удалось распарсить субтитры".to_string());
-    }
     
     println!("Импортировано {} сегментов", segments.len());
     

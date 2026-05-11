@@ -113,7 +113,7 @@ function buildTranscriptionPrompt(
 interface WizardModalProps {
   onClose: () => void;
   projectPath?: string;
-  onComplete: (payload: { project: ProjectData; segments: SubtitleSegment[] }) => void;
+  onComplete: (payload: { project: ProjectData; segments: SubtitleSegment[]; subtitleFileId: string | null }) => void;
 }
 
 const languageOptions = [
@@ -188,8 +188,18 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
   const [workingFileId, setWorkingFileId] = useState<string | null>(null);
   const totalSteps = 7;
 
-  const nextStep = () => setCurrentStep((prev) => Math.min(prev + 1, totalSteps));
-  const prevStep = () => setCurrentStep((prev) => Math.max(prev - 1, 1));
+  const isFileMode = sourceType === 'file';
+
+  const nextStep = () => setCurrentStep((prev) => {
+    let next = prev + 1;
+    if (isFileMode && next === 3) next = 4;
+    return Math.min(next, totalSteps);
+  });
+  const prevStep = () => setCurrentStep((prev) => {
+    let next = prev - 1;
+    if (isFileMode && next === 3) next = 2;
+    return Math.max(next, 1);
+  });
 
   const progressWidth = `${(currentStep / totalSteps) * 100}%`;
   const isLoaderStep = currentStep === 4 || currentStep === 6;
@@ -260,9 +270,11 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     setErrorText('');
     setCurrentStep(4);
 
+    let tempAudioRel: string | null = null;
     try {
-      console.log('[Wizard] Importing video to project');
+      console.log('[Wizard][subtitle-file] importing video to project');
       const importedVideo: ProjectFile = await projectService.importMedia(projectPath!, videoPath);
+      console.log('[Wizard][subtitle-file] video imported:', importedVideo.id);
 
       let segments: SubtitleSegment[] = [];
       if (sourceType === 'ai') {
@@ -271,7 +283,9 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
           throw new Error('OpenAI API key is not set. Please activate the app first.');
         }
 
-        const outputAudioPath = `${projectPath!}/config/wizard_audio_${Date.now()}.mp3`;
+        const audioFileName = `wizard_audio_${Date.now()}.mp3`;
+        tempAudioRel = `config/${audioFileName}`;
+        const outputAudioPath = `${projectPath!}/${tempAudioRel}`;
         console.log('[Wizard] Extracting audio', outputAudioPath);
         const audioPath = await projectService.extractAudioFromVideo(videoPath, outputAudioPath);
 
@@ -290,49 +304,59 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
         if (!subtitlePath) {
           throw new Error('����� ������� ������� ���� ���������');
         }
-        console.log('[Wizard] Importing existing subtitles');
-        segments = await projectService.importExistingSubtitles(subtitlePath, projectPath!, importedVideo.id);
+        console.log('[Wizard][subtitle-file] parsing subtitle file:', subtitlePath);
+        segments = await projectService.parseSubtitleFile(subtitlePath);
+        console.log('[Wizard][subtitle-file] parsed segments:', segments.length);
       }
 
+      console.log('[Wizard][subtitle-file] creating paired subtitle track');
       const { project: pairedProject, subtitleFileId } = await finalizeEpisodePairInProject(
         projectPath!,
         importedVideo.id,
         segments
       );
+      console.log('[Wizard][subtitle-file] paired subtitle track:', subtitleFileId);
       setWorkingFileId(subtitleFileId);
       let updatedProject = pairedProject;
 
-      try {
-        const targetIso =
-          resolveIsoLanguage(updatedProject.target_language) ??
-          resolveIsoLanguage(targetLanguage) ??
-          'en';
-        const suggested = await projectService.autoGenerateGlossary(segments, {
-          min_frequency: 2,
-          max_terms: 45,
-          target_language: targetIso,
-          contextPrompt: contextPrompt
-        });
-        if (suggested.length > 0) {
-          const opened = await projectService.open(projectPath!);
-          const merged = mergeAutoGlossary(opened.glossary, suggested);
-          const toSave: ProjectData = {
-            ...opened,
-            glossary: merged,
-            updated_at: new Date().toISOString()
-          };
-          await projectService.save(toSave);
-          updatedProject = toSave;
+      if (sourceType === 'ai') {
+        try {
+          const targetIso =
+            resolveIsoLanguage(updatedProject.target_language) ??
+            resolveIsoLanguage(targetLanguage) ??
+            'en';
+          const suggested = await projectService.autoGenerateGlossary(segments, {
+            min_frequency: 2,
+            max_terms: 45,
+            target_language: targetIso,
+            contextPrompt: contextPrompt
+          });
+          if (suggested.length > 0) {
+            const opened = await projectService.open(projectPath!);
+            const merged = mergeAutoGlossary(opened.glossary, suggested);
+            const toSave: ProjectData = {
+              ...opened,
+              glossary: merged,
+              updated_at: new Date().toISOString()
+            };
+            await projectService.save(toSave);
+            updatedProject = toSave;
+          }
+        } catch (autoGlossErr) {
+          console.warn('[Wizard] Auto-glossary skipped:', autoGlossErr);
         }
-      } catch (autoGlossErr) {
-        console.warn('[Wizard] Auto-glossary skipped:', autoGlossErr);
       }
 
       setWorkingSegments(segments);
       console.log('[Wizard] Transcription done, segments:', segments.length);
       setCurrentStep(5);
-      onComplete({ project: updatedProject, segments });
+      onComplete({ project: updatedProject, segments, subtitleFileId });
     } finally {
+      if (tempAudioRel && projectPath) {
+        projectService
+          .deleteProjectFileArtifact(projectPath, tempAudioRel)
+          .catch((err) => console.warn('[Wizard] cleanup audio failed:', err));
+      }
       setIsProcessing(false);
     }
   };
@@ -370,7 +394,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       setWorkingSegments(translatedSegments);
       console.log('[Wizard] Translation done, translated segments:', translatedSegments.length);
       setCurrentStep(7);
-      onComplete({ project: updatedProject, segments: translatedSegments });
+      onComplete({ project: updatedProject, segments: translatedSegments, subtitleFileId: workingFileId });
     } finally {
       setIsProcessing(false);
     }
@@ -390,6 +414,10 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       if (currentStep === 2) {
         if (sourceType === 'file' && !subtitlePath) {
           setErrorText('������ ������� ���� ���������');
+          return;
+        }
+        if (sourceType === 'file') {
+          await runTranscription();
           return;
         }
         nextStep();
@@ -413,6 +441,9 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             : JSON.stringify(error);
       console.error('[Wizard] Error details:', error);
       setErrorText(message);
+      if (currentStep === 2 && sourceType === 'file') setCurrentStep(2);
+      if (currentStep === 3) setCurrentStep(3);
+      if (currentStep === 5) setCurrentStep(5);
       if (currentStep === 4) setCurrentStep(3);
       if (currentStep === 6) setCurrentStep(5);
     }
@@ -442,10 +473,10 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       title: "Source text",
       desc: "How should we get the text in the original language? You can transcribe audio automatically or choose a pre-existing file, if you have it.",
       rightCol: (
-        <div className="flex flex-col gap-[12px] h-full">
+        <div className="flex flex-col gap-[12px] h-full min-w-0 w-full">
           <div 
             onClick={() => setSourceType('ai')}
-            className={`flex-1 flex flex-col p-4 border rounded-[12px] cursor-pointer ${
+            className={`flex-1 min-w-0 flex flex-col p-4 border rounded-[12px] cursor-pointer overflow-hidden ${
               sourceType === 'ai' 
                 ? 'bg-secondary-main border-text-primary' 
                 : 'bg-secondary-disabled border-secondary-hover'
@@ -471,29 +502,29 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
           </div>
 
           <div 
-            onClick={() => setSourceType('file')}
-            className={`flex-1 flex flex-col p-4 border rounded-[12px] cursor-pointer ${
+            onClick={() => {
+              setSourceType('file');
+              handleSelectSubtitle().catch(console.error);
+            }}
+            className={`flex-1 min-w-0 flex flex-col p-4 border rounded-[12px] cursor-pointer overflow-hidden ${
               sourceType === 'file' 
                 ? 'bg-secondary-main border-text-primary' 
                 : 'bg-secondary-disabled border-secondary-hover'
             }`}
           >
-            <div className="flex justify-between items-start mb-2">
-              <span className="text-body-med text-text-primary">Import an existing file</span>
-              <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${sourceType === 'file' ? 'border-text-primary' : 'border-secondary-hover'}`}>
+            <div className="flex justify-between items-start mb-2 min-w-0">
+              <span className="text-body-med text-text-primary truncate min-w-0">Import an existing file</span>
+              <div className={`shrink-0 w-5 h-5 rounded-full border flex items-center justify-center ${sourceType === 'file' ? 'border-text-primary' : 'border-secondary-hover'}`}>
                 {sourceType === 'file' && <div className="w-2.5 h-2.5 rounded-full bg-text-primary" />}
               </div>
             </div>
-            <div className="flex-1 flex items-end">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleSelectSubtitle().catch(console.error);
-                }}
-                className="text-body-reg text-text-primary"
+            <div className="flex-1 flex items-end min-w-0 w-full">
+              <span
+                className="block w-full min-w-0 text-body-reg text-text-primary truncate"
+                title={subtitlePath || undefined}
               >
                 {subtitlePath || '[Choose .srt / .vtt / .txt]'}
-              </button>
+              </span>
             </div>
           </div>
         </div>
@@ -591,8 +622,10 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                   AI is working!
                 </h1>
                 <p className="text-body-reg text-text-secondary">
-                  {currentStep === 4 
-                    ? "Please wait while we transcribe your file. This may take some minutes..."
+                  {currentStep === 4
+                    ? isFileMode
+                      ? "Please wait while we import your subtitle file..."
+                      : "Please wait while we transcribe your file. This may take some minutes..."
                     : "Please wait while we translate your text. This may take some minutes..."}
                 </p>
               </div>
@@ -602,7 +635,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             </>
           ) : (
             <>
-              <div className="flex flex-col pt-0">
+              <div className="flex flex-col pt-0 min-w-0">
                 <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
                   {currentStep === 7 ? currentContent.title : `${currentStep > 4 ? currentStep - 1 : currentStep}. ${currentContent.title}`}
                 </h1>
@@ -610,7 +643,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                   {currentContent.desc}
                 </p>
               </div>
-              <div className="flex flex-col h-full min-h-0">
+              <div className="flex flex-col h-full min-h-0 min-w-0">
                 {currentContent.rightCol}
               </div>
             </>

@@ -117,6 +117,15 @@ export const projectService = {
     return await invoke('extract_audio_from_video', { videoPath, outputPath });
   },
 
+  extractAudioRange: async (
+    videoPath: string,
+    startSeconds: number,
+    endSeconds: number,
+    outputPath: string
+  ): Promise<string> => {
+    return await invoke('extract_audio_range', { videoPath, startSeconds, endSeconds, outputPath });
+  },
+
   transcribeAudio: async (
     filePath: string,
     language?: string,
@@ -132,6 +141,29 @@ export const projectService = {
     fileId: string
   ): Promise<SubtitleSegment[]> => {
     return await invoke('import_existing_subtitles', { subtitlePath, format: null, projectPath, fileId });
+  },
+
+  parseSubtitleFile: async (filePath: string): Promise<SubtitleSegment[]> => {
+    return await invoke('parse_subtitle_file', { filePath, format: null });
+  },
+
+  deleteEpisode: async (projectPath: string, videoId: string): Promise<ProjectData> => {
+    return await invoke('delete_episode_from_project', { projectPath, videoId });
+  },
+
+  removeFileFromProject: async (
+    projectPath: string,
+    fileId: string,
+    deletePhysicalFile: boolean
+  ): Promise<void> => {
+    return await invoke('remove_file_from_project', { projectPath, fileId, deletePhysicalFile });
+  },
+
+  deleteProjectFileArtifact: async (
+    projectPath: string,
+    relativePath: string
+  ): Promise<boolean> => {
+    return await invoke('delete_project_file_artifact', { projectPath, relativePath });
   },
 
   getGlossary: async (projectPath: string): Promise<GlossaryEntry[]> => {
