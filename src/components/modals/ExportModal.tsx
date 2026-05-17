@@ -1,11 +1,12 @@
 import React from 'react';
+import { useI18n } from '../../i18n';
 
 interface ExportModalProps {
   onClose: () => void;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({ onClose }) => {
-  // Пример списка файлов для пакетной обработки
+  const { t } = useI18n();
   const files = Array(12).fill('ep01.srt');
 
   return (
@@ -22,10 +23,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({ onClose }) => {
         {/* Заголовки окна */}
         <div className="flex flex-col mb-8">
           <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[32px] text-text-primary mb-2">
-            Export
+            {t('export.title')}
           </h1>
           <p className="text-body-reg text-text-secondary">
-            You can batch export files with different settings.
+            {t('export.desc')}
           </p>
         </div>
 
@@ -36,7 +37,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ onClose }) => {
           <div className="flex flex-col min-h-0 border border-border-default rounded-[8px] bg-secondary-main overflow-hidden">
              <div className="h-[40px] border-b border-border-default flex items-center px-4 gap-3 bg-secondary-main sticky top-0 z-10">
                 <input type="checkbox" className="w-4 h-4 rounded border-border-default accent-primary-main" />
-                <span className="text-caption text-text-secondary">Select all</span>
+                <span className="text-caption text-text-secondary">{t('export.selectAll')}</span>
              </div>
              
              {/* Тот самый скроллбар */}
@@ -53,7 +54,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ onClose }) => {
           {/* Правая часть Настройки */}
           <div className="flex flex-col gap-[24px]">
             <div className="flex flex-col gap-[8px]">
-              <label className="text-caption text-text-secondary">File format</label>
+              <label className="text-caption text-text-secondary">{t('export.fileFormat')}</label>
               <div className="w-full px-[12px] py-[10px] bg-secondary-main border border-border-default rounded-[8px] flex items-center justify-between text-body-reg text-text-primary cursor-pointer hover:border-primary-main transition-colors">
                 <span>PDF (.pdf)</span>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 9 6 6 6-6"/></svg>
@@ -61,7 +62,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ onClose }) => {
             </div>
 
             <div className="flex flex-col gap-[8px]">
-              <label className="text-caption text-text-secondary">Encoding</label>
+              <label className="text-caption text-text-secondary">{t('export.encoding')}</label>
               <div className="w-full px-[12px] py-[10px] bg-secondary-main border border-border-default rounded-[8px] flex items-center justify-between text-body-reg text-text-primary cursor-pointer hover:border-primary-main transition-colors">
                 <span>UTF-8 with BOM</span>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 9 6 6 6-6"/></svg>
@@ -69,7 +70,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ onClose }) => {
             </div>
 
             <div className="flex flex-col gap-[8px]">
-              <label className="text-caption text-text-secondary">Saving location</label>
+              <label className="text-caption text-text-secondary">{t('export.savingLocation')}</label>
               <div className="relative">
                 <input 
                   type="text" 
@@ -90,7 +91,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ onClose }) => {
         {/* РЯД 3 Нижняя кнопка действия */}
         <div className="flex justify-end mt-8">
           <button className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm">
-            Export files
+            {t('export.exportFiles')}
           </button>
         </div>
 

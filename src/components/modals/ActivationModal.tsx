@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { projectService } from '../../services/projectService';
+import { useI18n } from '../../i18n';
 
 interface ActivationModalProps {
   onActivated: () => void;
 }
 
 export const ActivationModal: React.FC<ActivationModalProps> = ({ onActivated }) => {
+  const { t } = useI18n();
   const [apiKey, setApiKey] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -13,7 +15,7 @@ export const ActivationModal: React.FC<ActivationModalProps> = ({ onActivated })
   const handleActivate = async () => {
     const trimmed = apiKey.trim();
     if (!trimmed) {
-      setErrorText('Please enter your OpenAI API key.');
+      setErrorText(t('activation.apiKeyRequired'));
       return;
     }
 
@@ -39,16 +41,16 @@ export const ActivationModal: React.FC<ActivationModalProps> = ({ onActivated })
       <div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
         <div className="flex flex-col mb-8">
           <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[32px] text-text-primary mb-2">
-            Activate Subtitle Studio
+            {t('activation.title')}
           </h1>
           <p className="text-body-reg text-text-secondary">
-            Insert your OpenAI API key to enable AI transcription and translation.
+            {t('activation.desc')}
           </p>
         </div>
 
         <div className="flex-1 flex flex-col justify-end">
           <div className="flex flex-col gap-[8px]">
-            <label className="text-caption text-text-secondary">OpenAI API key</label>
+            <label className="text-caption text-text-secondary">{t('activation.apiKey')}</label>
             <input
               type="text"
               value={apiKey}
@@ -73,7 +75,7 @@ export const ActivationModal: React.FC<ActivationModalProps> = ({ onActivated })
               disabled={isSaving}
               className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover disabled:opacity-40 disabled:pointer-events-none text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
             >
-              {isSaving ? 'Saving...' : 'Activate'}
+              {isSaving ? t('activation.saving') : t('activation.activate')}
             </button>
           </div>
         </div>

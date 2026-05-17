@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import { useI18n } from '../../i18n';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   projectService,
@@ -174,6 +175,7 @@ const resolveIsoLanguage = (languageOrCode: string): string | null => {
 };
 
 export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, onComplete }) => {
+  const { t } = useI18n();
   const [currentStep, setCurrentStep] = useState(1);
   const [sourceType, setSourceType] = useState<'ai' | 'file'>('ai');
   const [sourceLanguage, setSourceLanguage] = useState('French');
@@ -449,10 +451,10 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     }
   };
 
-  const stepData = {
+  const stepData = useMemo(() => ({
     1: {
-      title: "Import your file",
-      desc: "Select the video you want to subtitle. A wide range of audiovisual files is supported.",
+      title: t('wizard.step1Title'),
+      desc: t('wizard.step1Desc'),
       rightCol: (
         <div
           onClick={handleSelectVideo}
@@ -464,14 +466,14 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             </svg>
           </div>
           <p className="text-body-reg text-text-primary text-center whitespace-pre-line leading-[20px]">
-            {videoPath || 'Drop your file here \n (audio, video files)'}
+            {videoPath || t('wizard.dropFile')}
           </p>
         </div>
       )
     },
     2: {
-      title: "Source text",
-      desc: "How should we get the text in the original language? You can transcribe audio automatically or choose a pre-existing file, if you have it.",
+      title: t('wizard.step2Title'),
+      desc: t('wizard.step2Desc'),
       rightCol: (
         <div className="flex flex-col gap-[12px] h-full min-w-0 w-full">
           <div 
@@ -483,7 +485,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             }`}
           >
             <div className="flex justify-between items-start mb-2">
-              <span className="text-body-med text-text-primary">Generate with AI</span>
+              <span className="text-body-med text-text-primary">{t('wizard.generateAi')}</span>
               <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${sourceType === 'ai' ? 'border-text-primary' : 'border-secondary-hover'}`}>
                 {sourceType === 'ai' && <div className="w-2.5 h-2.5 rounded-full bg-text-primary" />}
               </div>
@@ -513,7 +515,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             }`}
           >
             <div className="flex justify-between items-start mb-2 min-w-0">
-              <span className="text-body-med text-text-primary truncate min-w-0">Import an existing file</span>
+              <span className="text-body-med text-text-primary truncate min-w-0">{t('wizard.importExisting')}</span>
               <div className={`shrink-0 w-5 h-5 rounded-full border flex items-center justify-center ${sourceType === 'file' ? 'border-text-primary' : 'border-secondary-hover'}`}>
                 {sourceType === 'file' && <div className="w-2.5 h-2.5 rounded-full bg-text-primary" />}
               </div>
@@ -523,7 +525,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                 className="block w-full min-w-0 text-body-reg text-text-primary truncate"
                 title={subtitlePath || undefined}
               >
-                {subtitlePath || '[Choose .srt / .vtt / .txt]'}
+                {subtitlePath || t('wizard.chooseSubtitle')}
               </span>
             </div>
           </div>
@@ -531,29 +533,29 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       )
     },
     3: {
-      title: "Context and glossary",
-      desc: "Tell the AI about specific names, slang or terms to create a glossary that will keep transcription consistent.",
+      title: t('wizard.step3Title'),
+      desc: t('wizard.step3Desc'),
       rightCol: (
         <div className="flex flex-col h-full min-h-0">
           <div className="flex flex-col gap-[8px] h-full min-h-0">
-            <label className="text-caption text-text-primary">Prompt</label>
+            <label className="text-caption text-text-primary">{t('wizard.prompt')}</label>
             <textarea 
               value={contextPrompt}
               onChange={(e) => setContextPrompt(e.target.value)}
               className="flex-1 min-h-0 w-full p-4 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary resize-none overflow-y-auto subtitle-table-scroll focus:outline-none focus:border-text-primary transition-colors placeholder:text-text-secondary/50"
-              placeholder="Arcane, Saison 1. Personnages : Vi, Jinx, Jayce, Viktor, Silco, Caitlyn, Mel Medarda, Ekko, Heimerdinger..."
+              placeholder={t('wizard.step3Placeholder')}
             />
           </div>
         </div>
       )
     },
     5: {
-      title: "Translation",
-      desc: "You can select a language and give instructions to the agent. Style, tone and context matter for the result.",
+      title: t('wizard.step5Title'),
+      desc: t('wizard.step5Desc'),
       rightCol: (
         <div className="flex flex-col gap-[12px] h-full">
           <div className="flex flex-col gap-[8px]">
-            <label className="text-caption text-text-primary">Target language</label>
+            <label className="text-caption text-text-primary">{t('wizard.targetLanguage')}</label>
             <select
               value={targetLanguage}
               onChange={(e) => setTargetLanguage(e.target.value)}
@@ -565,20 +567,20 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             </select>
           </div>
           <div className="flex-1 flex flex-col gap-[8px] min-h-0">
-            <label className="text-caption text-text-primary">Prompt</label>
+            <label className="text-caption text-text-primary">{t('wizard.prompt')}</label>
             <textarea 
               value={translationPrompt}
               onChange={(e) => setTranslationPrompt(e.target.value)}
               className="flex-1 min-h-0 w-full p-4 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary resize-none overflow-y-auto subtitle-table-scroll focus:outline-none focus:border-text-primary transition-colors placeholder:text-text-secondary/50"
-              placeholder="Professional localization for a sci-fi drama series..."
+              placeholder={t('wizard.step5Placeholder')}
             />
           </div>
         </div>
       )
     },
     7: {
-      title: "Everything is ready!",
-      desc: "You can continue improving the results manually in the editor.",
+      title: t('wizard.step7Title'),
+      desc: t('wizard.step7Desc'),
       rightCol: (
         <div className="flex-1 border border-border-default rounded-[12px] bg-secondary-main flex items-center justify-center overflow-hidden">
           <div className="text-text-secondary opacity-20 flex flex-col items-center gap-2">
@@ -587,12 +589,12 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
               <path d="M2 17L12 22L22 17" />
               <path d="M2 12L12 17L22 12" />
             </svg>
-            <span className="text-caption">PLACEHOLDER</span>
+            <span className="text-caption">{t('wizard.placeholder')}</span>
           </div>
         </div>
       )
     }
-  };
+  }), [t, videoPath, sourceType, sourceLanguage, subtitlePath, contextPrompt, targetLanguage, translationPrompt]);
 
   const currentContent = stepData[currentStep as keyof typeof stepData] || stepData[1];
 
@@ -619,14 +621,14 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             <>
               <div className="flex flex-col pt-0">
                 <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
-                  AI is working!
+                  {t('wizard.working')}
                 </h1>
                 <p className="text-body-reg text-text-secondary">
                   {currentStep === 4
                     ? isFileMode
-                      ? "Please wait while we import your subtitle file..."
-                      : "Please wait while we transcribe your file. This may take some minutes..."
-                    : "Please wait while we translate your text. This may take some minutes..."}
+                      ? t('wizard.importWait')
+                      : t('wizard.transcribeWait')
+                    : t('wizard.translateWait')}
                 </p>
               </div>
               <div className="flex items-center justify-center h-full">
@@ -664,13 +666,13 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                 disabled={isProcessing}
                 className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover text-text-primary text-body-reg rounded-[5px] transition-colors"
               >
-                Cancel
+                {t('wizard.cancel')}
               </button>
               <button 
                 disabled
                 className="w-[112px] h-[26px] flex items-center justify-center bg-primary-disabled text-white/60 text-body-reg rounded-[5px] cursor-not-allowed"
               >
-                Next step &gt;
+                {t('wizard.nextStep')}
               </button>
             </>
           ) : currentStep === 7 ? (
@@ -679,7 +681,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                 onClick={prevStep}
                 className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover text-text-primary text-body-reg rounded-[5px] transition-colors"
               >
-                &lt; Prev step
+                {t('wizard.prevStep')}
               </button>
               <button 
                 onClick={() => {
@@ -690,7 +692,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                 }}
                 className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors"
               >
-                Go to editor
+                {t('wizard.goToEditor')}
               </button>
             </>
           ) : (
@@ -700,7 +702,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                 disabled={currentStep === 1 || isProcessing}
                 className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover disabled:bg-primary-disabled text-text-primary disabled:text-white/60 text-body-reg rounded-[5px] transition-colors"
               >
-                &lt; Prev step
+                {t('wizard.prevStep')}
               </button>
               <button 
                 onClick={() => {
@@ -709,7 +711,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                 disabled={isProcessing}
                 className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
               >
-                Next step &gt;
+                {t('wizard.nextStep')}
               </button>
             </>
           )}

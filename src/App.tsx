@@ -14,6 +14,8 @@ import { WizardModal } from './components/modals/WizardModal';
 import { ExportModal } from './components/modals/ExportModal';
 import { GlossaryModal, type GlossaryReplacementChange } from './components/modals/GlossaryModal';
 import { ActivationModal } from './components/modals/ActivationModal';
+import { SettingsModal } from './components/modals/SettingsModal';
+import { useI18n } from './i18n';
 
 const appWindow = getCurrentWindow();
 
@@ -411,6 +413,8 @@ function stepTimelineZoom(current: number, direction: 1 | -1): number {
 }
 
 export default function App() {
+	const { t, locale } = useI18n();
+	const timelineBtnPx = locale === 'ru' ? 'px-[16px]' : 'px-[12px]';
 
 	// СОСТОЯНИЕ ОКНА И РАЗМЕРОВ ЭКРАНА 
 	const [windowSize, setWindowSize] = useState({
@@ -521,7 +525,7 @@ export default function App() {
 
 	// --- МОДАЛЬНЫЕ ОКНА ---
 	const [activeModal, setActiveModal] = useState<
-		'activation' | 'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | null
+		'activation' | 'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | 'settings' | null
 	>(null);
 	const [currentProject, setCurrentProject] = useState<ProjectData | null>(null);
 	const [generatedSegments, setGeneratedSegments] = useState<SubtitleSegment[]>([]);
@@ -905,45 +909,43 @@ export default function App() {
 			console.error('save project', e);
 			const detail = e instanceof Error ? e.message : String(e);
 			try {
-				await message(detail, { title: 'Ошибка сохранения', kind: 'error' });
+				await message(detail, { title: t('dialog.saveErrorTitle'), kind: 'error' });
 			} catch {
-				window.alert(`Ошибка сохранения: ${detail}`);
+				window.alert(`${t('dialog.saveErrorTitle')}: ${detail}`);
 			}
 			return false;
 		}
-	}, [chatMessages, clearProjectDirty, exportSrtForProject, flushSubtitleEditorToProject]);
+	}, [chatMessages, clearProjectDirty, exportSrtForProject, flushSubtitleEditorToProject, t]);
 
 	const maybeSaveBeforeSwitchingProject = useCallback(async (): Promise<boolean> => {
 		flushSubtitleEditorToProject();
 		if (!projectDirtyRef.current) return true;
 		let saveFirst: boolean;
 		try {
-			saveFirst = await ask('В проекте есть несохранённые изменения. Сохранить перед продолжением?', {
-				title: 'Subtitle Studio',
+			saveFirst = await ask(t('dialog.saveBeforeSwitch'), {
+				title: t('dialog.appTitle'),
 				kind: 'warning'
 			});
 		} catch {
-			saveFirst = window.confirm(
-				'В проекте есть несохранённые изменения. Сохранить перед продолжением?'
-			);
+			saveFirst = window.confirm(t('dialog.saveBeforeSwitch'));
 		}
 		if (saveFirst) {
 			return await handleSaveProject();
 		}
 		return true;
-	}, [handleSaveProject, flushSubtitleEditorToProject]);
+	}, [handleSaveProject, flushSubtitleEditorToProject, t]);
 
 	const handleExitProject = useCallback(async () => {
 		flushSubtitleEditorToProject();
 		if (currentProjectRef.current && projectDirtyRef.current) {
 			let saveFirst: boolean;
 			try {
-				saveFirst = await ask('Сохранить изменения перед закрытием проекта?', {
-					title: 'Subtitle Studio',
+				saveFirst = await ask(t('dialog.saveBeforeExit'), {
+					title: t('dialog.appTitle'),
 					kind: 'warning'
 				});
 			} catch {
-				saveFirst = window.confirm('Сохранить изменения перед закрытием проекта?');
+				saveFirst = window.confirm(t('dialog.saveBeforeExit'));
 			}
 			if (saveFirst) {
 				const ok = await handleSaveProject();
@@ -966,7 +968,7 @@ export default function App() {
 		clearProjectDirty();
 		setActiveMenu(null);
 		setActiveModal(null);
-	}, [handleSaveProject, clearProjectDirty, flushSubtitleEditorToProject, hydrateAgentChatFromProject]);
+	}, [handleSaveProject, clearProjectDirty, flushSubtitleEditorToProject, hydrateAgentChatFromProject, t]);
 
 	const pushSubtitleHistorySnapshot = useCallback(() => {
 		if (!activeSubtitleFileId) return;
@@ -1125,14 +1127,14 @@ export default function App() {
 
 	const handleImportOriginalSubtitles = useCallback(async () => {
 		if (!currentProjectRef.current) {
-			await message('Сначала откройте или создайте проект.', { kind: 'info', title: 'Импорт' });
+			await message(t('dialog.openProjectFirst'), { kind: 'info', title: t('dialog.importTitle') });
 			return;
 		}
 		const selected = await open({
 			multiple: false,
 			directory: false,
-			title: 'Import Original Subtitles',
-			filters: [{ name: 'Subtitles', extensions: ['srt', 'vtt'] }]
+			title: t('dialog.importOriginalDialog'),
+			filters: [{ name: t('dialog.subtitlesFilter'), extensions: ['srt', 'vtt'] }]
 		});
 		if (!selected || typeof selected !== 'string') return;
 
@@ -1141,11 +1143,14 @@ export default function App() {
 			parsed = await projectService.parseSubtitleFile(selected);
 		} catch (e: unknown) {
 			const msg = e instanceof Error ? e.message : String(e);
-			await message(`Не удалось импортировать субтитры: ${msg}`, { kind: 'error', title: 'Импорт' });
+			await message(t('dialog.importOriginalFailed', { detail: msg }), {
+				kind: 'error',
+				title: t('dialog.importTitle')
+			});
 			return;
 		}
 		if (parsed.length === 0) {
-			await message('Файл не содержит сегментов.', { kind: 'warning', title: 'Импорт' });
+			await message(t('dialog.noSegments'), { kind: 'warning', title: t('dialog.importTitle') });
 			return;
 		}
 
@@ -1216,19 +1221,19 @@ export default function App() {
 		setGeneratedSegments(newSub.subtitle_segments ?? []);
 		setSelectedSegmentIndex((newSub.subtitle_segments?.length ?? 0) > 0 ? 0 : -1);
 		markProjectDirty();
-	}, [activeSubtitleFileId, activeVideoFile, pushSubtitleHistorySnapshot, markProjectDirty]);
+	}, [activeSubtitleFileId, activeVideoFile, pushSubtitleHistorySnapshot, markProjectDirty, t]);
 
 	const handleImportTranslatedSubtitles = useCallback(async () => {
 		if (!currentProjectRef.current) {
-			await message('Сначала откройте или создайте проект.', { kind: 'info', title: 'Импорт' });
+			await message(t('dialog.openProjectFirst'), { kind: 'info', title: t('dialog.importTitle') });
 			return;
 		}
 		const cp = currentProjectRef.current;
 		const selected = await open({
 			multiple: false,
 			directory: false,
-			title: 'Import Translated Subtitles',
-			filters: [{ name: 'Subtitles', extensions: ['srt', 'vtt'] }]
+			title: t('dialog.importTranslatedDialog'),
+			filters: [{ name: t('dialog.subtitlesFilter'), extensions: ['srt', 'vtt'] }]
 		});
 		if (!selected || typeof selected !== 'string') return;
 
@@ -1237,11 +1242,14 @@ export default function App() {
 			parsed = await projectService.parseSubtitleFile(selected);
 		} catch (e: unknown) {
 			const msg = e instanceof Error ? e.message : String(e);
-			await message(`Не удалось импортировать перевод: ${msg}`, { kind: 'error', title: 'Импорт' });
+			await message(t('dialog.importTranslatedFailed', { detail: msg }), {
+				kind: 'error',
+				title: t('dialog.importTitle')
+			});
 			return;
 		}
 		if (parsed.length === 0) {
-			await message('Файл не содержит сегментов.', { kind: 'warning', title: 'Импорт' });
+			await message(t('dialog.noSegments'), { kind: 'warning', title: t('dialog.importTitle') });
 			return;
 		}
 
@@ -1326,7 +1334,8 @@ export default function App() {
 		activeVideoFile,
 		pushSubtitleHistorySnapshot,
 		pushProjectHistorySnapshot,
-		markProjectDirty
+		markProjectDirty,
+		t
 	]);
 
 	const handleDeleteEpisode = useCallback(async (videoFile: ProjectFile) => {
@@ -1334,8 +1343,8 @@ export default function App() {
 		if (!cp) return;
 		if (videoFile.file_type !== 'Video') return;
 		const confirmed = await ask(
-			`Удалить эпизод «${videoFile.name}»?\nВидео, связанные субтитры и waveform будут удалены без возможности восстановления.`,
-			{ kind: 'warning', title: 'Удаление эпизода' }
+			t('dialog.deleteEpisodeConfirm', { name: videoFile.name }),
+			{ kind: 'warning', title: t('dialog.deleteEpisodeTitle') }
 		);
 		if (!confirmed) return;
 		pushProjectHistorySnapshot();
@@ -1376,9 +1385,12 @@ export default function App() {
 			}
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
-			await message(`Не удалось удалить эпизод: ${msg}`, { kind: 'error', title: 'Удаление эпизода' });
+			await message(t('dialog.deleteEpisodeFailed', { detail: msg }), {
+				kind: 'error',
+				title: t('dialog.deleteEpisodeTitle')
+			});
 		}
-	}, [activeSubtitleFileId, pushProjectHistorySnapshot]);
+	}, [activeSubtitleFileId, pushProjectHistorySnapshot, t]);
 
 	const handleDeleteSelectedTreeItem = useCallback(async () => {
 		const cp = currentProjectRef.current;
@@ -1397,9 +1409,9 @@ export default function App() {
 				setSelectedTreeItem(null);
 				return;
 			}
-			const confirmed = await ask(`Удалить файл «${file.name}»?`, {
+			const confirmed = await ask(t('dialog.deleteFileConfirm', { name: file.name }), {
 				kind: 'warning',
-				title: 'Удаление файла'
+				title: t('dialog.deleteFileTitle')
 			});
 			if (!confirmed) return;
 			try {
@@ -1421,7 +1433,10 @@ export default function App() {
 				setSelectedTreeItem(null);
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
-				await message(`Не удалось удалить файл: ${msg}`, { kind: 'error', title: 'Удаление' });
+				await message(t('dialog.deleteFailed', { detail: msg }), {
+					kind: 'error',
+					title: t('dialog.deleteFileTitle')
+				});
 			}
 			return;
 		}
@@ -1438,8 +1453,8 @@ export default function App() {
 			return;
 		}
 		const confirmed = await ask(
-			`Удалить все файлы из папки «${folder}» (${filesInFolder.length})?`,
-			{ kind: 'warning', title: 'Удаление папки' }
+			t('dialog.deleteFolderConfirm', { folder, count: filesInFolder.length }),
+			{ kind: 'warning', title: t('dialog.deleteFolderTitle') }
 		);
 		if (!confirmed) return;
 		try {
@@ -1475,9 +1490,12 @@ export default function App() {
 			setSelectedTreeItem(null);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
-			await message(`Не удалось удалить папку: ${msg}`, { kind: 'error', title: 'Удаление' });
+			await message(t('dialog.deleteFolderFailed', { detail: msg }), {
+				kind: 'error',
+				title: t('dialog.deleteFolderTitle')
+			});
 		}
-	}, [selectedTreeItem, activeSubtitleFileId, handleDeleteEpisode, pushProjectHistorySnapshot]);
+	}, [selectedTreeItem, activeSubtitleFileId, handleDeleteEpisode, pushProjectHistorySnapshot, t]);
 
 	const handleSelectProject = useCallback(async (path: string) => {
 		const canProceed = await maybeSaveBeforeSwitchingProject();
@@ -1516,17 +1534,15 @@ export default function App() {
 						? error.message
 						: String(error);
 			try {
-				await message(
-					`Укажите папку проекта Subtitle Studio — в корне должен быть файл project.json. Обычная папка без него не подойдёт.\n\n${detail}`,
-					{ title: 'Не удалось открыть проект', kind: 'error' }
-				);
+				await message(t('dialog.openProjectFailed', { detail }), {
+					title: t('dialog.openProjectFailedTitle'),
+					kind: 'error'
+				});
 			} catch {
-				window.alert(
-					`Не удалось открыть проект. Нужна папка с project.json.\n\n${detail}`
-				);
+				window.alert(t('dialog.openProjectFailedAlert', { detail }));
 			}
 		}
-	}, [maybeSaveBeforeSwitchingProject, clearProjectDirty, hydrateAgentChatFromProject]);
+	}, [maybeSaveBeforeSwitchingProject, clearProjectDirty, hydrateAgentChatFromProject, t]);
 
 	const activateProjectTrack = useCallback(
 		async (file: ProjectFile) => {
@@ -2095,44 +2111,49 @@ ${changesText}
 	const menuItems = useMemo(
 		() => [
 			{
-				label: 'File',
+				id: 'file',
+				label: t('menu.file'),
 				items: [
-					{ label: 'New Project', action: () => setActiveModal('createProject') },
-					{ label: 'Open Project', action: () => void handleOpenProjectDialog() },
-					{ label: 'Import Original Subtitles', action: () => void handleImportOriginalSubtitles() },
-					{ label: 'Import Translated Subtitles', action: () => void handleImportTranslatedSubtitles() },
-					{ label: 'Save', action: () => void handleSaveProject() },
-					{ label: 'Exit', action: () => void handleExitProject() },
+					{ label: t('menu.newProject'), action: () => setActiveModal('createProject') },
+					{ label: t('menu.openProject'), action: () => void handleOpenProjectDialog() },
+					{ label: t('menu.importOriginal'), action: () => void handleImportOriginalSubtitles() },
+					{ label: t('menu.importTranslated'), action: () => void handleImportTranslatedSubtitles() },
+					{ label: t('menu.save'), action: () => void handleSaveProject() },
+					{ label: t('menu.settings'), action: () => setActiveModal('settings') },
+					{ label: t('menu.exit'), action: () => void handleExitProject() },
 				],
 			},
 			{
-				label: 'Edit',
+				id: 'edit',
+				label: t('menu.edit'),
 				items: [
-					{ label: 'Undo', action: () => void performSubtitleUndo() },
-					{ label: 'Redo', action: () => void performSubtitleRedo() },
-					{ label: 'Delete', action: () => void handleDeleteSelectedSubtitle() },
-					{ label: 'Find' },
+					{ label: t('menu.undo'), action: () => void performSubtitleUndo() },
+					{ label: t('menu.redo'), action: () => void performSubtitleRedo() },
+					{ label: t('menu.delete'), action: () => void handleDeleteSelectedSubtitle() },
+					{ label: t('menu.find') },
 				],
 			},
-			{ label: 'Tools', items: [{ label: 'Spell check' }, { label: 'Batch convert' }] },
-			{ label: 'Video', items: [{ label: 'Open video file' }, { label: 'Audio track' }] },
 			{
-				label: 'Help',
-				items: [
-					{ label: 'About' },
-					{ label: 'Updates' },
-					{
-						label: isDarkTheme ? 'Switch to light theme' : 'Switch to dark theme',
-						action: () => setIsDarkTheme((prev) => !prev),
-					},
-				],
+				id: 'tools',
+				label: t('menu.tools'),
+				items: [{ label: t('menu.spellCheck') }, { label: t('menu.batchConvert') }],
+			},
+			{
+				id: 'video',
+				label: t('menu.video'),
+				items: [{ label: t('menu.openVideoFile') }, { label: t('menu.audioTrack') }],
+			},
+			{
+				id: 'help',
+				label: t('menu.help'),
+				items: [{ label: t('menu.about') }, { label: t('menu.updates') }],
 			},
 		],
 		[
+			t,
 			performSubtitleUndo,
 			performSubtitleRedo,
 			handleDeleteSelectedSubtitle,
-			isDarkTheme,
 			handleOpenProjectDialog,
 			handleSaveProject,
 			handleExitProject,
@@ -3537,14 +3558,14 @@ ${changesText}
 					{/* Пункты меню */}
 					<div className="flex items-center gap-0.5">
 						{menuItems.map((menu) => (
-							<div key={menu.label} className="relative">
+							<div key={menu.id} className="relative">
 								<button 
 									onClick={(e) => {
 										e.stopPropagation();
-										setActiveMenu(activeMenu === menu.label ? null : menu.label);
+										setActiveMenu(activeMenu === menu.id ? null : menu.id);
 									}}
 									className={`px-2 h-[24px] flex items-center text-[12px] font-inter rounded-sm transition-colors 
-										${activeMenu === menu.label 
+										${activeMenu === menu.id 
 											? 'bg-primary-main text-white' 
 											: 'text-text-primary hover:bg-secondary-hover'}`}
 								>
@@ -3552,7 +3573,7 @@ ${changesText}
 								</button>
 
 								{/* Выпадающий список */}
-								{activeMenu === menu.label && (
+								{activeMenu === menu.id && (
 									<div className="rounded-[8px] absolute left-0 top-[26px] w-max min-w-[160px] bg-surface-secondary border border-border-default shadow-lg py-1 flex flex-col z-[110]">
 										{menu.items.map((subItem) => (
 										<button
@@ -3576,7 +3597,7 @@ ${changesText}
 				{/* ЦЕНТРАЛЬНАЯ ЧАСТЬ Название проекта */}
 				<div className="flex-1 flex justify-center items-center h-full overflow-hidden px-4">
 					<span className="text-[11px] text-text-primary font-inter truncate">
-						{currentProject?.name ?? 'Untitled'} - subtitlestudio
+						{currentProject?.name ?? t('app.untitled')} - subtitlestudio
 					</span>
 				</div>
 
@@ -3616,7 +3637,7 @@ ${changesText}
 							<div className="flex flex-col items-center gap-[30px]">
 								<button
 									type="button"
-									title="Создать новый проект"
+									title={t('sidebar.newProject')}
 									onClick={() => setActiveModal('createProject')}
 									className="group w-7 h-7 flex items-center justify-center shrink-0"
 								>
@@ -3629,7 +3650,7 @@ ${changesText}
 
 								<button
 									type="button"
-									title="Открыть проект"
+									title={t('sidebar.openProject')}
 									onClick={() => void handleOpenProjectDialog()}
 									className="group w-7 h-7 flex items-center justify-center shrink-0"
 								>
@@ -3642,7 +3663,7 @@ ${changesText}
 
 								<button
 									type="button"
-									title="Сохранить проект"
+									title={t('sidebar.saveProject')}
 									onClick={() => void handleSaveProject()}
 									disabled={!currentProject}
 									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
@@ -3671,7 +3692,7 @@ ${changesText}
 							<button
 								type="button"
 								onClick={openWizard}
-								title="Пошаговый мастер"
+								title={t('sidebar.wizard')}
 								className={`group relative z-[1] h-[48px] w-[48px] shrink-0 rounded-full flex items-center justify-center transition-colors ${
 									shouldHighlightWizardCta
 										? 'bg-primary-hover shadow-[0_0_28px_rgba(255,255,255,0.45),0_0_56px_rgba(255,255,255,0.22)]'
@@ -3690,7 +3711,7 @@ ${changesText}
 							<div className="flex flex-col items-center gap-[30px]">
 								<button
 									type="button"
-									title="Экспорт"
+									title={t('sidebar.export')}
 									onClick={() => setActiveModal('export')}
 									className="group w-7 h-7 flex items-center justify-center shrink-0"
 								>
@@ -3703,7 +3724,7 @@ ${changesText}
 
 								<button
 									type="button"
-									title="Глоссарий"
+									title={t('sidebar.glossary')}
 									onClick={() => setActiveModal('glossary')}
 									className="group w-7 h-7 flex items-center justify-center shrink-0"
 								>
@@ -3714,7 +3735,7 @@ ${changesText}
 									/>
 								</button>
 
-								<button type="button" title="Поиск" className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<button type="button" title={t('sidebar.search')} className="group w-7 h-7 flex items-center justify-center shrink-0">
 									<span
 										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
 										style={sidebarIconMaskStyle(iconSearch)}
@@ -3735,13 +3756,13 @@ ${changesText}
 					{/* Заголовок */}
 					<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
 						<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
-							{currentProject?.name ?? 'No project'}
+							{currentProject?.name ?? t('app.noProject')}
 						</span>
 						
 						<div className="flex items-center gap-[12px] shrink-0">
 							<button
 								type="button"
-								title="Новый файл"
+								title={t('projectTree.newFile')}
 								onClick={handleProjectTreeNewFile}
 								disabled={!currentProject}
 								className="group w-4 h-4 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
@@ -3755,7 +3776,7 @@ ${changesText}
 
 							<button
 								type="button"
-								title="Новая папка"
+								title={t('projectTree.newFolder')}
 								onClick={handleProjectTreeNewFolder}
 								disabled={!currentProject}
 								className="group w-4 h-4 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
@@ -3988,13 +4009,13 @@ ${changesText}
 					{/* Заголовок */}
 					<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
 						<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
-							AI-agent
+							{t('aiAgent.title')}
 						</span>
 						
 						<div className="flex items-center gap-[12px] shrink-0">
 							<button
 								type="button"
-								title="Добавить"
+								title={t('aiAgent.add')}
 								onClick={handleAiAgentAdd}
 								className="group w-4 h-4 flex items-center justify-center shrink-0"
 							>
@@ -4007,7 +4028,7 @@ ${changesText}
 
 							<button
 								type="button"
-								title="Ещё"
+								title={t('aiAgent.more')}
 								onClick={handleAiAgentMore}
 								className="group w-4 h-4 flex items-center justify-center shrink-0"
 							>
@@ -4027,7 +4048,7 @@ ${changesText}
 					>
 						{chatMessages.length === 0 && !isAgentBusy && (
 							<div className="m-auto text-center text-caption font-inter text-text-primary/50 px-4">
-								Задайте вопрос агенту или попросите изменить реплики
+								{t('aiAgent.emptyHint')}
 							</div>
 						)}
 
@@ -4051,7 +4072,7 @@ ${changesText}
 													<div className="flex flex-col gap-[4px]">
 														<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
 															<span className="text-caption text-text-primary font-inter break-words">
-																{msg.attachedSegment.translation || 'Без перевода'}
+																{msg.attachedSegment.translation || t('aiAgent.noTranslation')}
 															</span>
 														</div>
 														<div className="min-h-[22px] bg-panel-header rounded-[2px] p-[4px] flex items-center">
@@ -4090,7 +4111,7 @@ ${changesText}
 												<div className="flex items-center justify-between gap-2">
 													<button
 														type="button"
-														title={expanded ? 'Свернуть' : 'Развернуть'}
+														title={expanded ? t('aiAgent.collapse') : t('aiAgent.expand')}
 														aria-expanded={expanded}
 														onClick={() => toggleDiffExpanded(msg.id)}
 														className="group flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-primary transition-colors hover:bg-text-primary/15"
@@ -4109,25 +4130,25 @@ ${changesText}
 																	onClick={() => handleUndoEdits(msg.id)}
 																	className="text-caption font-inter text-text-secondary px-[8px] py-[2px] rounded-[6px] transition-all duration-150 hover:bg-inline-error hover:text-text-primary active:scale-90 active:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inline-error/60"
 																>
-																	Undo
+																	{t('aiAgent.undo')}
 																</button>
 																<button
 																	type="button"
 																	onClick={() => handleKeepEdits(msg.id)}
 																	className="text-caption font-inter text-text-secondary px-[8px] py-[2px] rounded-[6px] transition-all duration-150 hover:bg-inline-success hover:text-text-primary active:scale-90 active:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inline-success/60"
 																>
-																	Keep
+																	{t('aiAgent.keep')}
 																</button>
 															</>
 														)}
 														{msg.editStatus === 'kept' && (
 															<span className="text-caption font-inter text-text-primary/60">
-																Kept
+																{t('aiAgent.kept')}
 															</span>
 														)}
 														{msg.editStatus === 'reverted' && (
 															<span className="text-caption font-inter text-text-primary/60">
-																Reverted
+																{t('aiAgent.reverted')}
 															</span>
 														)}
 													</div>
@@ -4136,7 +4157,7 @@ ${changesText}
 												{!expanded && (
 													<p className="text-caption font-inter text-text-primary/70">
 														{msg.edits.length}{' '}
-														{msg.edits.length === 1 ? 'change' : 'changes'}
+														{msg.edits.length === 1 ? t('aiAgent.change') : t('aiAgent.changes')}
 													</p>
 												)}
 
@@ -4178,7 +4199,7 @@ ${changesText}
 							<div className="self-start max-w-[95%]">
 								<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px]">
 									<p className="text-body-reg text-text-primary/60 font-inter leading-tight">
-										Агент думает...
+										{t('aiAgent.thinking')}
 									</p>
 								</div>
 							</div>
@@ -4198,17 +4219,17 @@ ${changesText}
 										<div className="flex-1 h-[1px] bg-border-default" />
 										<button
 											type="button"
-											title="Убрать реплику"
+											title={t('aiAgent.removeAttachment')}
 											onClick={() => setPendingAttachedSegment(null)}
 											className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors"
 										>
-											Remove
+											{t('aiAgent.remove')}
 										</button>
 									</div>
 									<div className="flex flex-col gap-[4px]">
 										<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
 											<span className="text-caption text-text-primary font-inter break-words">
-												{pendingAttachedSegment.translation || 'Без перевода'}
+												{pendingAttachedSegment.translation || t('aiAgent.noTranslation')}
 											</span>
 										</div>
 										<div className="min-h-[22px] bg-panel-header rounded-[2px] p-[4px] flex items-center">
@@ -4226,7 +4247,7 @@ ${changesText}
 								onChange={(e) => setChatInput(e.target.value)}
 								onKeyDown={handleChatInputKeyDown}
 								disabled={isAgentBusy}
-								placeholder="Помоги, пожалуйста, перевести..."
+								placeholder={t('aiAgent.placeholder')}
 								className="w-full h-full p-3 pr-[56px] bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto no-scrollbar disabled:opacity-60"
 								rows={3}
 							/>
@@ -4234,7 +4255,7 @@ ${changesText}
 							<div className="absolute right-3 bottom-3">
 								<button
 									type="button"
-									title="Send message"
+									title={t('aiAgent.sendMessage')}
 									onClick={() => void handleSendChatMessage()}
 									disabled={isAgentBusy || chatInput.trim().length === 0}
 									className="group/send flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-0 bg-secondary-hover p-0 outline-none transition-colors hover:bg-primary-main focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-50"
@@ -4288,7 +4309,7 @@ ${changesText}
 									</colgroup>
 										<thead className="sticky top-0 bg-surface-secondary z-20">
 											<tr className="h-[25px]">
-												{['#', 'Start time', 'End time', 'Duration'].map((label, idx) => (
+												{['#', t('table.startTime'), t('table.endTime'), t('table.duration')].map((label, idx) => (
 													<th 
 														key={idx} 
 														style={{ width: `${colWidths[idx]}px` }}
@@ -4302,10 +4323,10 @@ ${changesText}
 													</th>
 												))}
 												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
-													<div className="truncate w-full">Translation</div>
+													<div className="truncate w-full">{t('table.translation')}</div>
 												</th>
 												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
-													<div className="truncate w-full">Original text</div>
+													<div className="truncate w-full">{t('table.originalText')}</div>
 												</th>
 											</tr>
 										</thead>
@@ -4362,7 +4383,7 @@ ${changesText}
 									{/* Инпуты в один ряд */}
 									<div className="flex gap-[4px]">
 										<div className="flex flex-col gap-[4px]">
-											<label className="text-caption text-text-primary">Start time</label>
+											<label className="text-caption text-text-primary">{t('table.startTime')}</label>
 											<input 
 												type="text"
 												inputMode="text"
@@ -4381,7 +4402,7 @@ ${changesText}
 											/>
 										</div>
 										<div className="flex flex-col gap-[4px]">
-											<label className="text-caption text-text-primary">Duration</label>
+											<label className="text-caption text-text-primary">{t('table.duration')}</label>
 											<input 
 												type="text"
 												inputMode="decimal"
@@ -4410,7 +4431,7 @@ ${changesText}
 												onClick={() => selectSegmentAndSeek((i) => Math.max(0, i - 1))}
 												className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
 											>
-												&lt; Prev
+												{t('table.prev')}
 											</button>
 											<button
 												type="button"
@@ -4422,7 +4443,7 @@ ${changesText}
 												}
 												className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
 											>
-												Next &gt;
+												{t('table.next')}
 											</button>
 										</div>
 										<button
@@ -4431,18 +4452,18 @@ ${changesText}
 											disabled={selectedSegmentIndex < 0 || !generatedSegments[selectedSegmentIndex]}
 											className="w-full h-[24px] py-[4px] bg-primary-main hover:bg-primary-hover disabled:opacity-40 text-white text-caption rounded-sm transition-colors"
 										>
-											Ask agent
+											{t('table.askAgent')}
 										</button>
 									</div>
 								</div>
 
 								{/* Колонна 2 Translation */}
 								<div className="flex-1 flex flex-col gap-[4px] min-w-0 ml-[12px]">
-									<label className="text-caption text-text-primary">Translation</label>
+									<label className="text-caption text-text-primary">{t('table.translation')}</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
-											placeholder="Translation..."
+											placeholder={t('table.translationPlaceholder')}
 											value={segEditorTranslation}
 											onChange={(e) => setSegEditorTranslation(e.target.value)}
 											onBlur={() => {
@@ -4456,10 +4477,10 @@ ${changesText}
 									{/* Вертикальная статистика */}
 									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
 										<span className="truncate">
-											Total length: {segEditorTranslation.length}
+											{t('table.totalLength')}: {segEditorTranslation.length}
 										</span>
 										<span className="truncate">
-											Chars/sec:{' '}
+											{t('table.charsPerSec')}:{' '}
 											{(() => {
 												const d = parseFloat(segEditorDuration.replace(',', '.'));
 												return Number.isFinite(d) && d > 0
@@ -4472,11 +4493,11 @@ ${changesText}
 
 								{/* Колонна 3 Original Text */}
 								<div className="flex-1 flex flex-col gap-[4px] min-w-0">
-									<label className="text-caption text-text-primary">Original text</label>
+									<label className="text-caption text-text-primary">{t('table.originalText')}</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
-											placeholder="Original text..."
+											placeholder={t('table.originalPlaceholder')}
 											value={segEditorOriginal}
 											onChange={(e) => setSegEditorOriginal(e.target.value)}
 											onBlur={() => {
@@ -4488,10 +4509,10 @@ ${changesText}
 									{/* Вертикальная статистика */}
 									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
 										<span className="truncate">
-											Total length: {segEditorOriginal.length}
+											{t('table.totalLength')}: {segEditorOriginal.length}
 										</span>
 										<span className="truncate">
-											Chars/sec:{' '}
+											{t('table.charsPerSec')}:{' '}
 											{(() => {
 												const d = parseFloat(segEditorDuration.replace(',', '.'));
 												return Number.isFinite(d) && d > 0
@@ -4553,7 +4574,7 @@ ${changesText}
 											/>
 										) : (
 											<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
-												Video Preview
+												{t('video.preview')}
 											</div>
 										)}
 										<div className="absolute bottom-12 z-10 w-full text-center px-10 pointer-events-none">
@@ -4586,8 +4607,8 @@ ${changesText}
 												<div className="flex items-center gap-[12px] shrink-0 min-w-0">
 														<button
 															type="button"
-															title={isVideoPlaying ? 'Пауза' : 'Воспроизведение'}
-															aria-label={isVideoPlaying ? 'Пауза' : 'Воспроизведение'}
+															title={isVideoPlaying ? t('video.pause') : t('video.play')}
+															aria-label={isVideoPlaying ? t('video.pause') : t('video.play')}
 															disabled={!videoSrc}
 															className={`group/vplay ${VIDEO_CTRL_BTN_CLASS}`}
 															onClick={() => {
@@ -4607,8 +4628,8 @@ ${changesText}
 														</button>
 														<button
 															type="button"
-															title="Стоп"
-															aria-label="Стоп"
+															title={t('video.stop')}
+															aria-label={t('video.stop')}
 															disabled={!videoSrc}
 															className={`group/vstop ${VIDEO_CTRL_BTN_CLASS}`}
 															onClick={() => {
@@ -4629,13 +4650,13 @@ ${changesText}
 															type="button"
 															title={
 																videoMuted || volume < 1e-4
-																	? 'Включить звук'
-																	: 'Выключить звук'
+																	? t('video.unmute')
+																	: t('video.mute')
 															}
 															aria-label={
 																videoMuted || volume < 1e-4
-																	? 'Включить звук'
-																	: 'Выключить звук'
+																	? t('video.unmute')
+																	: t('video.mute')
 															}
 															disabled={!videoSrc}
 															className={`group/vvol ${VIDEO_CTRL_BTN_CLASS}`}
@@ -4729,50 +4750,49 @@ ${changesText}
 									disabled={!currentProject || !activeSubtitleFileId || selectedSegmentIds.size > 0}
 									title={
 										selectedSegmentIds.size > 0
-											? 'Insert недоступен, пока выделены существующие субтитры'
+											? t('timeline.insertBlockedSelection')
 											: timelineInsertRange
-												? `Insert empty subtitle ${timelineInsertRange.start.toFixed(2)}s – ${timelineInsertRange.end.toFixed(2)}s (or clear with Esc)`
-												: 'Insert empty subtitle at playhead (default 1s), or drag on the timeline to set range'
+												? t('timeline.insertRange', {
+														start: timelineInsertRange.start.toFixed(2),
+														end: timelineInsertRange.end.toFixed(2)
+													})
+												: t('timeline.insertPlayhead')
 									}
 									onClick={() => void handleTimelineInsert()}
-									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+									className={`h-[24px] ${timelineBtnPx} py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center`}
 								>
-									Insert
+									{t('timeline.insert')}
 								</button>
 								<button
 									type="button"
 									disabled={selectedSegmentIndex < 0 || selectedSegmentIds.size > 0}
 									title={
-										selectedSegmentIds.size > 0
-											? 'Set start недоступен при выделении области на таймлайне'
-											: undefined
+										selectedSegmentIds.size > 0 ? t('timeline.setStartBlocked') : undefined
 									}
 									onClick={() => handleTimelineSetStart()}
-									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+									className={`h-[24px] ${timelineBtnPx} py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center`}
 								>
-									Set start
+									{t('timeline.setStart')}
 								</button>
 								<button
 									type="button"
 									disabled={selectedSegmentIndex < 0 || selectedSegmentIds.size > 0}
 									title={
-										selectedSegmentIds.size > 0
-											? 'Set end недоступен при выделении области на таймлайне'
-											: undefined
+										selectedSegmentIds.size > 0 ? t('timeline.setEndBlocked') : undefined
 									}
 									onClick={() => handleTimelineSetEnd()}
-									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+									className={`h-[24px] ${timelineBtnPx} py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center`}
 								>
-									Set end
+									{t('timeline.setEnd')}
 								</button>
 								<button
 									type="button"
 									disabled={!currentProject || !activeSubtitleFileId || !canSplitAtPlayhead}
-									title="Split selected subtitle at the playhead (both parts keep the same text)"
+									title={t('timeline.splitTitle')}
 									onClick={() => void handleTimelineSplit()}
-									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+									className={`h-[24px] ${timelineBtnPx} py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center`}
 								>
-									Split
+									{t('timeline.split')}
 								</button>
 							</div>
 
@@ -4939,8 +4959,8 @@ ${changesText}
 									<div className="flex items-center gap-3">
 										<button
 											type="button"
-											title="Уменьшить масштаб"
-											aria-label="Уменьшить масштаб"
+											title={t('timeline.zoomOut')}
+											aria-label={t('timeline.zoomOut')}
 											className={`group/tzoomout ${TIMELINE_ZOOM_BTN_CLASS}`}
 											onClick={() =>
 												setTimelineZoomPercent((z) => stepTimelineZoom(z, -1))
@@ -4959,8 +4979,8 @@ ${changesText}
 											min={TIMELINE_ZOOM_SLIDER_MIN}
 											max={TIMELINE_ZOOM_SLIDER_MAX}
 											step={1}
-											aria-label="Масштаб таймлайна"
-											title="Плавный зум таймлайна"
+											aria-label={t('timeline.zoomSmooth')}
+											title={t('timeline.zoomSmooth')}
 											className="timeline-zoom-slider h-[22px] w-[160px] cursor-pointer"
 											style={
 												{
@@ -4976,8 +4996,8 @@ ${changesText}
 
 										<button
 											type="button"
-											title="Увеличить масштаб"
-											aria-label="Увеличить масштаб"
+											title={t('timeline.zoomIn')}
+											aria-label={t('timeline.zoomIn')}
 											className={`group/tzoomin ${TIMELINE_ZOOM_BTN_CLASS}`}
 											onClick={() =>
 												setTimelineZoomPercent((z) => stepTimelineZoom(z, 1))
@@ -5116,10 +5136,10 @@ ${changesText}
 									if ((segmentsRef.current ?? []).length === 0) return;
 
 									void (async () => {
-										const confirmed = await ask(
-											'Хотите, чтобы агент обновил перевод по изменениям глоссария?',
-											{ title: 'Update subtitles', kind: 'info' }
-										);
+										const confirmed = await ask(t('dialog.glossaryUpdateConfirm'), {
+											title: t('dialog.glossaryUpdateTitle'),
+											kind: 'info'
+										});
 										if (!confirmed) return;
 										await applyGlossaryReplacementToSubtitles(changes);
 									})();
@@ -5130,6 +5150,14 @@ ${changesText}
 
 						{activeModal === 'export' && (
 							<ExportModal onClose={() => setActiveModal(null)} />
+						)}
+
+						{activeModal === 'settings' && (
+							<SettingsModal
+								onClose={() => setActiveModal(null)}
+								isDarkTheme={isDarkTheme}
+								onDarkThemeChange={setIsDarkTheme}
+							/>
 						)}
 
 
@@ -5146,9 +5174,10 @@ ${changesText}
 				const canRetranscribe = hasRange && Boolean(activeVideoAbsolutePath);
 				const selectedCount = selectedSegmentIds.size;
 				const canDelete = Boolean(activeSubtitleFileId) && (selectedCount > 0 || selectedSegmentIndex >= 0);
-				const deleteLabel = selectedCount > 1
-					? `Delete (${selectedCount})`
-					: 'Delete';
+				const deleteLabel =
+					selectedCount > 1
+						? t('timeline.deleteCount', { count: selectedCount })
+						: t('timeline.delete');
 				return (
 					<>
 						<div
@@ -5173,13 +5202,13 @@ ${changesText}
 								className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
 								title={
 									!hasRange
-										? 'Выделите диапазон на таймлайне (зажмите ЛКМ и протяните)'
+										? t('timeline.retranscribeSelectRange')
 										: !activeVideoAbsolutePath
-											? 'Нет видео для извлечения аудио'
-											: 'Whisper + GPT-постпроцессинг + перевод по выделенному отрезку'
+											? t('timeline.retranscribeNoVideo')
+											: t('timeline.retranscribeHint')
 								}
 							>
-								Retranscribe range
+								{t('timeline.retranscribeRange')}
 							</button>
 							<button
 								type="button"
@@ -5192,10 +5221,10 @@ ${changesText}
 								className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
 								title={
 									!canDelete
-										? 'Выделите субтитр(ы) на таймлайне'
+										? t('timeline.deleteSelectSubtitle')
 										: selectedCount > 0
-											? 'Удалить выделенные субтитры (Delete)'
-											: 'Удалить выбранный субтитр (Delete)'
+											? t('timeline.deleteSelectedPlural')
+											: t('timeline.deleteSelectedSingle')
 								}
 							>
 								{deleteLabel}
@@ -5227,7 +5256,7 @@ ${changesText}
 							}}
 							className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover"
 						>
-							Delete
+							{t('timeline.delete')}
 						</button>
 					</div>
 				</>
@@ -5251,15 +5280,15 @@ ${changesText}
 						<div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
 							<div className="flex flex-col pt-0">
 								<h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
-									Retranscribe
+									{t('retranscribe.title')}
 								</h1>
 								<p className="text-body-reg text-text-secondary">
-									You can select the source language and write a hint prompt to help improve the re-transcription.
+									{t('retranscribe.desc')}
 								</p>
 							</div>
 							<div className="flex flex-col gap-[12px] h-full">
 								<div className="flex flex-col gap-[8px]">
-									<label className="text-caption text-text-primary">Source language</label>
+									<label className="text-caption text-text-primary">{t('retranscribe.sourceLanguage')}</label>
 									<select
 										value={retranscribeLanguage}
 										onChange={(e) => setRetranscribeLanguage(e.target.value)}
@@ -5271,12 +5300,12 @@ ${changesText}
 									</select>
 								</div>
 								<div className="flex-1 flex flex-col gap-[8px] min-h-0">
-									<label className="text-caption text-text-primary">Prompt</label>
+									<label className="text-caption text-text-primary">{t('retranscribe.prompt')}</label>
 									<textarea
 										value={retranscribePrompt}
 										onChange={(e) => setRetranscribePrompt(e.target.value)}
 										className="flex-1 min-h-0 w-full p-4 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary resize-none overflow-y-auto subtitle-table-scroll focus:outline-none focus:border-text-primary transition-colors placeholder:text-text-secondary/50"
-										placeholder="Bloom, Stella, Mike, Magix, Alfea..."
+										placeholder={t('retranscribe.promptPlaceholder')}
 									/>
 								</div>
 							</div>
@@ -5288,7 +5317,7 @@ ${changesText}
 								onClick={() => setRetranscribeSetup(null)}
 								className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover text-text-primary text-body-reg rounded-[5px] transition-colors"
 							>
-								Cancel
+								{t('retranscribe.cancel')}
 							</button>
 							<button
 								type="button"
@@ -5302,7 +5331,7 @@ ${changesText}
 								}}
 								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
 							>
-								Retranscribe
+								{t('retranscribe.retranscribe')}
 							</button>
 						</div>
 					</div>
@@ -5315,13 +5344,13 @@ ${changesText}
 						<div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
 							<div className="flex flex-col pt-0">
 								<h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
-									AI is working!
+									{t('retranscribe.working')}
 								</h1>
 								<p className="text-body-reg text-text-secondary">
-									{retranscribeBusy.stage === 'audio' && 'Извлекаем аудио из выделенного диапазона...'}
-									{retranscribeBusy.stage === 'transcribe' && 'Распознаём речь...'}
-									{retranscribeBusy.stage === 'translate' && 'Переводим...'}
-									{retranscribeBusy.stage === 'apply' && 'Заменяем субтитры в выделенной области...'}
+									{retranscribeBusy.stage === 'audio' && t('retranscribe.stageAudio')}
+									{retranscribeBusy.stage === 'transcribe' && t('retranscribe.stageTranscribe')}
+									{retranscribeBusy.stage === 'translate' && t('retranscribe.stageTranslate')}
+									{retranscribeBusy.stage === 'apply' && t('retranscribe.stageApply')}
 								</p>
 							</div>
 							<div className="flex items-center justify-center h-full">
@@ -5335,7 +5364,7 @@ ${changesText}
 			{retranscribeError && (
 				<div className="fixed inset-0 flex items-center justify-center z-[10600] pointer-events-none">
 					<div className="pointer-events-auto w-[480px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-6 flex flex-col gap-4 select-none">
-						<h2 className="text-[18px] font-semibold text-text-primary">Ошибка ретранскрипции</h2>
+						<h2 className="text-[18px] font-semibold text-text-primary">{t('retranscribe.errorTitle')}</h2>
 						<p className="text-body-reg text-text-secondary whitespace-pre-wrap break-words">
 							{retranscribeError}
 						</p>
@@ -5345,7 +5374,7 @@ ${changesText}
 								onClick={() => setRetranscribeError(null)}
 								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors"
 							>
-								OK
+								{t('retranscribe.ok')}
 							</button>
 						</div>
 					</div>
