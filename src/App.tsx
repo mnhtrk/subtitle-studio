@@ -48,7 +48,6 @@ import iconVolumeMute from './assets/icons/volume-mute.svg';
 import iconZoomIn from './assets/icons/zoom-in.svg';
 import iconZoomOut from './assets/icons/zoom-out.svg';
 
-/** SVG как CSS-mask: цвет задаётся фоном (text-primary / white), тема переключается автоматически. */
 function sidebarIconMaskStyle(src: string): React.CSSProperties {
 	return {
 		maskImage: `url(${src})`,
@@ -66,7 +65,6 @@ const SIDEBAR_ICON_CLASS =
 const PANEL_HEADER_ICON_CLASS =
 	'pointer-events-none inline-block h-4 w-4 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
 
-/** Видеоплеер 24×24, именованные group/* чтобы не цеплять чужие group-hover */
 const VIDEO_CTRL_BTN_CLASS =
 	'flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-40';
 
@@ -79,7 +77,6 @@ const VIDEO_CTRL_ICON_STOP =
 const VIDEO_CTRL_ICON_VOL =
 	'pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/vvol:scale-110 group-active/vvol:scale-[0.92]';
 
-/** Таймлайн zoom 22×22, без фона при hover */
 const TIMELINE_ZOOM_BTN_CLASS =
 	'flex h-[22px] w-[22px] shrink-0 items-center justify-center border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40';
 
