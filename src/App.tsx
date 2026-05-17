@@ -538,6 +538,9 @@ export default function App() {
 		| null
 	>(null);
 	const [findHighlight, setFindHighlight] = useState<FindMatch | null>(null);
+	const [glossaryAgentPrompt, setGlossaryAgentPrompt] = useState<GlossaryReplacementChange[] | null>(
+		null
+	);
 	const [currentProject, setCurrentProject] = useState<ProjectData | null>(null);
 	const [generatedSegments, setGeneratedSegments] = useState<SubtitleSegment[]>([]);
 	const [activeSubtitleFileId, setActiveSubtitleFileId] = useState<string | null>(null);
@@ -5098,13 +5101,9 @@ ${changesText}
 				<div className="fixed inset-0 z-[50] bg-black/55 pointer-events-none" />
 			)}
 
-			{/* POPUPS LAYER */}
+			{/* POPUPS LAYER — каждая модалка сама задаёт z-index и pointer-events */}
 			{activeModal && (
-				<div className="fixed inset-0 z-[999] flex items-center justify-center pointer-events-none">
-					
-					{/* Контейнер конкретного окна */}
-					<div className="pointer-events-auto">
-						
+				<>
 						{activeModal === 'welcome' && (
 							<WelcomeModal 
 								onClose={() => setActiveModal(null)} 
@@ -5199,17 +5198,12 @@ ${changesText}
 
 									if (changes.length === 0) return;
 									if ((segmentsRef.current ?? []).length === 0) return;
-
-									void (async () => {
-										const confirmed = await ask(t('dialog.glossaryUpdateConfirm'), {
-											title: t('dialog.glossaryUpdateTitle'),
-											kind: 'info'
-										});
-										if (!confirmed) return;
-										await applyGlossaryReplacementToSubtitles(changes);
-									})();
+									setGlossaryAgentPrompt(changes);
 								}}
-								onClose={() => setActiveModal(null)}
+								onClose={() => {
+									setGlossaryAgentPrompt(null);
+									setActiveModal(null);
+								}}
 							/>
 						)}
 
@@ -5249,11 +5243,36 @@ ${changesText}
 								onSegmentsChange={applyFindReplaceSegments}
 							/>
 						)}
+				</>
+			)}
 
-
-
-						
-
+			{glossaryAgentPrompt && (
+				<div className="fixed inset-0 z-[10001] flex items-center justify-center pointer-events-none">
+					<div className="pointer-events-auto w-[420px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+						<h2 className="text-[18px] font-semibold text-text-primary mb-2">
+							{t('dialog.glossaryUpdateTitle')}
+						</h2>
+						<p className="text-body-reg text-text-secondary mb-8">{t('dialog.glossaryUpdateConfirm')}</p>
+						<div className="flex justify-end gap-3">
+							<button
+								type="button"
+								onClick={() => setGlossaryAgentPrompt(null)}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover text-text-primary text-body-reg rounded-[5px] transition-colors"
+							>
+								{t('findReplace.cancel')}
+							</button>
+							<button
+								type="button"
+								onClick={() => {
+									const changes = glossaryAgentPrompt;
+									setGlossaryAgentPrompt(null);
+									void applyGlossaryReplacementToSubtitles(changes);
+								}}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
+							>
+								{t('findReplace.replace')}
+							</button>
+						</div>
 					</div>
 				</div>
 			)}

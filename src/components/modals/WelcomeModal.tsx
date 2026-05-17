@@ -42,10 +42,10 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ onClose, onNewProjec
 	return (
     <DraggableModalShell
       width={780}
-      className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col gap-[24px] select-none"
+      className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
     >
-
-        <div className="flex justify-end gap-[16px]">
+      <div className="flex flex-col gap-[24px] flex-1 min-h-0 h-full w-full">
+        <div className="flex justify-end gap-[16px] shrink-0">
           <button onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
@@ -110,6 +110,7 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ onClose, onNewProjec
 						</button>
           </div>
         </div>
+      </div>
     </DraggableModalShell>
   );
 };

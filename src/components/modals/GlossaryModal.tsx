@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { GlossaryEntry } from '../../services/projectService';
+import { GlossaryEntry, projectService } from '../../services/projectService';
 import { useI18n } from '../../i18n';
-import { DraggableModalShell } from './DraggableModalShell';
 
 interface GlossaryRow {
   entryId?: string;
@@ -92,6 +91,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
   const [rows, setRows] = useState<GlossaryRow[]>(() => entriesToRows(initialEntries));
   const [saveError, setSaveError] = useState<string | null>(null);
   const [loadedEntries, setLoadedEntries] = useState<GlossaryEntry[]>(initialEntries);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setRows(entriesToRows(initialEntries));
@@ -110,9 +110,10 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
     setRows(newRows);
   };
 
-  const handleSave = () => {
-    if (!projectPath) return;
+  const handleSave = async () => {
+    if (!projectPath || saving) return;
     setSaveError(null);
+    setSaving(true);
     try {
       const entries: GlossaryEntry[] = rows
         .filter((r) => r.original.trim().length > 0)
@@ -124,25 +125,26 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
           context: r.context.trim() || null
         }));
       const changes = collectReplacementChanges(loadedEntries, entries);
+      await projectService.updateGlossary(projectPath, entries);
       onSaved?.(entries, changes);
       setLoadedEntries(entries);
       setRows(entriesToRows(entries));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setSaveError(msg);
+    } finally {
+      setSaving(false);
     }
   };
 
-  const canSave = Boolean(projectPath);
+  const canSave = Boolean(projectPath) && !saving;
 
   return (
-    <DraggableModalShell
-      width={840}
-      className="h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
-    >
-        <div className="flex justify-end h-5 mb-2">
-          <div className="flex items-center gap-2">
+    <div className="fixed inset-0 z-[10000] flex items-center justify-center pointer-events-none">
+      <div className="pointer-events-auto w-[840px] h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col overflow-hidden select-none">
+        <div className="shrink-0 flex justify-end h-5 mb-2">
             <button
+              type="button"
               onClick={onClose}
               className="text-text-secondary hover:opacity-70 transition-opacity"
             >
@@ -150,10 +152,9 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
                 <path d="M18 6L6 18M6 6l12 12" />
               </svg>
             </button>
-          </div>
         </div>
 
-        <div className="flex flex-col mb-8">
+        <div className="shrink-0 flex flex-col mb-4">
           <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[32px] text-text-primary mb-2">
             {t('glossary.title')}
           </h1>
@@ -171,7 +172,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden border border-border-default rounded-[8px] bg-secondary-main">
           <div className="flex-1 overflow-y-auto subtitle-table-scroll no-scrollbar">
             <table className="w-full border-collapse table-fixed">
-              <thead className="sticky top-0 bg-secondary-main z-20">
+              <thead className="sticky top-0 bg-secondary-main z-10">
                 <tr className="h-[40px] border-b border-border-default">
                   <th className="px-4 text-left text-[14px] font-bold leading-[18px] text-text-primary border-r border-border-default w-[30%]">
                     {t('glossary.original')}
@@ -224,7 +225,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
           </div>
         </div>
 
-        <div className="flex justify-end mt-8">
+        <div className="shrink-0 flex justify-end pt-6">
           <button
             type="button"
             onClick={() => void handleSave()}
@@ -234,6 +235,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
             {t('glossary.saveChanges')}
           </button>
         </div>
-    </DraggableModalShell>
+      </div>
+    </div>
   );
 };
