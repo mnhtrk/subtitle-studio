@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { projectService } from '../../services/projectService';
 import { useI18n } from '../../i18n';
+import { DraggableModalShell } from './DraggableModalShell';
 
 const languageOptions = [
   'English',
@@ -100,9 +101,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
 	
 	
 	return (
-    <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-      <div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
-        
+    <DraggableModalShell
+      width={780}
+      className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
+    >
         {/* Хедер модалки с крестиком */}
         <div className="flex justify-end h-5"> 
           <button onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
@@ -188,7 +190,6 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
 
           </div>
         </div>
-      </div>
-    </div>
+    </DraggableModalShell>
   );
 };

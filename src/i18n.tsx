@@ -227,6 +227,19 @@ const enMessages = {
 		successDesc: '{count} file(s) saved to:\n{folder}',
 		successOk: 'OK'
 	},
+	findReplace: {
+		whatToFind: 'What to find:',
+		replaceWith: 'Replace with:',
+		placeholder: 'Your text',
+		replacePlaceholder: 'Your text',
+		normal: 'Normal',
+		caseSensitive: 'Case sensitive',
+		find: 'Find',
+		replace: 'Replace',
+		replaceAll: 'Replace all',
+		confirmReplaceAll: 'Found {count} occurrence(s). Replace all?',
+		cancel: 'Cancel'
+	},
 	glossary: {
 		title: 'Glossary',
 		desc: 'Define how the AI agent should translate specific names or terms.',
@@ -496,6 +509,19 @@ const ruMessages: Messages = {
 		successTitle: 'Экспорт завершён',
 		successDesc: 'Сохранено файлов: {count}\nПапка: {folder}',
 		successOk: 'OK'
+	},
+	findReplace: {
+		whatToFind: 'Что искать:',
+		replaceWith: 'Заменить на:',
+		placeholder: 'Ваш текст',
+		replacePlaceholder: 'Ваш текст',
+		normal: 'Обычный',
+		caseSensitive: 'С учётом регистра',
+		find: 'Найти',
+		replace: 'Заменить',
+		replaceAll: 'Заменить всё',
+		confirmReplaceAll: 'Найдено: {count}. Заменить все вхождения?',
+		cancel: 'Отмена'
 	},
 	glossary: {
 		title: 'Глоссарий',

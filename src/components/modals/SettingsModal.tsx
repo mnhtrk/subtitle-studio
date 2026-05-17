@@ -1,5 +1,6 @@
 import React from 'react';
 import { useI18n, type Locale } from '../../i18n';
+import { DraggableModalShell } from './DraggableModalShell';
 
 interface SettingsModalProps {
 	onClose: () => void;
@@ -22,8 +23,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 		}`;
 
 	return (
-		<div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-			<div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+		<DraggableModalShell
+			width={780}
+			className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
+		>
 				<div className="flex justify-end h-5 mb-2">
 					<button
 						type="button"
@@ -69,7 +72,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 						</button>
 					</div>
 				</div>
-			</div>
-		</div>
+		</DraggableModalShell>
 	);
 };

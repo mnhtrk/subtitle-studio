@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { GlossaryEntry } from '../../services/projectService';
 import { useI18n } from '../../i18n';
+import { DraggableModalShell } from './DraggableModalShell';
 
 interface GlossaryRow {
   entryId?: string;
@@ -135,8 +136,10 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
   const canSave = Boolean(projectPath);
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-      <div className="pointer-events-auto w-[840px] h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+    <DraggableModalShell
+      width={840}
+      className="h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
+    >
         <div className="flex justify-end h-5 mb-2">
           <div className="flex items-center gap-2">
             <button
@@ -231,7 +234,6 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
             {t('glossary.saveChanges')}
           </button>
         </div>
-      </div>
-    </div>
+    </DraggableModalShell>
   );
 };

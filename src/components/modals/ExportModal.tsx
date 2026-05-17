@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { open, message } from '@tauri-apps/plugin-dialog';
 import { useI18n } from '../../i18n';
 import { projectService, type ProjectFile } from '../../services/projectService';
+import { DraggableModalShell } from './DraggableModalShell';
 
 const EXPORT_FORMATS = ['srt', 'ass', 'vtt', 'txt', 'pdf'] as const;
 type ExportFormat = (typeof EXPORT_FORMATS)[number];
@@ -146,8 +147,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   if (exportSuccess) {
     return (
-      <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-        <div className="pointer-events-auto w-[480px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+      <DraggableModalShell
+        width={480}
+        className="bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
+      >
           <div className="flex justify-end h-5 mb-2">
             <button type="button" onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -172,15 +175,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               {t('export.successOk')}
             </button>
           </div>
-        </div>
-      </div>
+      </DraggableModalShell>
     );
   }
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-      <div className="pointer-events-auto w-[840px] h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
-        
+    <DraggableModalShell
+      width={840}
+      className="h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
+    >
         {/* РЯД 1 Хедер с кнопкой закрытия */}
         <div className="flex justify-end h-5 mb-2"> 
           <button type="button" onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
@@ -301,7 +304,6 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           </button>
         </div>
 
-      </div>
-    </div>
+    </DraggableModalShell>
   );
 };

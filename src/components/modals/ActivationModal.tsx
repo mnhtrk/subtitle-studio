@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { projectService } from '../../services/projectService';
 import { useI18n } from '../../i18n';
+import { DraggableModalShell } from './DraggableModalShell';
 
 interface ActivationModalProps {
   onActivated: () => void;
@@ -33,13 +34,15 @@ export const ActivationModal: React.FC<ActivationModalProps> = ({ onActivated })
   };
 
   return (
-    <div
-      className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-auto"
-      onMouseDown={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.preventDefault()}
+    <DraggableModalShell
+      width={780}
+      className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
     >
-      <div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
-        <div className="flex flex-col mb-8">
+        <div
+          className="flex flex-col mb-8"
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
           <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[32px] text-text-primary mb-2">
             {t('activation.title')}
           </h1>
@@ -79,7 +82,6 @@ export const ActivationModal: React.FC<ActivationModalProps> = ({ onActivated })
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </DraggableModalShell>
   );
 };

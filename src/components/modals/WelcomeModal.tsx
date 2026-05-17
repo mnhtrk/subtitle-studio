@@ -1,6 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import { projectService, RecentProject } from '../../services/projectService';
 import { useI18n } from '../../i18n';
+import iconNewProject from '../../assets/icons/new-project.svg';
+import iconOpenProject from '../../assets/icons/open-project.svg';
+import { DraggableModalShell } from './DraggableModalShell';
+
+function welcomeIconMaskStyle(src: string): React.CSSProperties {
+	return {
+		maskImage: `url(${src})`,
+		WebkitMaskImage: `url(${src})`,
+		maskSize: 'contain',
+		maskRepeat: 'no-repeat',
+		maskPosition: 'center'
+	};
+}
 
 interface WelcomeModalProps {
   onClose: () => void;
@@ -27,8 +40,10 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ onClose, onNewProjec
   }, []);
 
 	return (
-    <div className="fixed inset-0 flex items-center justify-center z-[9999] pointer-events-none">
-      <div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col gap-[24px] select-none">
+    <DraggableModalShell
+      width={780}
+      className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col gap-[24px] select-none"
+    >
 
         <div className="flex justify-end gap-[16px]">
           <button onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
@@ -36,7 +51,7 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ onClose, onNewProjec
           </button>
         </div>
 
-        <div className="grid grid-cols-2 gap-[32px] flex-1">
+        <div className="grid grid-cols-2 gap-[32px] flex-1 min-h-0">
           <div className="flex flex-col">
             <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">{t('welcome.title')}</h1>
 
@@ -76,18 +91,25 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ onClose, onNewProjec
 							className="flex items-center justify-between px-[32px] py-[12px] rounded-[10px] bg-secondary-main hover:bg-secondary-hover transition-all flex-1 group"
 						>
 							<span className="text-h1-heading font-semibold tracking-[-0.01em] text-text-primary">{t('welcome.newProject')}</span>
-							<div className="w-[48px] h-[48px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors shrink-0" />
+							<span
+								className="inline-block h-7 w-7 shrink-0 bg-text-primary"
+								style={welcomeIconMaskStyle(iconNewProject)}
+								aria-hidden
+							/>
 						</button>
             <button
               onClick={onOpenProject}
               className="flex items-center justify-between px-[32px] py-[12px] rounded-[10px] bg-secondary-main hover:bg-secondary-hover transition-all flex-1 group"
             >
 							<span className="text-h1-heading font-semibold tracking-[-0.01em] text-text-primary">{t('welcome.openProject')}</span>
-							<div className="w-[48px] h-[48px] bg-secondary-hover rounded-sm group-hover:bg-primary-main transition-colors shrink-0" />
+							<span
+								className="inline-block h-7 w-7 shrink-0 bg-text-primary"
+								style={welcomeIconMaskStyle(iconOpenProject)}
+								aria-hidden
+							/>
 						</button>
           </div>
         </div>
-      </div>
-    </div>
+    </DraggableModalShell>
   );
 };

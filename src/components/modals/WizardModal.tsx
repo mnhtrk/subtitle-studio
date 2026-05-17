@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useI18n } from '../../i18n';
+import { DraggableModalShell } from './DraggableModalShell';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   projectService,
@@ -599,9 +600,10 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
   const currentContent = stepData[currentStep as keyof typeof stepData] || stepData[1];
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-      <div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
-        
+    <DraggableModalShell
+      width={780}
+      className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
+    >
         <div className="flex items-center gap-[32px] h-6 mb-[32px]">
           <div className="flex-1 h-[4px] bg-border-default rounded-full overflow-hidden">
             <div 
@@ -716,7 +718,6 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             </>
           )}
         </div>
-      </div>
-    </div>
+    </DraggableModalShell>
   );
 };

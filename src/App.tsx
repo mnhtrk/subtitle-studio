@@ -12,6 +12,8 @@ import { WelcomeModal } from './components/modals/WelcomeModal';
 import { NewProjectModal } from './components/modals/NewProjectModal';
 import { WizardModal } from './components/modals/WizardModal';
 import { ExportModal } from './components/modals/ExportModal';
+import { FindReplaceModal } from './components/modals/FindReplaceModal';
+import type { FindMatch } from './utils/findReplace';
 import { GlossaryModal, type GlossaryReplacementChange } from './components/modals/GlossaryModal';
 import { ActivationModal } from './components/modals/ActivationModal';
 import { SettingsModal } from './components/modals/SettingsModal';
@@ -525,8 +527,17 @@ export default function App() {
 
 	// --- МОДАЛЬНЫЕ ОКНА ---
 	const [activeModal, setActiveModal] = useState<
-		'activation' | 'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | 'settings' | null
+		| 'activation'
+		| 'welcome'
+		| 'createProject'
+		| 'wizard'
+		| 'glossary'
+		| 'export'
+		| 'settings'
+		| 'findReplace'
+		| null
 	>(null);
+	const [findHighlight, setFindHighlight] = useState<FindMatch | null>(null);
 	const [currentProject, setCurrentProject] = useState<ProjectData | null>(null);
 	const [generatedSegments, setGeneratedSegments] = useState<SubtitleSegment[]>([]);
 	const [activeSubtitleFileId, setActiveSubtitleFileId] = useState<string | null>(null);
@@ -2130,7 +2141,13 @@ ${changesText}
 					{ label: t('menu.undo'), action: () => void performSubtitleUndo() },
 					{ label: t('menu.redo'), action: () => void performSubtitleRedo() },
 					{ label: t('menu.delete'), action: () => void handleDeleteSelectedSubtitle() },
-					{ label: t('menu.find') },
+					{
+						label: t('menu.find'),
+						action: () => {
+							if (!currentProjectRef.current) return;
+							setActiveModal('findReplace');
+						}
+					},
 				],
 			},
 			{
@@ -2188,6 +2205,34 @@ ${changesText}
 			markProjectDirty();
 		},
 		[activeSubtitleFileId, pushSubtitleHistorySnapshot, markProjectDirty]
+	);
+
+	const applyFindReplaceSegments = useCallback(
+		(nextList: SubtitleSegment[]) => {
+			if (!activeSubtitleFileId) return;
+			const cp = currentProjectRef.current;
+			if (!cp) return;
+			pushSubtitleHistorySnapshot();
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: nextList } : f
+				)
+			};
+			currentProjectRef.current = nextProject;
+			setCurrentProject(nextProject);
+			setGeneratedSegments(nextList);
+			markProjectDirty();
+		},
+		[activeSubtitleFileId, pushSubtitleHistorySnapshot, markProjectDirty]
+	);
+
+	const handleFindSelectMatch = useCallback(
+		(match: FindMatch) => {
+			setFindHighlight(match);
+			selectSegmentAndSeek(match.segmentIndex);
+		},
+		[selectSegmentAndSeek]
 	);
 
 	const commitSegEditorStart = useCallback(() => {
@@ -3580,7 +3625,7 @@ ${changesText}
 											key={subItem.label}
 											className="px-3 h-[28px] flex items-center text-[12px] font-inter whitespace-nowrap text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors"
 											onClick={() => {
-												subItem.action?.();
+												if ('action' in subItem) subItem.action();
 												setActiveMenu(null);
 											}}
 										>
@@ -3741,6 +3786,7 @@ ${changesText}
 									type="button"
 									title={t('sidebar.search')}
 									disabled={!currentProject}
+									onClick={() => setActiveModal('findReplace')}
 									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
 								>
 									<span
@@ -4346,7 +4392,7 @@ ${changesText}
 													onClick={() => selectSegmentAndSeek(idx)}
 													className={`h-[25px] hover:bg-black/5 transition-colors group text-table cursor-pointer scroll-mt-[25px] ${
 														selectedSegmentIndex === idx ? 'bg-black/10' : ''
-													}`}
+													} ${findHighlight?.segmentIndex === idx ? 'bg-primary-main/15 ring-1 ring-inset ring-primary-main' : ''}`}
 												>
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
 														<div className="truncate">{segment.id}</div>
@@ -4360,10 +4406,22 @@ ${changesText}
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
 														<div className="truncate">{segment.duration.toFixed(3)}</div>
 													</td>
-													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+													<td
+														className={`py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text ${
+															findHighlight?.segmentIndex === idx && findHighlight.field === 'translation'
+																? 'bg-primary-main/25'
+																: ''
+														}`}
+													>
 														<div className="truncate">{segment.translation || '-'}</div>
 													</td>
-													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+													<td
+														className={`py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text ${
+															findHighlight?.segmentIndex === idx && findHighlight.field === 'text'
+																? 'bg-primary-main/25'
+																: ''
+														}`}
+													>
 														<div className="truncate">{segment.text}</div>
 													</td>
 												</tr>
@@ -5177,6 +5235,18 @@ ${changesText}
 								onClose={() => setActiveModal(null)}
 								isDarkTheme={isDarkTheme}
 								onDarkThemeChange={setIsDarkTheme}
+							/>
+						)}
+
+						{activeModal === 'findReplace' && (
+							<FindReplaceModal
+								onClose={() => {
+									setFindHighlight(null);
+									setActiveModal(null);
+								}}
+								segments={generatedSegments}
+								onSelectMatch={handleFindSelectMatch}
+								onSegmentsChange={applyFindReplaceSegments}
 							/>
 						)}
 
