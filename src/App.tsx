@@ -3712,8 +3712,9 @@ ${changesText}
 								<button
 									type="button"
 									title={t('sidebar.export')}
+									disabled={!currentProject}
 									onClick={() => setActiveModal('export')}
-									className="group w-7 h-7 flex items-center justify-center shrink-0"
+									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
 								>
 									<span
 										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
@@ -3725,8 +3726,9 @@ ${changesText}
 								<button
 									type="button"
 									title={t('sidebar.glossary')}
+									disabled={!currentProject}
 									onClick={() => setActiveModal('glossary')}
-									className="group w-7 h-7 flex items-center justify-center shrink-0"
+									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
 								>
 									<span
 										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
@@ -3735,7 +3737,12 @@ ${changesText}
 									/>
 								</button>
 
-								<button type="button" title={t('sidebar.search')} className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<button
+									type="button"
+									title={t('sidebar.search')}
+									disabled={!currentProject}
+									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
+								>
 									<span
 										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
 										style={sidebarIconMaskStyle(iconSearch)}
@@ -5149,7 +5156,20 @@ ${changesText}
 						)}
 
 						{activeModal === 'export' && (
-							<ExportModal onClose={() => setActiveModal(null)} />
+							<ExportModal
+								onClose={() => setActiveModal(null)}
+								projectPath={currentProject?.path ?? null}
+								subtitleFiles={treeFiles.subtitles}
+								onPrepareExport={async () => {
+									flushSubtitleEditorToProject();
+									const cp = currentProjectRef.current;
+									if (!cp) return;
+									const next: ProjectData = { ...cp, agent_chat: chatMessages };
+									currentProjectRef.current = next;
+									setCurrentProject(next);
+									await projectService.save(next);
+								}}
+							/>
 						)}
 
 						{activeModal === 'settings' && (
