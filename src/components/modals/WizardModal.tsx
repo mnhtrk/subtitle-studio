@@ -6,10 +6,13 @@ import {
   projectService,
   ProjectData,
   ProjectFile,
-  SubtitleSegment,
-  GlossaryEntry,
-  GlossaryTermGenerated
+  SubtitleSegment
 } from '../../services/projectService';
+import {
+  applyAutoGlossaryToProject,
+  buildTranscriptionPrompt,
+  resolveIsoLanguage
+} from '../../utils/glossary';
 
 function joinProjectPath(base: string, ...parts: string[]): string {
   const a = base.replace(/[/\\]+$/, '');
@@ -64,54 +67,6 @@ async function finalizeEpisodePairInProject(
   return { project: updated, subtitleFileId: subId };
 }
 
-function mergeAutoGlossary(
-  existing: GlossaryEntry[],
-  generated: GlossaryTermGenerated[]
-): GlossaryEntry[] {
-  const seen = new Set(
-    existing.map((e) => e.source.trim().toLowerCase()).filter(Boolean)
-  );
-  const next = [...existing];
-  for (const t of generated) {
-    const s = t.source.trim();
-    const tgt = t.target.trim();
-    if (!s || !tgt) continue;
-    const k = s.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    const cat = (t.category ?? '').trim();
-    const conf = Math.round(t.confidence * 100);
-    const ctx = cat.length > 0 ? `auto ${conf}% (${cat})` : `auto ${conf}%`;
-    next.push({
-      id: crypto.randomUUID(),
-      source: t.source,
-      target: t.target,
-      description: null,
-      context: ctx
-    });
-  }
-  return next;
-}
-
-function buildTranscriptionPrompt(
-  userPrompt: string,
-  glossary: GlossaryEntry[]
-): string | undefined {
-  const manual = userPrompt.trim();
-  const glossaryOriginals = glossary
-    .map((e) => e.source.trim())
-    .filter(Boolean)
-    .filter((value, index, arr) => arr.findIndex((x) => x.toLowerCase() === value.toLowerCase()) === index);
-
-  if (manual.length > 0) {
-    if (glossaryOriginals.length === 0) return manual;
-    return `${manual}\n\nImportant names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
-  }
-
-  if (glossaryOriginals.length === 0) return undefined;
-  return `Important names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
-}
-
 interface WizardModalProps {
   onClose: () => void;
   projectPath?: string;
@@ -151,28 +106,6 @@ const whisperLanguageCodes: Record<string, string> = {
   Turkish: 'tr',
   Polish: 'pl',
   Ukrainian: 'uk'
-};
-
-const resolveIsoLanguage = (languageOrCode: string): string | null => {
-  const normalized = languageOrCode.trim().toLowerCase();
-  if (!normalized) return null;
-  if (normalized.length === 2) return normalized;
-  if (normalized === 'english') return 'en';
-  if (normalized === 'russian') return 'ru';
-  if (normalized === 'spanish') return 'es';
-  if (normalized === 'french') return 'fr';
-  if (normalized === 'german') return 'de';
-  if (normalized === 'italian') return 'it';
-  if (normalized === 'portuguese') return 'pt';
-  if (normalized === 'chinese') return 'zh';
-  if (normalized === 'japanese') return 'ja';
-  if (normalized === 'korean') return 'ko';
-  if (normalized === 'arabic') return 'ar';
-  if (normalized === 'hindi') return 'hi';
-  if (normalized === 'turkish') return 'tr';
-  if (normalized === 'polish') return 'pl';
-  if (normalized === 'ukrainian') return 'uk';
-  return null;
 };
 
 export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, onComplete }) => {
@@ -323,31 +256,16 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       let updatedProject = pairedProject;
 
       if (sourceType === 'ai') {
-        try {
-          const targetIso =
-            resolveIsoLanguage(updatedProject.target_language) ??
-            resolveIsoLanguage(targetLanguage) ??
-            'en';
-          const suggested = await projectService.autoGenerateGlossary(segments, {
-            min_frequency: 2,
-            max_terms: 45,
-            target_language: targetIso,
-            contextPrompt: contextPrompt
-          });
-          if (suggested.length > 0) {
-            const opened = await projectService.open(projectPath!);
-            const merged = mergeAutoGlossary(opened.glossary, suggested);
-            const toSave: ProjectData = {
-              ...opened,
-              glossary: merged,
-              updated_at: new Date().toISOString()
-            };
-            await projectService.save(toSave);
-            updatedProject = toSave;
-          }
-        } catch (autoGlossErr) {
-          console.warn('[Wizard] Auto-glossary skipped:', autoGlossErr);
-        }
+        const glossaryLangIso =
+          resolveIsoLanguage(sourceLanguage) ??
+          resolveIsoLanguage(updatedProject.target_language) ??
+          resolveIsoLanguage(targetLanguage) ??
+          'en';
+        updatedProject = await applyAutoGlossaryToProject(projectPath!, segments, {
+          targetLanguageIso: glossaryLangIso,
+          contextPrompt: contextPrompt,
+          fillTranslation: false
+        });
       }
 
       setWorkingSegments(segments);

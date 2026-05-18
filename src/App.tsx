@@ -17,6 +17,7 @@ import type { FindMatch } from './utils/findReplace';
 import { GlossaryModal, type GlossaryReplacementChange } from './components/modals/GlossaryModal';
 import { ActivationModal } from './components/modals/ActivationModal';
 import { SettingsModal } from './components/modals/SettingsModal';
+import { AboutModal } from './components/modals/AboutModal';
 import { useI18n } from './i18n';
 
 const appWindow = getCurrentWindow();
@@ -29,6 +30,11 @@ import {
 	splitSegmentAt,
 	sortAndRenumberSubtitleIds
 } from './utils/subtitleSegmentsLocal';
+import {
+	applyAutoGlossaryToProject,
+	buildTranscriptionPrompt,
+	resolveIsoLanguage
+} from './utils/glossary';
 
 import iconNewProject from './assets/icons/new-project.svg';
 import iconNewFile from './assets/icons/new-file.svg';
@@ -124,6 +130,52 @@ function joinProjectPath(base: string, ...parts: string[]): string {
 	const a = base.replace(/[/\\]+$/, '');
 	const rest = parts.map((p) => p.replace(/^[/\\]+/, '').replace(/\\/g, '/')).join('/');
 	return `${a}/${rest}`;
+}
+
+async function finalizeEpisodePairInProject(
+	projectPath: string,
+	videoId: string,
+	segments: SubtitleSegment[]
+): Promise<{ project: ProjectData; subtitleFileId: string }> {
+	const project = await projectService.open(projectPath);
+	const video = project.files.find((f) => f.id === videoId && f.file_type === 'Video');
+	if (!video) {
+		throw new Error('Video track missing after import');
+	}
+	const stem = video.name.replace(/\.[^/.\\]+$/, '') || 'subtitles';
+	const subName = `${stem}.srt`;
+	const subPath = `subtitles/${subName}`;
+	const subId = crypto.randomUUID();
+	const now = new Date().toISOString();
+	const subFile: ProjectFile = {
+		id: subId,
+		name: subName,
+		file_type: 'Subtitle',
+		path: subPath,
+		subtitle_segments: segments,
+		linked_file_id: videoId,
+		created_at: now,
+		updated_at: now
+	};
+	const nextFiles = project.files.map((f) =>
+		f.id === videoId
+			? { ...f, subtitle_segments: null, linked_file_id: subId, updated_at: now }
+			: f
+	);
+	nextFiles.push(subFile);
+	const updated: ProjectData = {
+		...project,
+		files: nextFiles,
+		updated_at: now
+	};
+	await projectService.save(updated);
+	await projectService.exportSubtitles(
+		projectPath,
+		subId,
+		'srt',
+		joinProjectPath(projectPath, subPath)
+	);
+	return { project: updated, subtitleFileId: subId };
 }
 
 function getSourceVideoStem(project: ProjectData, activeFileId: string | null): string {
@@ -244,6 +296,10 @@ const MAX_SUBTITLE_UNDO = 80;
 const TIMELINE_EDGE_SCROLL_MARGIN = 48;
 const TIMELINE_EDGE_SCROLL_BASE = 14;
 const ACTIVATION_COMPLETED_STORAGE_KEY = 'subtitle-studio-activation-completed';
+
+type MenuSubItem =
+	| { kind?: 'item'; label: string; action?: () => void; disabled?: boolean }
+	| { kind: 'separator' };
 
 function cloneSubtitleSegments(segs: SubtitleSegment[]): SubtitleSegment[] {
 	return segs.map((s) => ({ ...s }));
@@ -535,6 +591,7 @@ export default function App() {
 		| 'export'
 		| 'settings'
 		| 'findReplace'
+		| 'about'
 		| null
 	>(null);
 	const [findHighlight, setFindHighlight] = useState<FindMatch | null>(null);
@@ -628,6 +685,12 @@ export default function App() {
 	const [retranscribeSetup, setRetranscribeSetup] = useState<{ range: { start: number; end: number } } | null>(null);
 	const [retranscribeLanguage, setRetranscribeLanguage] = useState<string>('English');
 	const [retranscribePrompt, setRetranscribePrompt] = useState<string>('');
+	const [fullTranscribeSetup, setFullTranscribeSetup] = useState(false);
+	const [aiTranslateSetup, setAiTranslateSetup] = useState(false);
+	const [aiTranslateTargetLanguage, setAiTranslateTargetLanguage] = useState('English');
+	const [aiTranslatePrompt, setAiTranslatePrompt] = useState('');
+	const [aiBusy, setAiBusy] = useState<{ operation: 'transcribe' | 'translate'; stage: 'audio' | 'transcribe' | 'translate' | 'apply' } | null>(null);
+	const [aiMenuError, setAiMenuError] = useState<string | null>(null);
 	const [projectFileMenu, setProjectFileMenu] = useState<{ x: number; y: number; file: ProjectFile } | null>(null);
 	const [selectedTreeItem, setSelectedTreeItem] = useState<
 		| { kind: 'file'; id: string }
@@ -1351,6 +1414,266 @@ export default function App() {
 		markProjectDirty,
 		t
 	]);
+
+	const ensureApiKeyForAi = useCallback(async (): Promise<boolean> => {
+		try {
+			const has = await projectService.getApiKeyStatus();
+			if (!has) {
+				setActiveModal('activation');
+				return false;
+			}
+		} catch {
+			setActiveModal('activation');
+			return false;
+		}
+		return true;
+	}, []);
+
+	const handleImportVideo = useCallback(async () => {
+		if (!currentProjectRef.current) {
+			await message(t('dialog.openProjectFirst'), { kind: 'info', title: t('dialog.importTitle') });
+			return;
+		}
+		const selected = await open({
+			multiple: false,
+			directory: false,
+			title: t('dialog.importVideoDialog'),
+			filters: [{ name: t('dialog.videoFilter'), extensions: ['mp4', 'mkv', 'mov', 'avi', 'webm'] }]
+		});
+		if (!selected || typeof selected !== 'string') return;
+		const cp = currentProjectRef.current;
+		if (!cp) return;
+		try {
+			const imported = await projectService.importMedia(cp.path, selected);
+			const project = await projectService.open(cp.path);
+			currentProjectRef.current = project;
+			setCurrentProject(project);
+			const videoInProject = project.files.find((f) => f.id === imported.id) ?? imported;
+			setActiveSubtitleFileId(videoInProject.id);
+			setGeneratedSegments([]);
+			setSelectedSegmentIndex(-1);
+			setSelectedSegmentIds(new Set());
+			markProjectDirty();
+		} catch (e: unknown) {
+			const detail = e instanceof Error ? e.message : String(e);
+			await message(t('dialog.importVideoFailed', { detail }), {
+				kind: 'error',
+				title: t('dialog.importTitle')
+			});
+		}
+	}, [markProjectDirty, t]);
+
+	const handleFullTranscribe = useCallback(
+		async (opts: { sourceLanguage: string; userPrompt: string }) => {
+			const cp = currentProjectRef.current;
+			if (!cp) return;
+			const videoPath = activeVideoAbsolutePath;
+			if (!videoPath) {
+				setAiMenuError(t('ai.noVideo'));
+				return;
+			}
+			setAiMenuError(null);
+			setAiBusy({ operation: 'transcribe', stage: 'audio' });
+			const audioFileName = `transcribe_${Date.now()}.mp3`;
+			const audioRelPath = `config/${audioFileName}`;
+			const audioOut = joinProjectPath(cp.path, audioRelPath);
+			try {
+				if (!(await ensureApiKeyForAi())) {
+					setAiBusy(null);
+					return;
+				}
+				await projectService.extractAudioFromVideo(videoPath, audioOut);
+				setAiBusy({ operation: 'transcribe', stage: 'transcribe' });
+				const projectForPrompt = await projectService.open(cp.path);
+				const whisperPrompt = buildTranscriptionPrompt(
+					opts.userPrompt,
+					projectForPrompt.glossary ?? []
+				);
+				const isoLang =
+					RETRANSCRIBE_LANGUAGE_ISO[opts.sourceLanguage] ??
+					(opts.sourceLanguage.trim().length === 2
+						? opts.sourceLanguage.trim().toLowerCase()
+						: undefined);
+				const rawSegments = await projectService.transcribeAudio(
+					audioOut,
+					isoLang,
+					whisperPrompt,
+					projectForPrompt.glossary ?? []
+				);
+				if (rawSegments.length === 0) {
+					throw new Error('Whisper returned no segments.');
+				}
+				const segments = rawSegments.map((s) => ({ ...s, translation: null }));
+				setAiBusy({ operation: 'transcribe', stage: 'apply' });
+				const now = new Date().toISOString();
+				const activeFile = activeSubtitleFileId
+					? cp.files.find((f) => f.id === activeSubtitleFileId)
+					: null;
+				let projectWithSegments: ProjectData;
+				if (activeFile?.file_type === 'Subtitle') {
+					pushSubtitleHistorySnapshot();
+					projectWithSegments = {
+						...cp,
+						files: cp.files.map((f) =>
+							f.id === activeSubtitleFileId
+								? { ...f, subtitle_segments: segments, updated_at: now }
+								: f
+						),
+						updated_at: now
+					};
+					await projectService.save(projectWithSegments);
+					if (activeSubtitleFileId) {
+						await exportSrtForProject(projectWithSegments, activeSubtitleFileId);
+					}
+					setActiveSubtitleFileId(activeSubtitleFileId);
+				} else {
+					const videoId =
+						activeFile?.file_type === 'Video'
+							? activeFile.id
+							: activeVideoFile?.id ??
+								cp.files.find((f) => f.file_type === 'Video')?.id ??
+								null;
+					if (!videoId) {
+						throw new Error(t('ai.noVideo'));
+					}
+					const paired = await finalizeEpisodePairInProject(cp.path, videoId, segments);
+					projectWithSegments = paired.project;
+					setActiveSubtitleFileId(paired.subtitleFileId);
+				}
+				const glossaryLangIso =
+					resolveIsoLanguage(opts.sourceLanguage) ??
+					resolveIsoLanguage(projectWithSegments.target_language) ??
+					'en';
+				const projectWithGlossary = await applyAutoGlossaryToProject(
+					cp.path,
+					segments,
+					{
+						targetLanguageIso: glossaryLangIso,
+						contextPrompt: opts.userPrompt,
+						fillTranslation: false
+					}
+				);
+				const mergedProject: ProjectData = {
+					...projectWithGlossary,
+					files: projectWithSegments.files
+				};
+				await projectService.save(mergedProject);
+				currentProjectRef.current = mergedProject;
+				setCurrentProject(mergedProject);
+				setGeneratedSegments(segments);
+				setSelectedSegmentIndex(segments.length > 0 ? 0 : -1);
+				markProjectDirty();
+				setAiBusy(null);
+			} catch (err) {
+				const detail = err instanceof Error ? err.message : String(err);
+				setAiMenuError(detail);
+				setAiBusy(null);
+			} finally {
+				projectService
+					.deleteProjectFileArtifact(cp.path, audioRelPath)
+					.catch((err) => console.warn('cleanup transcribe audio failed:', err));
+			}
+		},
+		[
+			activeVideoAbsolutePath,
+			activeSubtitleFileId,
+			activeVideoFile,
+			ensureApiKeyForAi,
+			exportSrtForProject,
+			markProjectDirty,
+			pushSubtitleHistorySnapshot,
+			t
+		]
+	);
+
+	const resolveWizardLanguageLabel = useCallback((codeOrName: string): string => {
+		const raw = codeOrName.trim();
+		if (!raw) return 'English';
+		const byName = RETRANSCRIBE_LANGUAGE_OPTIONS.find((l) => l.toLowerCase() === raw.toLowerCase());
+		if (byName) return byName;
+		const byIso = RETRANSCRIBE_LANGUAGE_OPTIONS.find((l) => RETRANSCRIBE_LANGUAGE_ISO[l] === raw.toLowerCase());
+		return byIso ?? raw;
+	}, []);
+
+	const openAiTranslateSetup = useCallback(() => {
+		const cp = currentProjectRef.current;
+		setAiTranslateTargetLanguage(resolveWizardLanguageLabel(cp?.target_language ?? 'English'));
+		setAiTranslatePrompt('');
+		setAiTranslateSetup(true);
+	}, [resolveWizardLanguageLabel]);
+
+	const handleAiTranslate = useCallback(
+		async (opts: { targetLanguage: string; stylePrompt: string }) => {
+		const cp = currentProjectRef.current;
+		const fileId = activeSubtitleFileId;
+		if (!cp || !fileId) return;
+		const segs = segmentsRef.current;
+		const withText = segs.filter((s) => (s.text ?? '').trim().length > 0);
+		if (withText.length === 0) {
+			setAiMenuError(t('ai.noOriginalText'));
+			return;
+		}
+		setAiMenuError(null);
+		setAiBusy({ operation: 'translate', stage: 'translate' });
+		try {
+			if (!(await ensureApiKeyForAi())) {
+				setAiBusy(null);
+				return;
+			}
+			const targetLang = opts.targetLanguage.trim();
+			if (!targetLang) {
+				throw new Error('Target language is not set.');
+			}
+			const stylePrompt = opts.stylePrompt.trim() || 'Natural subtitle translation';
+			const targetIso =
+				resolveIsoLanguage(targetLang) ??
+				resolveIsoLanguage(cp.target_language ?? '') ??
+				'en';
+			const projectWithGlossary = await applyAutoGlossaryToProject(cp.path, withText, {
+				targetLanguageIso: targetIso,
+				targetLanguage: targetLang,
+				contextPrompt: stylePrompt,
+				fillTranslation: true
+			});
+			const glossary = projectWithGlossary.glossary ?? [];
+			currentProjectRef.current = projectWithGlossary;
+			setCurrentProject(projectWithGlossary);
+			const translations = await projectService.translateBatch(
+				withText,
+				targetLang,
+				stylePrompt,
+				glossary
+			);
+			const translatedMap = new Map(translations.map((tr) => [tr.id, tr.translated_text]));
+			const nextSegments = segs.map((s) => {
+				const tr = translatedMap.get(s.id);
+				return tr !== undefined ? { ...s, translation: tr } : s;
+			});
+			setAiBusy({ operation: 'translate', stage: 'apply' });
+			pushSubtitleHistorySnapshot();
+			const now = new Date().toISOString();
+			const next: ProjectData = {
+				...projectWithGlossary,
+				files: projectWithGlossary.files.map((f) =>
+					f.id === fileId ? { ...f, subtitle_segments: nextSegments, updated_at: now } : f
+				),
+				updated_at: now
+			};
+			await projectService.save(next);
+			currentProjectRef.current = next;
+			setCurrentProject(next);
+			setGeneratedSegments(nextSegments);
+			markProjectDirty();
+			void exportSrtForProject(next, fileId).catch((e) => console.error('SRT export after translate', e));
+			setAiBusy(null);
+		} catch (err) {
+			const detail = err instanceof Error ? err.message : String(err);
+			setAiMenuError(detail);
+			setAiBusy(null);
+		}
+	},
+		[activeSubtitleFileId, ensureApiKeyForAi, exportSrtForProject, markProjectDirty, pushSubtitleHistorySnapshot, t]
+	);
 
 	const handleDeleteEpisode = useCallback(async (videoFile: ProjectFile) => {
 		const cp = currentProjectRef.current;
@@ -2122,17 +2445,36 @@ ${changesText}
 		el.scrollTop = el.scrollHeight;
 	}, [chatMessages, isAgentBusy]);
 
+	const hasOriginalText = useMemo(
+		() => generatedSegments.some((s) => (s.text ?? '').trim().length > 0),
+		[generatedSegments]
+	);
+
+	const hasProjectVideo = useMemo(() => treeFiles.video.length > 0, [treeFiles.video]);
+
+	const canRetranscribeRangeMenu = useMemo(() => {
+		if (!timelineRubberRange) return false;
+		return (
+			timelineRubberRange.end - timelineRubberRange.start >= MIN_SEGMENT_DURATION &&
+			Boolean(activeVideoAbsolutePath)
+		);
+	}, [timelineRubberRange, activeVideoAbsolutePath]);
+
 	const menuItems = useMemo(
-		() => [
+		(): Array<{ id: string; label: string; items: MenuSubItem[] }> => [
 			{
 				id: 'file',
 				label: t('menu.file'),
 				items: [
 					{ label: t('menu.newProject'), action: () => setActiveModal('createProject') },
 					{ label: t('menu.openProject'), action: () => void handleOpenProjectDialog() },
+					{ kind: 'separator' },
+					{ label: t('menu.importVideo'), action: () => void handleImportVideo() },
 					{ label: t('menu.importOriginal'), action: () => void handleImportOriginalSubtitles() },
 					{ label: t('menu.importTranslated'), action: () => void handleImportTranslatedSubtitles() },
+					{ kind: 'separator' },
 					{ label: t('menu.save'), action: () => void handleSaveProject() },
+					{ kind: 'separator' },
 					{ label: t('menu.settings'), action: () => setActiveModal('settings') },
 					{ label: t('menu.exit'), action: () => void handleExitProject() },
 				],
@@ -2144,29 +2486,63 @@ ${changesText}
 					{ label: t('menu.undo'), action: () => void performSubtitleUndo() },
 					{ label: t('menu.redo'), action: () => void performSubtitleRedo() },
 					{ label: t('menu.delete'), action: () => void handleDeleteSelectedSubtitle() },
+					{ kind: 'separator' },
 					{
-						label: t('menu.find'),
+						label: t('menu.findAndReplace'),
 						action: () => {
 							if (!currentProjectRef.current) return;
 							setActiveModal('findReplace');
 						}
 					},
+					{ label: t('menu.spellCheck') },
 				],
 			},
 			{
-				id: 'tools',
-				label: t('menu.tools'),
-				items: [{ label: t('menu.spellCheck') }, { label: t('menu.batchConvert') }],
-			},
-			{
-				id: 'video',
-				label: t('menu.video'),
-				items: [{ label: t('menu.openVideoFile') }, { label: t('menu.audioTrack') }],
+				id: 'ai',
+				label: t('menu.ai'),
+				items: [
+					{
+						label: t('menu.transcribe'),
+						disabled: !hasProjectVideo,
+						action: () => {
+							if (!hasProjectVideo) return;
+							if (!currentProjectRef.current) {
+								void message(t('ai.openProjectFirst'), {
+									kind: 'info',
+									title: t('dialog.importTitle')
+								});
+								return;
+							}
+							void ensureApiKeyForAi().then((ok) => {
+								if (ok) setFullTranscribeSetup(true);
+							});
+						}
+					},
+					{
+						label: t('menu.translate'),
+						disabled: !hasOriginalText,
+						action: () => {
+							if (!hasOriginalText) return;
+							void ensureApiKeyForAi().then((ok) => {
+								if (ok) openAiTranslateSetup();
+							});
+						}
+					},
+					{
+						label: t('menu.retranscribeRange'),
+						disabled: !canRetranscribeRangeMenu,
+						action: () => {
+							if (!canRetranscribeRangeMenu || !timelineRubberRange) return;
+							setRetranscribeError(null);
+							setRetranscribeSetup({ range: timelineRubberRange });
+						}
+					},
+				],
 			},
 			{
 				id: 'help',
 				label: t('menu.help'),
-				items: [{ label: t('menu.about') }, { label: t('menu.updates') }],
+				items: [{ label: t('menu.about'), action: () => setActiveModal('about') }],
 			},
 		],
 		[
@@ -2177,8 +2553,15 @@ ${changesText}
 			handleOpenProjectDialog,
 			handleSaveProject,
 			handleExitProject,
+			handleImportVideo,
 			handleImportOriginalSubtitles,
-			handleImportTranslatedSubtitles
+			handleImportTranslatedSubtitles,
+			hasOriginalText,
+			hasProjectVideo,
+			canRetranscribeRangeMenu,
+			timelineRubberRange,
+			ensureApiKeyForAi,
+			openAiTranslateSetup
 		]
 	);
 
@@ -3623,18 +4006,28 @@ ${changesText}
 								{/* Выпадающий список */}
 								{activeMenu === menu.id && (
 									<div className="rounded-[8px] absolute left-0 top-[26px] w-max min-w-[160px] bg-surface-secondary border border-border-default shadow-lg py-1 flex flex-col z-[110]">
-										{menu.items.map((subItem) => (
-										<button
-											key={subItem.label}
-											className="px-3 h-[28px] flex items-center text-[12px] font-inter whitespace-nowrap text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors"
-											onClick={() => {
-												if ('action' in subItem) subItem.action();
-												setActiveMenu(null);
-											}}
-										>
-											{subItem.label}
-										</button>
-									))}
+										{menu.items.map((subItem: MenuSubItem, subIdx) =>
+											subItem.kind === 'separator' ? (
+												<div
+													key={`${menu.id}-sep-${subIdx}`}
+													className="my-1 mx-2 border-t border-border-default"
+													role="separator"
+												/>
+											) : (
+												<button
+													key={`${menu.id}-${subItem.label}-${subIdx}`}
+													disabled={Boolean(subItem.disabled)}
+													className="px-3 h-[28px] flex items-center text-[12px] font-inter whitespace-nowrap text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors disabled:opacity-40 disabled:pointer-events-none"
+													onClick={() => {
+														if (subItem.disabled) return;
+														if (subItem.action) subItem.action();
+														setActiveMenu(null);
+													}}
+												>
+													{subItem.label}
+												</button>
+											)
+										)}
 									</div>
 								)}
 							</div>
@@ -5243,6 +5636,10 @@ ${changesText}
 								onSegmentsChange={applyFindReplaceSegments}
 							/>
 						)}
+
+						{activeModal === 'about' && (
+							<AboutModal onClose={() => setActiveModal(null)} />
+						)}
 				</>
 			)}
 
@@ -5371,6 +5768,148 @@ ${changesText}
 				</>
 			)}
 
+			{fullTranscribeSetup && (
+				<div className="fixed inset-0 flex items-center justify-center z-[10550] pointer-events-none">
+					<div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+						<div className="flex items-center justify-end h-6 mb-[24px]">
+							<button
+								type="button"
+								onClick={() => setFullTranscribeSetup(false)}
+								className="w-6 h-6 flex items-center justify-center text-text-secondary hover:opacity-70 transition-opacity"
+							>
+								<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+									<path d="M18 6L6 18M6 6l12 12" />
+								</svg>
+							</button>
+						</div>
+						<div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
+							<div className="flex flex-col pt-0">
+								<h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
+									{t('wizard.step3Title')}
+								</h1>
+								<p className="text-body-reg text-text-secondary">{t('wizard.step3Desc')}</p>
+							</div>
+							<div className="flex flex-col gap-[12px] h-full">
+								<div className="flex flex-col gap-[8px]">
+									<label className="text-caption text-text-primary">{t('retranscribe.sourceLanguage')}</label>
+									<select
+										value={retranscribeLanguage}
+										onChange={(e) => setRetranscribeLanguage(e.target.value)}
+										className="w-full h-[42px] px-3 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary"
+									>
+										{RETRANSCRIBE_LANGUAGE_OPTIONS.map((lang) => (
+											<option key={lang} value={lang}>{lang}</option>
+										))}
+									</select>
+								</div>
+								<div className="flex-1 flex flex-col gap-[8px] min-h-0">
+									<label className="text-caption text-text-primary">{t('wizard.prompt')}</label>
+									<textarea
+										value={retranscribePrompt}
+										onChange={(e) => setRetranscribePrompt(e.target.value)}
+										className="flex-1 min-h-0 w-full p-4 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary resize-none overflow-y-auto subtitle-table-scroll focus:outline-none focus:border-text-primary transition-colors placeholder:text-text-secondary/50"
+										placeholder={t('wizard.step3Placeholder')}
+									/>
+								</div>
+							</div>
+						</div>
+						<div className="flex justify-end gap-3 mt-[32px]">
+							<button
+								type="button"
+								onClick={() => setFullTranscribeSetup(false)}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover text-text-primary text-body-reg rounded-[5px] transition-colors"
+							>
+								{t('wizard.cancel')}
+							</button>
+							<button
+								type="button"
+								onClick={() => {
+									setFullTranscribeSetup(false);
+									void handleFullTranscribe({
+										sourceLanguage: retranscribeLanguage,
+										userPrompt: retranscribePrompt
+									});
+								}}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
+							>
+								{t('menu.transcribe')}
+							</button>
+						</div>
+					</div>
+				</div>
+			)}
+
+			{aiTranslateSetup && (
+				<div className="fixed inset-0 flex items-center justify-center z-[10550] pointer-events-none">
+					<div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+						<div className="flex items-center justify-end h-6 mb-[24px]">
+							<button
+								type="button"
+								onClick={() => setAiTranslateSetup(false)}
+								className="w-6 h-6 flex items-center justify-center text-text-secondary hover:opacity-70 transition-opacity"
+							>
+								<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+									<path d="M18 6L6 18M6 6l12 12" />
+								</svg>
+							</button>
+						</div>
+						<div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
+							<div className="flex flex-col pt-0">
+								<h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
+									{t('wizard.step5Title')}
+								</h1>
+								<p className="text-body-reg text-text-secondary">{t('wizard.step5Desc')}</p>
+							</div>
+							<div className="flex flex-col gap-[12px] h-full">
+								<div className="flex flex-col gap-[8px]">
+									<label className="text-caption text-text-primary">{t('wizard.targetLanguage')}</label>
+									<select
+										value={aiTranslateTargetLanguage}
+										onChange={(e) => setAiTranslateTargetLanguage(e.target.value)}
+										className="w-full h-[42px] px-3 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary"
+									>
+										{RETRANSCRIBE_LANGUAGE_OPTIONS.map((lang) => (
+											<option key={lang} value={lang}>{lang}</option>
+										))}
+									</select>
+								</div>
+								<div className="flex-1 flex flex-col gap-[8px] min-h-0">
+									<label className="text-caption text-text-primary">{t('wizard.prompt')}</label>
+									<textarea
+										value={aiTranslatePrompt}
+										onChange={(e) => setAiTranslatePrompt(e.target.value)}
+										className="flex-1 min-h-0 w-full p-4 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary resize-none overflow-y-auto subtitle-table-scroll focus:outline-none focus:border-text-primary transition-colors placeholder:text-text-secondary/50"
+										placeholder={t('wizard.step5Placeholder')}
+									/>
+								</div>
+							</div>
+						</div>
+						<div className="flex justify-end gap-3 mt-[32px]">
+							<button
+								type="button"
+								onClick={() => setAiTranslateSetup(false)}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover text-text-primary text-body-reg rounded-[5px] transition-colors"
+							>
+								{t('wizard.cancel')}
+							</button>
+							<button
+								type="button"
+								onClick={() => {
+									setAiTranslateSetup(false);
+									void handleAiTranslate({
+										targetLanguage: aiTranslateTargetLanguage,
+										stylePrompt: aiTranslatePrompt
+									});
+								}}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
+							>
+								{t('menu.translate')}
+							</button>
+						</div>
+					</div>
+				</div>
+			)}
+
 			{retranscribeSetup && (
 				<div className="fixed inset-0 flex items-center justify-center z-[10550] pointer-events-none">
 					<div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
@@ -5484,6 +6023,48 @@ ${changesText}
 								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors"
 							>
 								{t('retranscribe.ok')}
+							</button>
+						</div>
+					</div>
+				</div>
+			)}
+
+			{aiBusy && (
+				<div className="fixed inset-0 flex items-center justify-center z-[10600] pointer-events-none">
+					<div className="pointer-events-auto w-[780px] h-[300px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+						<div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
+							<div className="flex flex-col pt-0">
+								<h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
+									{t('wizard.working')}
+								</h1>
+								<p className="text-body-reg text-text-secondary">
+									{aiBusy.operation === 'translate'
+										? t('wizard.translateWait')
+										: t('wizard.transcribeWait')}
+								</p>
+							</div>
+							<div className="flex items-center justify-center h-full">
+								<div className="w-[120px] h-[120px] border-[6px] border-border-default border-t-progress-bar rounded-full animate-spin" />
+							</div>
+						</div>
+					</div>
+				</div>
+			)}
+
+			{aiMenuError && (
+				<div className="fixed inset-0 flex items-center justify-center z-[10600] pointer-events-none">
+					<div className="pointer-events-auto w-[480px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-6 flex flex-col gap-4 select-none">
+						<h2 className="text-[18px] font-semibold text-text-primary">{t('ai.errorTitle')}</h2>
+						<p className="text-body-reg text-text-secondary whitespace-pre-wrap break-words">
+							{aiMenuError}
+						</p>
+						<div className="flex justify-end">
+							<button
+								type="button"
+								onClick={() => setAiMenuError(null)}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors"
+							>
+								{t('ai.ok')}
 							</button>
 						</div>
 					</div>
