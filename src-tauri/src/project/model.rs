@@ -32,11 +32,30 @@ pub struct ProjectFile {
     pub path: String,
     pub duration: Option<f64>,
     pub subtitle_segments: Option<Vec<SubtitleSegment>>,
-    /// ID связанного файла: у Video — субтитры, у Subtitle — видео (один эпизод).
+    /// Связанный файл эпизода: у Video id субтитров, у Subtitle id видео
     #[serde(default)]
     pub linked_file_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Пол говорящего в реплике (для автоперевода)
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SpeakerGender {
+    Male,
+    Female,
+    Unknown,
+}
+
+impl SpeakerGender {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SpeakerGender::Male => "male",
+            SpeakerGender::Female => "female",
+            SpeakerGender::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -47,6 +66,8 @@ pub struct SubtitleSegment {
     pub duration: f64,
     pub text: String,
     pub translation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_gender: Option<SpeakerGender>,
     pub flags: Option<SegmentFlags>,
 }
 

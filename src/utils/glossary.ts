@@ -125,6 +125,65 @@ export function mergeAutoGlossary(
 	return next;
 }
 
+export type TranslationHint = { source: string; target: string };
+
+/** «Fonterossa as Red fountain», «перевести X как Y» и т.п. из промпта мастера */
+export function parseTranslationHintsFromPrompt(prompt: string): TranslationHint[] {
+	const hints: TranslationHint[] = [];
+	const seen = new Set<string>();
+	const add = (rawSource: string, rawTarget: string) => {
+		const source = rawSource.trim().replace(/^["'«]+|["'»]+$/g, '');
+		const target = rawTarget.trim().replace(/^["'«]+|["'»]+$/g, '');
+		if (source.length < 2 || target.length < 1) return;
+		const key = source.toLowerCase();
+		if (seen.has(key)) return;
+		seen.add(key);
+		hints.push({ source, target });
+	};
+
+	const text = prompt.trim();
+	if (!text) return hints;
+
+	const rules: RegExp[] = [
+		/\b(?:translate|переведи|переводи)\s+["«]?([^"»\n;]+?)["»]?\s+(?:as|как)\s+["«]?([^"»\n;]+?)["»]?(?=[.!?,;\n]|$)/gi,
+		/\b["«]?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9'’\-\s]{1,48})["»]?\s+(?:→|->|as|как)\s+["«]?([^"»\n;]+?)["»]?(?=[.!?,;\n]|$)/gi
+	];
+	for (const re of rules) {
+		re.lastIndex = 0;
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(text)) !== null) {
+			add(m[1], m[2]);
+		}
+	}
+	return hints;
+}
+
+export function mergePromptHintsIntoGlossary(
+	glossary: GlossaryEntry[],
+	hints: TranslationHint[]
+): GlossaryEntry[] {
+	const next = glossary.map((e) => ({ ...e }));
+	for (const { source, target } of hints) {
+		const s = source.trim();
+		const t = target.trim();
+		if (!s || !t) continue;
+		const key = s.toLowerCase();
+		const idx = next.findIndex((e) => e.source.trim().toLowerCase() === key);
+		if (idx >= 0) {
+			next[idx] = { ...next[idx], target: t, description: 'user prompt' };
+		} else {
+			next.push({
+				id: crypto.randomUUID(),
+				source: s,
+				target: t,
+				description: 'user prompt',
+				context: null
+			});
+		}
+	}
+	return next;
+}
+
 export function buildTranscriptionPrompt(
 	userPrompt: string,
 	glossary: GlossaryEntry[]
@@ -199,6 +258,11 @@ export async function applyAutoGlossaryToProject(
 					? mergeAutoGlossary(existing, suggested)
 					: mergeAutoGlossaryForTranscription(existing, suggested)
 				: [...existing];
+
+		const promptHints = parseTranslationHintsFromPrompt(opts.contextPrompt ?? '');
+		if (promptHints.length > 0) {
+			merged = mergePromptHintsIntoGlossary(merged, promptHints);
+		}
 
 		if (fillTranslation) {
 			const targetLanguage = (opts.targetLanguage ?? opts.targetLanguageIso).trim();

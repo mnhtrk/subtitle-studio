@@ -6,6 +6,8 @@ export interface RecentProject {
   last_opened: string;
 }
 
+export type SpeakerGender = 'male' | 'female' | 'unknown';
+
 export interface SubtitleSegment {
   id: number;
   start: number;
@@ -13,6 +15,8 @@ export interface SubtitleSegment {
   duration: number;
   text: string;
   translation?: string | null;
+  /** Пол говорящего (авто при транскрибации) */
+  speaker_gender?: SpeakerGender | null;
 }
 
 export interface ProjectFile {
@@ -22,7 +26,7 @@ export interface ProjectFile {
   path: string;
   duration?: number | null;
   subtitle_segments?: SubtitleSegment[] | null;
-  /** Связанный файл эпизода: у субтитров id видео, у видео id субтитров. */
+  /* * Связанный файл эпизода: у субтитров id видео, у видео id субтитров */
   linked_file_id?: string | null;
   created_at: string;
   updated_at: string;
@@ -48,7 +52,7 @@ export interface ProjectData {
   updated_at: string;
 }
 
-/** Ответ `auto_generate_glossary` (черновые термины перед слиянием в проект). */
+/* * Ответ `auto_generate_glossary` (черновые термины перед слиянием в проект) */
 export interface GlossaryTermGenerated {
   source: string;
   target: string;

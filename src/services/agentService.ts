@@ -16,19 +16,42 @@ export type AgentAction =
 
 export interface AgentResponse {
   message: string;
-  action?: AgentAction | null;
+  actions?: AgentAction[];
   suggestions?: string[] | null;
 }
 
-export interface AgentRequest {
-  message: string;
-  context: AgentContext;
+export interface ConversationTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface AgentChatOptions {
+  sessionId: string;
+  /** Предыдущие реплики чата (без текущего сообщения) */
+  conversationHistory?: ConversationTurn[];
 }
 
 export const agentService = {
-  chat: async (message: string, context: AgentContext): Promise<AgentResponse> => {
+  chat: async (
+    message: string,
+    context: AgentContext,
+    options: AgentChatOptions
+  ): Promise<AgentResponse> => {
     return await invoke<AgentResponse>('chat_with_agent', {
-      request: { message, context }
+      request: {
+        message,
+        context,
+        session_id: options.sessionId,
+        conversation_history: options.conversationHistory ?? []
+      }
     });
   }
 };
+
+/** id сессии агента для проекта */
+export function agentSessionIdForProject(projectId: string | null | undefined): string {
+  if (projectId && projectId.trim().length > 0) {
+    return `project-${projectId.trim()}`;
+  }
+  return `session-${crypto.randomUUID()}`;
+}

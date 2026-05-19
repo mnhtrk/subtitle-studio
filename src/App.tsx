@@ -22,8 +22,20 @@ import { useI18n } from './i18n';
 
 const appWindow = getCurrentWindow();
 
-import { projectService, ProjectData, ProjectFile, SubtitleSegment } from './services/projectService';
-import { agentService, AgentAction } from './services/agentService';
+import {
+	projectService,
+	ProjectData,
+	ProjectFile,
+	SubtitleSegment,
+	type GlossaryEntry,
+	type SpeakerGender
+} from './services/projectService';
+import {
+	agentService,
+	AgentAction,
+	agentSessionIdForProject,
+	type ConversationTurn
+} from './services/agentService';
 import {
 	deleteSegmentById,
 	insertEmptySegment,
@@ -33,6 +45,8 @@ import {
 import {
 	applyAutoGlossaryToProject,
 	buildTranscriptionPrompt,
+	mergePromptHintsIntoGlossary,
+	parseTranslationHintsFromPrompt,
 	resolveIsoLanguage
 } from './utils/glossary';
 
@@ -296,10 +310,45 @@ const MAX_SUBTITLE_UNDO = 80;
 const TIMELINE_EDGE_SCROLL_MARGIN = 48;
 const TIMELINE_EDGE_SCROLL_BASE = 14;
 const ACTIVATION_COMPLETED_STORAGE_KEY = 'subtitle-studio-activation-completed';
+const SHOW_ORIGINAL_VIDEO_SUBTITLES_KEY = 'subtitle-studio-show-original-video-subtitles';
 
 type MenuSubItem =
 	| { kind?: 'item'; label: string; action?: () => void; disabled?: boolean }
+	| { kind: 'toggle'; label: string; checked: boolean; onChange: (checked: boolean) => void }
 	| { kind: 'separator' };
+
+function readShowOriginalVideoSubtitles(): boolean {
+	try {
+		const v = localStorage.getItem(SHOW_ORIGINAL_VIDEO_SUBTITLES_KEY);
+		if (v === '0') return false;
+		if (v === '1') return true;
+	} catch {
+		/* noop */
+	}
+	return true;
+}
+
+function subtitleLineAtPlaybackTime(
+	segments: SubtitleSegment[],
+	currentTime: number,
+	selectedIndex: number,
+	field: 'text' | 'translation'
+): string {
+	const sel = selectedIndex >= 0 ? segments[selectedIndex] : null;
+	const tolerance = 0.6;
+	if (sel && currentTime >= sel.start - tolerance && currentTime < sel.end) {
+		if (field === 'translation') {
+			return sel.translation?.trim() ?? '';
+		}
+		return sel.text?.trim() ?? '';
+	}
+	const seg = segments.find((s) => currentTime >= s.start && currentTime < s.end);
+	if (!seg) return '';
+	if (field === 'translation') {
+		return seg.translation?.trim() ?? '';
+	}
+	return seg.text?.trim() ?? '';
+}
 
 function cloneSubtitleSegments(segs: SubtitleSegment[]): SubtitleSegment[] {
 	return segs.map((s) => ({ ...s }));
@@ -369,7 +418,7 @@ function TimelineSymmetricWaveform({
 			ctx.fillStyle = '#ADFF2F';
 			for (let col = 0; col < w; col++) {
 				const t = w <= 1 ? 0 : col / (w - 1);
-				// Nearest-neighbor sampling keeps waveform edges crisp at high zoom.
+				// nearest-neighbor, чтобы волна не размывалась при зуме
 				const idx = Math.round(t * (n - 1));
 				const v = Math.abs(peaks[Math.max(0, Math.min(n - 1, idx))]) * norm;
 				const amp = Math.min(maxHalf, v * maxHalf * ampGain);
@@ -557,6 +606,7 @@ export default function App() {
 	const [expandedDiffIds, setExpandedDiffIds] = useState<Set<string>>(new Set());
 	const chatScrollRef = useRef<HTMLDivElement | null>(null);
 	const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+	const agentSessionIdRef = useRef<string>(agentSessionIdForProject(undefined));
 
 	// --- ТЕМА И МЕНЮ ---
 	const [isDarkTheme, setIsDarkTheme] = useState(() => {
@@ -605,7 +655,7 @@ export default function App() {
 	const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<number>>(() => new Set());
 	const [isConfigFolderOpen, setIsConfigFolderOpen] = useState(false);
 	const [isSubtitlesFolderOpen, setIsSubtitlesFolderOpen] = useState(false);
-	/** Затемнение/подсветка мастера для пустого проекта — только один раз за «сессию» этого проекта (сброс при смене path). */
+	/** Подсветка мастера один раз на проект (сброс при смене path) */
 	const [wizardSpotlightDismissed, setWizardSpotlightDismissed] = useState(false);
 
 	const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -652,13 +702,17 @@ export default function App() {
 	const [currentPlaybackTime, setCurrentPlaybackTime] = useState(0);
 	const [volume, setVolume] = useState(1);
 	const [videoMuted, setVideoMuted] = useState(false);
+	const [showOriginalVideoSubtitles, setShowOriginalVideoSubtitles] = useState(
+		readShowOriginalVideoSubtitles
+	);
+	const [dualMonitorMode, setDualMonitorMode] = useState(false);
 	const [isVideoPlaying, setIsVideoPlaying] = useState(false);
 	const [timelineZoomPercent, setTimelineZoomPercent] = useState(100);
 	const [waveformPeaks, setWaveformPeaks] = useState<number[] | null>(null);
 	const [waveformImageSrc, setWaveformImageSrc] = useState<string | null>(null);
 	const [projectDiskFiles, setProjectDiskFiles] = useState<{ relative_path: string; name: string }[]>([]);
 	const [probedMediaDuration, setProbedMediaDuration] = useState<number | null>(null);
-	/** Контролируемые поля панели одного субтитра - иначе после Delete остаётся старый DOM и onBlur пишет в новый сегмент. */
+	/** Поля панели субтитра контролируемые, иначе onBlur после Delete пишет не туда */
 	const [segEditorTranslation, setSegEditorTranslation] = useState('');
 	const [segEditorOriginal, setSegEditorOriginal] = useState('');
 	const [segEditorStart, setSegEditorStart] = useState('');
@@ -672,7 +726,7 @@ export default function App() {
 		start: number;
 		end: number;
 	} | null>(null);
-	/** Точные границы последнего rubber-band выделения (для Retranscribe и т.п.). */
+	/** Границы последнего выделения на таймлайне */
 	const [timelineRubberRange, setTimelineRubberRange] = useState<{ start: number; end: number } | null>(null);
 	const [timelineContextMenu, setTimelineContextMenu] = useState<{
 		x: number;
@@ -707,6 +761,7 @@ export default function App() {
 	}, []);
 
 	const hydrateAgentChatFromProject = useCallback((project: ProjectData | null) => {
+		agentSessionIdRef.current = agentSessionIdForProject(project?.id);
 		setChatMessages(
 			(project && Array.isArray(project.agent_chat) ? project.agent_chat : []) as ChatMessage[]
 		);
@@ -715,6 +770,43 @@ export default function App() {
 		setExpandedDiffIds(new Set());
 		setIsAgentBusy(false);
 	}, []);
+
+	const formatSpeakerGenderCell = useCallback((gender?: SpeakerGender | null): string => {
+		if (gender === 'male') return 'M';
+		if (gender === 'female') return 'F';
+		return '?';
+	}, []);
+
+	const formatChatTimecode = useCallback((sec: number): string => {
+		if (!Number.isFinite(sec) || sec < 0) return '00:00:00';
+		const total = Math.floor(sec);
+		const h = Math.floor(total / 3600);
+		const m = Math.floor((total % 3600) / 60);
+		const s = total % 60;
+		return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+	}, []);
+
+	const buildAgentConversationHistory = useCallback(
+		(messages: ChatMessage[]): ConversationTurn[] => {
+			const turns: ConversationTurn[] = [];
+			for (const msg of messages) {
+				if (msg.role === 'assistant' && msg.isError) continue;
+				if (msg.role === 'user') {
+					let content = msg.text.trim();
+					if (msg.attachedSegment) {
+						const seg = msg.attachedSegment;
+						content = `${content}\n\nПрикрепленная реплика:\n#${seg.id} [${formatChatTimecode(seg.start)}]\nOriginal: ${seg.text}\nTranslation: ${seg.translation ?? ''}`.trim();
+					}
+					if (content) turns.push({ role: 'user', content });
+				} else if (msg.role === 'assistant') {
+					const content = msg.text.trim();
+					if (content) turns.push({ role: 'assistant', content });
+				}
+			}
+			return turns;
+		},
+		[formatChatTimecode]
+	);
 
 	useEffect(() => {
 		const cp = currentProjectRef.current;
@@ -836,21 +928,38 @@ export default function App() {
 	timelineTotalDurationRef.current = timelineTotalDuration;
 	currentPlaybackTimeRef.current = currentPlaybackTime;
 
-	const currentVideoSubtitleLine = useMemo(() => {
-		const t = currentPlaybackTime;
-		const sel = selectedSegmentIndex >= 0 ? generatedSegments[selectedSegmentIndex] : null;
-		if (sel) {
-			const tolerance = 0.6;
-			if (t >= sel.start - tolerance && t < sel.end) {
-				const tr = sel.translation?.trim();
-				return tr ?? '';
-			}
+	const currentVideoTranslationLine = useMemo(
+		() =>
+			subtitleLineAtPlaybackTime(
+				generatedSegments,
+				currentPlaybackTime,
+				selectedSegmentIndex,
+				'translation'
+			),
+		[generatedSegments, currentPlaybackTime, selectedSegmentIndex]
+	);
+
+	const currentVideoOriginalLine = useMemo(
+		() =>
+			subtitleLineAtPlaybackTime(
+				generatedSegments,
+				currentPlaybackTime,
+				selectedSegmentIndex,
+				'text'
+			),
+		[generatedSegments, currentPlaybackTime, selectedSegmentIndex]
+	);
+
+	useEffect(() => {
+		try {
+			localStorage.setItem(
+				SHOW_ORIGINAL_VIDEO_SUBTITLES_KEY,
+				showOriginalVideoSubtitles ? '1' : '0'
+			);
+		} catch {
+			/* noop */
 		}
-		const seg = generatedSegments.find((s) => t >= s.start && t < s.end);
-		if (!seg) return '';
-		const tr = seg.translation?.trim();
-		return tr ?? '';
-	}, [generatedSegments, currentPlaybackTime, selectedSegmentIndex]);
+	}, [showOriginalVideoSubtitles]);
 
 	const timelineSegmentsSorted = useMemo(
 		() =>
@@ -908,7 +1017,7 @@ export default function App() {
 		setSegEditorDuration(seg.duration.toFixed(3));
 	}, [editorSegmentSig, selectedSegmentIndex]);
 
-	/** Без onBlur изменения остаются только в полях панели — синхронизируем в проект перед Save / Exit / сменой проекта. */
+	/** Перед save/exit сбрасываем поля панели в проект */
 	const flushSubtitleEditorToProject = useCallback(() => {
 		if (!activeSubtitleFileId || selectedSegmentIndex < 0) return;
 		const cp = currentProjectRef.current;
@@ -1629,15 +1738,24 @@ export default function App() {
 				resolveIsoLanguage(targetLang) ??
 				resolveIsoLanguage(cp.target_language ?? '') ??
 				'en';
+			const promptHints = parseTranslationHintsFromPrompt(stylePrompt);
 			const projectWithGlossary = await applyAutoGlossaryToProject(cp.path, withText, {
 				targetLanguageIso: targetIso,
 				targetLanguage: targetLang,
 				contextPrompt: stylePrompt,
 				fillTranslation: true
 			});
-			const glossary = projectWithGlossary.glossary ?? [];
-			currentProjectRef.current = projectWithGlossary;
-			setCurrentProject(projectWithGlossary);
+			const glossary = mergePromptHintsIntoGlossary(
+				projectWithGlossary.glossary ?? [],
+				promptHints
+			);
+			const projectWithHints =
+				promptHints.length > 0 ? { ...projectWithGlossary, glossary } : projectWithGlossary;
+			currentProjectRef.current = projectWithHints;
+			setCurrentProject(projectWithHints);
+			if (promptHints.length > 0) {
+				await projectService.save(projectWithHints);
+			}
 			const translations = await projectService.translateBatch(
 				withText,
 				targetLang,
@@ -1653,8 +1771,8 @@ export default function App() {
 			pushSubtitleHistorySnapshot();
 			const now = new Date().toISOString();
 			const next: ProjectData = {
-				...projectWithGlossary,
-				files: projectWithGlossary.files.map((f) =>
+				...projectWithHints,
+				files: projectWithHints.files.map((f) =>
 					f.id === fileId ? { ...f, subtitle_segments: nextSegments, updated_at: now } : f
 				),
 				updated_at: now
@@ -2074,7 +2192,7 @@ export default function App() {
 	const replaceCaseInsensitive = useCallback((text: string, from: string, to: string): string => {
 		if (!from) return text;
 		const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-		// Граница «не буква/цифра/_» с поддержкой Юникода — чтобы не цеплять подстроку внутри слова.
+		// граница слова (unicode), чтобы не матчить подстроку
 		try {
 			const pattern = new RegExp(
 				`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`,
@@ -2123,7 +2241,7 @@ export default function App() {
 		[replaceCaseInsensitive]
 	);
 
-	/** Заменить сегменты по id (вернёт пары [новый_сегмент, исходный_сегмент] для всех применённых). */
+	/** merge сегментов по id, пары для undo */
 	const applySegmentEdits = useCallback(
 		(updated: SubtitleSegment[]): { applied: SubtitleSegment[]; originals: SubtitleSegment[] } => {
 			const cp = currentProjectRef.current;
@@ -2276,20 +2394,29 @@ ${changesText}
 
 			setIsAgentBusy(true);
 			try {
-				// 1) Сначала локальная точная замена — гарантированно ловит явные вхождения.
+				// сначала локальная замена
 				const localPatches = buildGlossaryReplacementEdits(changes, baseline);
 				let combinedList = mergeUpdates(baseline, localPatches);
 
-				// 2) Затем агент проходит уже по локально обновлённой версии — ловит склонения / формы.
-				const response = await agentService.chat(hiddenPrompt, {
-					project_id: project?.id ?? null,
-					current_segments: combinedList,
-					current_glossary: project?.glossary ?? null,
-					target_language: project?.target_language ?? null
-				});
-				const action = response.action as AgentAction | null | undefined;
-				if (action && 'EditSegments' in action) {
-					combinedList = mergeUpdates(combinedList, action.EditSegments.segments);
+				// потом агент по склонениям
+				const response = await agentService.chat(
+					hiddenPrompt,
+					{
+						project_id: project?.id ?? null,
+						current_segments: combinedList,
+						current_glossary: project?.glossary ?? null,
+						target_language: project?.target_language ?? null
+					},
+					{
+						sessionId: agentSessionIdRef.current,
+						conversationHistory: buildAgentConversationHistory(chatMessages)
+					}
+				);
+				const actions = response.actions ?? [];
+				for (const action of actions) {
+					if ('EditSegments' in action) {
+						combinedList = mergeUpdates(combinedList, action.EditSegments.segments);
+					}
 				}
 
 				const message =
@@ -2320,7 +2447,7 @@ ${changesText}
 				setIsAgentBusy(false);
 			}
 		},
-		[applySegmentEdits, buildChatEditDiffs, buildGlossaryReplacementEdits]
+		[applySegmentEdits, buildChatEditDiffs, buildGlossaryReplacementEdits, buildAgentConversationHistory, chatMessages]
 	);
 
 	const handleKeepEdits = useCallback((messageId: string) => {
@@ -2342,15 +2469,6 @@ ${changesText}
 		);
 	}, [chatMessages, applySegmentEdits]);
 
-	const formatChatTimecode = useCallback((sec: number): string => {
-		if (!Number.isFinite(sec) || sec < 0) return '00:00:00';
-		const total = Math.floor(sec);
-		const h = Math.floor(total / 3600);
-		const m = Math.floor((total % 3600) / 60);
-		const s = total % 60;
-		return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-	}, []);
-
 	const handleAskAgentAboutSelectedSegment = useCallback(() => {
 		const seg = generatedSegments[selectedSegmentIndex];
 		if (!seg) return;
@@ -2363,6 +2481,140 @@ ${changesText}
 		});
 		requestAnimationFrame(() => chatInputRef.current?.focus());
 	}, [generatedSegments, selectedSegmentIndex]);
+
+	const mergeGlossaryAgentUpdates = useCallback(
+		(
+			current: GlossaryEntry[],
+			updates: GlossaryEntry[]
+		): { glossary: GlossaryEntry[]; changes: GlossaryReplacementChange[] } => {
+			const prev = current.map((e) => ({ ...e }));
+			const changes: GlossaryReplacementChange[] = [];
+
+			for (const upd of updates) {
+				const idx = prev.findIndex(
+					(e) =>
+						(Boolean(upd.id) && e.id === upd.id) ||
+						e.source.trim().toLowerCase() === upd.source.trim().toLowerCase()
+				);
+				if (idx < 0) continue;
+				const old = prev[idx];
+				const merged: GlossaryEntry = {
+					...old,
+					source: upd.source.trim() || old.source,
+					target: upd.target.trim() || old.target,
+					description: upd.description ?? old.description,
+					context: upd.context ?? old.context
+				};
+				const oldSource = old.source.trim();
+				const newSource = merged.source.trim();
+				const oldTarget = old.target.trim();
+				const newTarget = merged.target.trim();
+				const oldContext = (old.context ?? old.description ?? '').trim();
+				const newContext = (merged.context ?? merged.description ?? '').trim();
+				if (oldSource === newSource && oldTarget === newTarget) continue;
+				changes.push({
+					id: old.id,
+					oldSource,
+					newSource,
+					oldTarget,
+					newTarget,
+					oldContext,
+					newContext
+				});
+				prev[idx] = merged;
+			}
+			return { glossary: prev, changes };
+		},
+		[]
+	);
+
+	const mergeSegmentPatches = useCallback(
+		(baseList: SubtitleSegment[], patches: SubtitleSegment[]): SubtitleSegment[] => {
+			if (patches.length === 0) return baseList;
+			const map = new Map(baseList.map((s) => [s.id, s] as const));
+			for (const patch of patches) {
+				const prev = map.get(patch.id);
+				if (!prev) continue;
+				map.set(patch.id, {
+					...prev,
+					text: patch.text ?? prev.text,
+					translation: patch.translation ?? prev.translation
+				});
+			}
+			return baseList.map((s) => map.get(s.id) ?? s);
+		},
+		[]
+	);
+
+	const applyAgentResponseActions = useCallback(
+		async (
+			actions: AgentAction[],
+			baseline: SubtitleSegment[]
+		): Promise<{ edits: ChatEditDiff[]; snapshot: SubtitleSegment[] } | null> => {
+			if (actions.length === 0 || baseline.length === 0) return null;
+
+			const cp = currentProjectRef.current;
+			let combinedList = baseline;
+			const glossaryChanges: GlossaryReplacementChange[] = [];
+
+			for (const action of actions) {
+				if ('UpdateGlossary' in action && cp) {
+					const { glossary, changes } = mergeGlossaryAgentUpdates(
+						cp.glossary ?? [],
+						action.UpdateGlossary.entries
+					);
+					if (changes.length > 0) {
+						glossaryChanges.push(...changes);
+						const nextProject: ProjectData = { ...cp, glossary };
+						currentProjectRef.current = nextProject;
+						setCurrentProject(nextProject);
+						markProjectDirty();
+						if (cp.path) {
+							try {
+								await projectService.updateGlossary(cp.path, glossary);
+							} catch {
+								// состояние проекта уже обновлено локально
+							}
+						}
+					}
+				}
+				if ('EditSegments' in action) {
+					combinedList = mergeSegmentPatches(combinedList, action.EditSegments.segments);
+				}
+			}
+
+			if (glossaryChanges.length > 0) {
+				const patches = buildGlossaryReplacementEdits(glossaryChanges, combinedList);
+				combinedList = mergeSegmentPatches(combinedList, patches);
+			}
+
+			const updated = combinedList.filter((next) => {
+				const prev = baseline.find((s) => s.id === next.id);
+				if (!prev) return false;
+				return (
+					prev.text !== next.text ||
+					(prev.translation ?? '') !== (next.translation ?? '')
+				);
+			});
+			if (updated.length === 0) return null;
+
+			const edits = buildChatEditDiffs(updated, baseline, 'both');
+			if (edits.length === 0) return null;
+
+			const { originals } = applySegmentEdits(updated);
+			if (originals.length === 0) return null;
+
+			return { edits, snapshot: originals };
+		},
+		[
+			applySegmentEdits,
+			buildChatEditDiffs,
+			buildGlossaryReplacementEdits,
+			mergeGlossaryAgentUpdates,
+			mergeSegmentPatches,
+			markProjectDirty
+		]
+	);
 
 	const handleSendChatMessage = useCallback(async () => {
 		const text = chatInput.trim();
@@ -2385,32 +2637,29 @@ ${changesText}
 			const messageForAgent = pendingAttachedSegment
 				? `${text}\n\nПрикрепленная реплика:\n#${pendingAttachedSegment.id} [${formatChatTimecode(pendingAttachedSegment.start)}]\nOriginal: ${pendingAttachedSegment.text}\nTranslation: ${pendingAttachedSegment.translation ?? ''}`
 				: text;
-			const response = await agentService.chat(messageForAgent, {
-				project_id: project?.id ?? null,
-				current_segments: baseline,
-				current_glossary: project?.glossary ?? null,
-				target_language: project?.target_language ?? null
-			});
-
-			let edits: ChatEditDiff[] | undefined;
-			let snapshot: SubtitleSegment[] | undefined;
-			const action = response.action as AgentAction | null | undefined;
-			if (action && 'EditSegments' in action) {
-				const updatedSegments = action.EditSegments.segments;
-				edits = buildChatEditDiffs(updatedSegments, baseline);
-				if (edits.length > 0) {
-					const { originals } = applySegmentEdits(updatedSegments);
-					snapshot = originals;
+			const response = await agentService.chat(
+				messageForAgent,
+				{
+					project_id: project?.id ?? null,
+					current_segments: baseline,
+					current_glossary: project?.glossary ?? null,
+					target_language: project?.target_language ?? null
+				},
+				{
+					sessionId: agentSessionIdRef.current,
+					conversationHistory: buildAgentConversationHistory(chatMessages)
 				}
-			}
+			);
+
+			const applied = await applyAgentResponseActions(response.actions ?? [], baseline);
 
 			const aiMsg: ChatMessage = {
 				id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
 				role: 'assistant',
 				text: response.message ?? '',
-				edits: edits && edits.length > 0 ? edits : undefined,
-				editSnapshot: snapshot,
-				editStatus: snapshot && snapshot.length > 0 ? 'pending' : undefined
+				edits: applied?.edits,
+				editSnapshot: applied?.snapshot,
+				editStatus: applied?.snapshot && applied.snapshot.length > 0 ? 'pending' : undefined
 			};
 			setChatMessages((prev) => [...prev, aiMsg]);
 		} catch (err) {
@@ -2427,7 +2676,15 @@ ${changesText}
 		} finally {
 			setIsAgentBusy(false);
 		}
-	}, [chatInput, isAgentBusy, pendingAttachedSegment, formatChatTimecode, buildChatEditDiffs, applySegmentEdits]);
+	}, [
+		chatInput,
+		isAgentBusy,
+		pendingAttachedSegment,
+		chatMessages,
+		formatChatTimecode,
+		applyAgentResponseActions,
+		buildAgentConversationHistory
+	]);
 
 	const handleChatInputKeyDown = useCallback(
 		(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -2498,6 +2755,24 @@ ${changesText}
 				],
 			},
 			{
+				id: 'view',
+				label: t('menu.view'),
+				items: [
+					{
+						kind: 'toggle',
+						label: t('menu.showOriginalOnVideo'),
+						checked: showOriginalVideoSubtitles,
+						onChange: setShowOriginalVideoSubtitles
+					},
+					{
+						kind: 'toggle',
+						label: t('menu.dualMonitorMode'),
+						checked: dualMonitorMode,
+						onChange: setDualMonitorMode
+					}
+				]
+			},
+			{
 				id: 'ai',
 				label: t('menu.ai'),
 				items: [
@@ -2547,6 +2822,8 @@ ${changesText}
 		],
 		[
 			t,
+			showOriginalVideoSubtitles,
+			dualMonitorMode,
 			performSubtitleUndo,
 			performSubtitleRedo,
 			handleDeleteSelectedSubtitle,
@@ -4013,6 +4290,23 @@ ${changesText}
 													className="my-1 mx-2 border-t border-border-default"
 													role="separator"
 												/>
+											) : subItem.kind === 'toggle' ? (
+												<button
+													key={`${menu.id}-${subItem.label}-${subIdx}`}
+													type="button"
+													role="menuitemcheckbox"
+													aria-checked={subItem.checked}
+													className="px-3 h-[28px] flex items-center gap-2 text-[12px] font-inter whitespace-nowrap text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors w-full"
+													onClick={(e) => {
+														e.stopPropagation();
+														subItem.onChange(!subItem.checked);
+													}}
+												>
+													<span className="w-3 shrink-0 text-center leading-none">
+														{subItem.checked ? '✓' : ''}
+													</span>
+													<span>{subItem.label}</span>
+												</button>
 											) : (
 												<button
 													key={`${menu.id}-${subItem.label}-${subIdx}`}
@@ -4771,6 +5065,9 @@ ${changesText}
 														/>
 													</th>
 												))}
+												<th className="hidden h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
+													<div className="truncate w-full">{t('table.speakerGender')}</div>
+												</th>
 												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
 													<div className="truncate w-full">{t('table.translation')}</div>
 												</th>
@@ -4801,6 +5098,11 @@ ${changesText}
 													</td>
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
 														<div className="truncate">{segment.duration.toFixed(3)}</div>
+													</td>
+													<td className="hidden py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text text-[11px] text-text-secondary">
+														<div className="truncate" title={segment.speaker_gender ?? ''}>
+															{formatSpeakerGenderCell(segment.speaker_gender)}
+														</div>
 													</td>
 													<td
 														className={`py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text ${
@@ -5038,11 +5340,18 @@ ${changesText}
 												{t('video.preview')}
 											</div>
 										)}
+										{showOriginalVideoSubtitles && (
+											<div className="absolute top-12 z-10 w-full text-center px-10 pointer-events-none">
+												<span className="text-white text-[20px] font-bold leading-[20px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]">
+													{currentVideoOriginalLine || '\u00A0'}
+												</span>
+											</div>
+										)}
 										<div className="absolute bottom-12 z-10 w-full text-center px-10 pointer-events-none">
 												<span
 													className="text-white text-[20px] font-bold leading-[20px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]"
 												>
-														{currentVideoSubtitleLine || '\u00A0'}
+														{currentVideoTranslationLine || '\u00A0'}
 												</span>
 										</div>
 								</div>

@@ -577,7 +577,7 @@ pub async fn delete_episode_from_project(
         cfg_dir.join(format!("waveform_{}.json", video.id)),
         cfg_dir.join(format!("waveform_cache_{}.json", video.id)),
     ];
-    // Удаляем также общую вейвформу, если она была сгенерирована до перехода на per-episode.
+    // Удаляем также общую вейвформу, если она была сгенерирована до перехода на per-episode
     if project
         .files
         .iter()

@@ -11,6 +11,8 @@ import {
 import {
   applyAutoGlossaryToProject,
   buildTranscriptionPrompt,
+  mergePromptHintsIntoGlossary,
+  parseTranslationHintsFromPrompt,
   resolveIsoLanguage
 } from '../../utils/glossary';
 
@@ -20,7 +22,7 @@ function joinProjectPath(base: string, ...parts: string[]): string {
   return `${a}/${rest}`;
 }
 
-/** После транскрипции: сегменты на дорожке субтитров, видео только медиа, пара связана + .srt на диске. */
+/* * После транскрипции: сегменты на дорожке субтитров, видео только медиа, пара связана + .srt на диске */
 async function finalizeEpisodePairInProject(
   projectPath: string,
   videoId: string,
@@ -294,13 +296,34 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     setCurrentStep(6);
 
     try {
-      const prompt = translationPrompt.trim() || contextPrompt.trim() || 'Natural subtitle translation';
-      const projectForGlossary = await projectService.open(projectPath!);
+      const combinedPrompt = [translationPrompt, contextPrompt]
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .join('\n\n');
+      const prompt = combinedPrompt || 'Natural subtitle translation';
+      const promptHints = parseTranslationHintsFromPrompt(combinedPrompt);
+      const targetIso =
+        resolveIsoLanguage(targetLanguage) ??
+        resolveIsoLanguage((await projectService.open(projectPath!)).target_language ?? '') ??
+        'en';
+      const projectForGlossary = await applyAutoGlossaryToProject(projectPath!, workingSegments, {
+        targetLanguageIso: targetIso,
+        targetLanguage,
+        contextPrompt: combinedPrompt,
+        fillTranslation: true
+      });
+      const glossary = mergePromptHintsIntoGlossary(
+        projectForGlossary.glossary ?? [],
+        promptHints
+      );
+      if (promptHints.length > 0) {
+        await projectService.save({ ...projectForGlossary, glossary });
+      }
       const translations = await projectService.translateBatch(
         workingSegments,
         targetLanguage,
         prompt,
-        projectForGlossary.glossary
+        glossary
       );
 
       const translatedSegments = workingSegments.map((segment) => {

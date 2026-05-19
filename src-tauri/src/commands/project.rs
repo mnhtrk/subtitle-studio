@@ -160,6 +160,7 @@ pub async fn create_empty_segments(
                 duration: duration_per_segment,
                 text: String::new(),
                 translation: None,
+                speaker_gender: None,
                 flags: None,
             };
             
@@ -190,7 +191,7 @@ pub struct InsertSubtitleSegmentResult {
     pub inserted_id: u32,
 }
 
-/// Вставить пустой субтитр в заданном интервале времени (сегменты пересортировываются по start).
+/// Вставить пустой субтитр в заданном интервале времени (сегменты пересортировываются по start)
 #[tauri::command]
 pub async fn insert_subtitle_segment(
     project_path: String,
@@ -224,6 +225,7 @@ pub async fn insert_subtitle_segment(
             duration: dur,
             text: String::new(),
             translation: None,
+            speaker_gender: None,
             flags: None,
         };
 
@@ -266,7 +268,7 @@ pub struct DeleteSubtitleSegmentResult {
     pub segments: Vec<SubtitleSegment>,
 }
 
-/// Удалить сегмент по id, остальные перенумеровать 1..n по времени.
+/// Удалить сегмент по id, остальные перенумеровать 1..n по времени
 #[tauri::command]
 pub async fn delete_subtitle_segment(
     project_path: String,

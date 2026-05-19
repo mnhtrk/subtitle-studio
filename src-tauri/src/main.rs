@@ -10,6 +10,7 @@ mod subtitle_parser;
 mod postprocessing;
 mod audio_preprocessing;
 mod agent;
+mod gender_detection;
 
 use tauri_plugin_sql::{Migration, MigrationKind};
 

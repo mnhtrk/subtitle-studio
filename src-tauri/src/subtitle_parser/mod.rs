@@ -41,8 +41,8 @@ pub fn parse_subtitles(content: &str, format: SubtitleFormat) -> Result<Vec<Subt
     Ok(segments)
 }
 
-/// Удаляет теги форматирования (`<...>`, `{...}`) и схлопывает пробелы.
-/// Поддерживает SRT/VTT-теги цвета, курсива и WebVTT-классы вида `<c.cyan>`.
+/// Удаляет теги форматирования (`<...>`, `{...}`) и схлопывает пробелы
+/// Поддерживает SRT/VTT-теги цвета, курсива и WebVTT-классы вида `<c.cyan>`
 pub fn sanitize_subtitle_text(input: &str) -> String {
     let mut stripped = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();

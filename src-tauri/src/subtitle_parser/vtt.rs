@@ -71,6 +71,7 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
                 duration: end - start,
                 text,
                 translation: None,
+                speaker_gender: None,
                 flags: None,
             });
         } else {

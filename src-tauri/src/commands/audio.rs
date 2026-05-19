@@ -152,7 +152,7 @@ pub async fn generate_waveform_png(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    /* Усиление перед showwavespic, тихие участки не плоские. */
+    /* Усиление перед showwavespic, тихие участки не плоские */
     let filter = format!(
         "[0:a]volume=10dB,showwavespic=s={}x{}:colors=0xADFF2F|0x121212",
         w, h
@@ -180,7 +180,7 @@ pub async fn generate_waveform_png(
     Ok(())
 }
 
-/// Длительность медиа через ffprobe для таймкода плеера и импорта.
+/// Длительность медиа через ffprobe для таймкода плеера и импорта
 #[tauri::command]
 pub async fn probe_media_duration(media_path: String) -> Result<f64, String> {
     let p = Path::new(&media_path);
@@ -195,29 +195,90 @@ pub async fn media_duration_seconds(path: &Path) -> Result<f64, String> {
 }
 
 async fn get_audio_duration(audio_path: &Path) -> Result<f64, String> {
+    if !audio_path.exists() {
+        return Err(format!("Файл не найден: {}", audio_path.display()));
+    }
+
+    match probe_duration_seconds(audio_path, None, "format=duration").await {
+        Ok(d) if d.is_finite() && d > 0.0 => return Ok(d),
+        Ok(_) | Err(_) => {}
+    }
+
+    probe_duration_seconds(audio_path, Some("a:0"), "stream=duration").await
+}
+
+async fn probe_duration_seconds(
+    audio_path: &Path,
+    select_stream: Option<&str>,
+    show_entries: &str,
+) -> Result<f64, String> {
     use std::process::Stdio;
     use tokio::process::Command;
-    
+
     let mut cmd = Command::new("ffprobe");
-    cmd.arg("-v")
-        .arg("quiet")
-        .arg("-show_entries")
-        .arg("format=duration")
+    cmd.arg("-v").arg("error");
+    if let Some(stream) = select_stream {
+        cmd.arg("-select_streams").arg(stream);
+    }
+    cmd.arg("-show_entries")
+        .arg(show_entries)
         .arg("-of")
-        .arg("default=nw=1")
+        .arg("csv=p=0")
         .arg(audio_path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    
-    let output = cmd.output().await.map_err(|e| format!("Ошибка ffprobe: {}", e))?;
-    
-    if output.status.success() {
-        let duration_str = String::from_utf8_lossy(&output.stdout);
-        let duration = duration_str.trim().parse::<f64>()
-            .map_err(|e| format!("Ошибка парсинга длительности: {}", e))?;
-        Ok(duration)
-    } else {
-        Err("Не удалось получить длительность аудио".to_string())
+        .stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Ошибка ffprobe: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ffprobe не смог прочитать длительность {}: {}",
+            audio_path.display(),
+            stderr.trim()
+        ));
+    }
+
+    parse_ffprobe_duration(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_ffprobe_duration(raw: &str) -> Result<f64, String> {
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.eq_ignore_ascii_case("N/A") {
+            continue;
+        }
+        let value = line
+            .strip_prefix("duration=")
+            .unwrap_or(line)
+            .trim();
+        if let Ok(duration) = value.parse::<f64>() {
+            if duration.is_finite() && duration >= 0.0 {
+                return Ok(duration);
+            }
+        }
+    }
+    Err(format!(
+        "Ошибка парсинга длительности: не найдено число в выводе ffprobe: {:?}",
+        raw.trim()
+    ))
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::parse_ffprobe_duration;
+
+    #[test]
+    fn parses_plain_seconds() {
+        assert_eq!(parse_ffprobe_duration("123.45\n").unwrap(), 123.45);
+    }
+
+    #[test]
+    fn parses_duration_prefix() {
+        assert_eq!(parse_ffprobe_duration("duration=9.5").unwrap(), 9.5);
     }
 }
 
