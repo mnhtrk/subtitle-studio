@@ -82,6 +82,83 @@ pub async fn extract_audio_from_video(
     }
 }
 
+#[tauri::command]
+pub async fn extract_audio_range(
+    video_path: String,
+    start_seconds: f64,
+    end_seconds: f64,
+    output_path: String,
+    _app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    println!(
+        "Извлечение аудио-диапазона из: {} [{:.3}s..{:.3}s]",
+        video_path, start_seconds, end_seconds
+    );
+
+    let video_path_buf = Path::new(&video_path);
+    if !video_path_buf.exists() {
+        return Err(format!("Видео файл не найден: {}", video_path));
+    }
+
+    let output_path_buf = Path::new(&output_path);
+    if let Some(parent) = output_path_buf.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    if !is_ffmpeg_available().await {
+        return Err("FFmpeg не установлен в системе".to_string());
+    }
+
+    let safe_start = start_seconds.max(0.0);
+    let duration = (end_seconds - safe_start).max(0.05);
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-ss")
+        .arg(format!("{:.3}", safe_start))
+        .arg("-i")
+        .arg(&video_path)
+        .arg("-t")
+        .arg(format!("{:.3}", duration))
+        .arg("-vn")
+        .arg("-ac")
+        .arg("1")
+        .arg("-ar")
+        .arg("16000")
+        .arg("-acodec")
+        .arg("libmp3lame")
+        .arg("-b:a")
+        .arg("64k")
+        .arg("-y")
+        .arg(&output_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Ошибка запуска FFmpeg: {}", e))?;
+
+    if output.status.success() {
+        if output_path_buf.exists() {
+            let metadata = std::fs::metadata(&output_path).map_err(|e| e.to_string())?;
+            if metadata.len() > 0 {
+                return Ok(output_path);
+            } else {
+                return Err("Созданный аудиофайл пустой".to_string());
+            }
+        } else {
+            return Err("Аудиофайл не был создан".to_string());
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "FFmpeg ошибка:\nSTDERR: {}\nSTDOUT: {}",
+            stderr, stdout
+        ));
+    }
+}
+
 /// Проверяет доступность FFmpeg в системе
 async fn is_ffmpeg_available() -> bool {
     let output = Command::new("ffmpeg")

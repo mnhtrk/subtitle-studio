@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from 'react';
-import { open } from '@tauri-apps/plugin-dialog'; //выбор папки
+import { open } from '@tauri-apps/plugin-dialog';
 import { projectService } from '../../services/projectService';
+import { useI18n } from '../../i18n';
+import { DraggableModalShell } from './DraggableModalShell';
 
 const languageOptions = [
   'English',
@@ -41,6 +43,7 @@ function joinPath(parent: string, child: string): string {
 }
 
 export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onProjectCreated }) => {
+  const { t } = useI18n();
   const [name, setName] = useState('');
   const [location, setLocation] = useState('');
   const [targetLang, setTargetLang] = useState('English');
@@ -60,7 +63,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
       const selected = await open({
         directory: true,
         multiple: false,
-        title: 'Select Project Directory'
+        title: t('newProject.selectDirectory')
       });
       if (selected && typeof selected === 'string') {
         setLocation(selected);
@@ -72,11 +75,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
 
   const handleCreate = async () => {
     if (!name.trim() || !location) {
-      alert('Please fill in all fields');
+      alert(t('newProject.fillAllFields'));
       return;
     }
     if (!sanitizedFolderName) {
-      alert('Project name contains only invalid characters. Please use letters, digits, spaces or dashes.');
+      alert(t('newProject.invalidName'));
       return;
     }
 
@@ -90,7 +93,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
     } catch (err) {
       console.error(err);
       const detail = err instanceof Error ? err.message : String(err);
-      alert(`Failed to create project: ${detail}`);
+      alert(t('newProject.createFailed', { detail }));
     } finally {
       setIsCreating(false);
     }
@@ -98,9 +101,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
 	
 	
 	return (
-    <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-      <div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
-        
+    <DraggableModalShell
+      width={780}
+      className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
+    >
         {/* Хедер модалки с крестиком */}
         <div className="flex justify-end h-5"> 
           <button onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
@@ -114,10 +118,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
           {/* Левая колонна */}
           <div className="flex flex-col">
             <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
-              Create a new project
+              {t('newProject.title')}
             </h1>
             <p className="text-body-reg text-text-secondary">
-              Organize your work by title. A project folder stores your videos and subtitles.
+              {t('newProject.desc')}
             </p>
           </div>
 
@@ -126,7 +130,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
             
             <div className="flex flex-col gap-[24px]">
               <div className="flex flex-col gap-[8px]">
-                <label className="text-caption text-text-secondary">Project name</label>
+                <label className="text-caption text-text-secondary">{t('newProject.projectName')}</label>
                 <input 
                   type="text" 
 									value={name}
@@ -137,12 +141,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
               </div>
 
               <div className="flex flex-col gap-[8px]">
-                <label className="text-caption text-text-secondary">Project location</label>
+                <label className="text-caption text-text-secondary">{t('newProject.projectLocation')}</label>
                 <div className="relative cursor-pointer" onClick={handleSelectFolder}>
                   <input 
                     type="text" 
                     readOnly
-                    value={location || "Click to select folder..."}
+                    value={location || t('newProject.selectFolder')}
                     className="w-full px-[12px] py-[10px] pr-[40px] bg-secondary-main border border-border-default rounded-[8px] text-body-reg text-text-secondary cursor-pointer"
                   />
                   <div className="absolute right-[12px] top-1/2 -translate-y-1/2 text-text-primary">
@@ -153,13 +157,13 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
                 </div>
                 {previewPath && (
                   <p className="text-caption text-text-secondary leading-tight break-all">
-                    Will be created at: <span className="text-text-primary">{previewPath}</span>
+                    {t('newProject.willBeCreated')} <span className="text-text-primary">{previewPath}</span>
                   </p>
                 )}
               </div>
 
               <div className="flex flex-col gap-[8px]">
-                <label className="text-caption text-text-secondary">Target language</label>
+                <label className="text-caption text-text-secondary">{t('newProject.targetLanguage')}</label>
                 <select
                   value={targetLang}
                   onChange={(e) => setTargetLang(e.target.value)}
@@ -180,13 +184,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onPro
 							onClick={handleCreate}
   						disabled={isCreating}
 							className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm">
-                {isCreating ? 'Creating...' : 'Create'}
+                {isCreating ? t('newProject.creating') : t('newProject.create')}
               </button>
             </div>
 
           </div>
         </div>
-      </div>
-    </div>
+    </DraggableModalShell>
   );
 };

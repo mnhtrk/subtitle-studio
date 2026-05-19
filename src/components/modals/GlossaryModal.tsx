@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { GlossaryEntry } from '../../services/projectService';
+import { useI18n } from '../../i18n';
+import { DraggableModalShell } from './DraggableModalShell';
 
 interface GlossaryRow {
   entryId?: string;
@@ -24,11 +26,6 @@ export interface GlossaryReplacementChange {
   oldContext: string;
   newContext: string;
 }
-
-const emptyRows = (n: number): GlossaryRow[] =>
-  Array(n)
-    .fill(null)
-    .map(() => ({ original: '', translated: '', context: '' }));
 
 function entriesToRows(entries: GlossaryEntry[]): GlossaryRow[] {
   const mapped: GlossaryRow[] = entries.map((e) => ({
@@ -91,6 +88,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
   initialEntries,
   onSaved
 }) => {
+  const { t } = useI18n();
   const [rows, setRows] = useState<GlossaryRow[]>(() => entriesToRows(initialEntries));
   const [saveError, setSaveError] = useState<string | null>(null);
   const [loadedEntries, setLoadedEntries] = useState<GlossaryEntry[]>(initialEntries);
@@ -138,8 +136,10 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
   const canSave = Boolean(projectPath);
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center z-[10000] pointer-events-none">
-      <div className="pointer-events-auto w-[840px] h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+    <DraggableModalShell
+      width={840}
+      className="h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
+    >
         <div className="flex justify-end h-5 mb-2">
           <div className="flex items-center gap-2">
             <button
@@ -155,14 +155,14 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
 
         <div className="flex flex-col mb-8">
           <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[32px] text-text-primary mb-2">
-            Glossary
+            {t('glossary.title')}
           </h1>
           <p className="text-body-reg text-text-secondary">
-            Define how the AI agent should translate specific names or terms.
+            {t('glossary.desc')}
           </p>
           {(saveError || !projectPath) && (
             <p className="text-caption text-amber-600/90 mt-2">
-              {!projectPath && 'Open a project to edit the glossary.'}
+              {!projectPath && t('glossary.openProjectFirst')}
               {saveError && ` ${saveError}`}
             </p>
           )}
@@ -174,13 +174,13 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
               <thead className="sticky top-0 bg-secondary-main z-20">
                 <tr className="h-[40px] border-b border-border-default">
                   <th className="px-4 text-left text-[14px] font-bold leading-[18px] text-text-primary border-r border-border-default w-[30%]">
-                    Original
+                    {t('glossary.original')}
                   </th>
                   <th className="px-4 text-left text-[14px] font-bold leading-[18px] text-text-primary border-r border-border-default w-[30%]">
-                    Translated
+                    {t('glossary.translated')}
                   </th>
                   <th className="px-4 text-left text-[14px] font-bold leading-[18px] text-text-primary">
-                    Meaning / Context
+                    {t('glossary.context')}
                   </th>
                 </tr>
               </thead>
@@ -196,7 +196,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
                         value={row.original}
                         onChange={(e) => handleUpdate(i, 'original', e.target.value)}
                         className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-primary placeholder:text-text-secondary/60"
-                        placeholder="Type term..."
+                        placeholder={t('glossary.termPlaceholder')}
                       />
                     </td>
                     <td className="p-0 border-r border-border-default">
@@ -205,7 +205,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
                         value={row.translated}
                         onChange={(e) => handleUpdate(i, 'translated', e.target.value)}
                         className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-primary placeholder:text-text-secondary/60"
-                        placeholder="Translation..."
+                        placeholder={t('glossary.translationPlaceholder')}
                       />
                     </td>
                     <td className="p-0">
@@ -214,7 +214,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
                         value={row.context}
                         onChange={(e) => handleUpdate(i, 'context', e.target.value)}
                         className="w-full h-full px-4 bg-transparent outline-none text-body-reg text-text-secondary placeholder:text-text-secondary/60"
-                        placeholder="Optional context..."
+                        placeholder={t('glossary.contextPlaceholder')}
                       />
                     </td>
                   </tr>
@@ -231,10 +231,9 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
             disabled={!canSave}
             className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover disabled:opacity-40 disabled:pointer-events-none text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
           >
-            Save changes
+            {t('glossary.saveChanges')}
           </button>
         </div>
-      </div>
-    </div>
+    </DraggableModalShell>
   );
 };

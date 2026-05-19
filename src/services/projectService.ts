@@ -22,7 +22,7 @@ export interface ProjectFile {
   path: string;
   duration?: number | null;
   subtitle_segments?: SubtitleSegment[] | null;
-  /** Связанный файл эпизода: у субтитров — id видео, у видео — id субтитров. */
+  /** Связанный файл эпизода: у субтитров id видео, у видео id субтитров. */
   linked_file_id?: string | null;
   created_at: string;
   updated_at: string;
@@ -117,6 +117,15 @@ export const projectService = {
     return await invoke('extract_audio_from_video', { videoPath, outputPath });
   },
 
+  extractAudioRange: async (
+    videoPath: string,
+    startSeconds: number,
+    endSeconds: number,
+    outputPath: string
+  ): Promise<string> => {
+    return await invoke('extract_audio_range', { videoPath, startSeconds, endSeconds, outputPath });
+  },
+
   transcribeAudio: async (
     filePath: string,
     language?: string,
@@ -134,6 +143,29 @@ export const projectService = {
     return await invoke('import_existing_subtitles', { subtitlePath, format: null, projectPath, fileId });
   },
 
+  parseSubtitleFile: async (filePath: string): Promise<SubtitleSegment[]> => {
+    return await invoke('parse_subtitle_file', { filePath, format: null });
+  },
+
+  deleteEpisode: async (projectPath: string, videoId: string): Promise<ProjectData> => {
+    return await invoke('delete_episode_from_project', { projectPath, videoId });
+  },
+
+  removeFileFromProject: async (
+    projectPath: string,
+    fileId: string,
+    deletePhysicalFile: boolean
+  ): Promise<void> => {
+    return await invoke('remove_file_from_project', { projectPath, fileId, deletePhysicalFile });
+  },
+
+  deleteProjectFileArtifact: async (
+    projectPath: string,
+    relativePath: string
+  ): Promise<boolean> => {
+    return await invoke('delete_project_file_artifact', { projectPath, relativePath });
+  },
+
   getGlossary: async (projectPath: string): Promise<GlossaryEntry[]> => {
     return await invoke('get_glossary', { projectPath });
   },
@@ -142,7 +174,7 @@ export const projectService = {
     return await invoke('update_glossary', { projectPath, entries });
   },
 
-  /** Черновой глоссарий по частым словам + GPT (нужен API key). */
+  /** Черновой глоссарий по частым словам + GPt */
   autoGenerateGlossary: async (
     segments: SubtitleSegment[],
     options: AutoGlossaryOptions

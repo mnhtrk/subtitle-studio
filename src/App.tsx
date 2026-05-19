@@ -12,8 +12,12 @@ import { WelcomeModal } from './components/modals/WelcomeModal';
 import { NewProjectModal } from './components/modals/NewProjectModal';
 import { WizardModal } from './components/modals/WizardModal';
 import { ExportModal } from './components/modals/ExportModal';
+import { FindReplaceModal } from './components/modals/FindReplaceModal';
+import type { FindMatch } from './utils/findReplace';
 import { GlossaryModal, type GlossaryReplacementChange } from './components/modals/GlossaryModal';
 import { ActivationModal } from './components/modals/ActivationModal';
+import { SettingsModal } from './components/modals/SettingsModal';
+import { useI18n } from './i18n';
 
 const appWindow = getCurrentWindow();
 
@@ -22,7 +26,8 @@ import { agentService, AgentAction } from './services/agentService';
 import {
 	deleteSegmentById,
 	insertEmptySegment,
-	splitSegmentAt
+	splitSegmentAt,
+	sortAndRenumberSubtitleIds
 } from './utils/subtitleSegmentsLocal';
 
 import iconNewProject from './assets/icons/new-project.svg';
@@ -47,7 +52,6 @@ import iconVolumeMute from './assets/icons/volume-mute.svg';
 import iconZoomIn from './assets/icons/zoom-in.svg';
 import iconZoomOut from './assets/icons/zoom-out.svg';
 
-/** SVG как CSS-mask: цвет задаётся фоном (text-primary / white), тема переключается автоматически. */
 function sidebarIconMaskStyle(src: string): React.CSSProperties {
 	return {
 		maskImage: `url(${src})`,
@@ -65,7 +69,6 @@ const SIDEBAR_ICON_CLASS =
 const PANEL_HEADER_ICON_CLASS =
 	'pointer-events-none inline-block h-4 w-4 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
 
-/** Видеоплеер 24×24, именованные group/* чтобы не цеплять чужие group-hover */
 const VIDEO_CTRL_BTN_CLASS =
 	'flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-40';
 
@@ -78,7 +81,6 @@ const VIDEO_CTRL_ICON_STOP =
 const VIDEO_CTRL_ICON_VOL =
 	'pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/vvol:scale-110 group-active/vvol:scale-[0.92]';
 
-/** Таймлайн zoom 22×22, без фона при hover */
 const TIMELINE_ZOOM_BTN_CLASS =
 	'flex h-[22px] w-[22px] shrink-0 items-center justify-center border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40';
 
@@ -204,7 +206,43 @@ function formatPlaybackClock(seconds: number): string {
 }
 
 const MIN_SEGMENT_DURATION = 0.05;
+const RETRANSCRIBE_LANGUAGE_OPTIONS: ReadonlyArray<string> = [
+	'English',
+	'Russian',
+	'Spanish',
+	'French',
+	'German',
+	'Italian',
+	'Portuguese',
+	'Chinese',
+	'Japanese',
+	'Korean',
+	'Arabic',
+	'Hindi',
+	'Turkish',
+	'Polish',
+	'Ukrainian'
+];
+const RETRANSCRIBE_LANGUAGE_ISO: Record<string, string> = {
+	English: 'en',
+	Russian: 'ru',
+	Spanish: 'es',
+	French: 'fr',
+	German: 'de',
+	Italian: 'it',
+	Portuguese: 'pt',
+	Chinese: 'zh',
+	Japanese: 'ja',
+	Korean: 'ko',
+	Arabic: 'ar',
+	Hindi: 'hi',
+	Turkish: 'tr',
+	Polish: 'pl',
+	Ukrainian: 'uk'
+};
 const MAX_SUBTITLE_UNDO = 80;
+const TIMELINE_EDGE_SCROLL_MARGIN = 48;
+const TIMELINE_EDGE_SCROLL_BASE = 14;
 const ACTIVATION_COMPLETED_STORAGE_KEY = 'subtitle-studio-activation-completed';
 
 function cloneSubtitleSegments(segs: SubtitleSegment[]): SubtitleSegment[] {
@@ -377,6 +415,8 @@ function stepTimelineZoom(current: number, direction: 1 | -1): number {
 }
 
 export default function App() {
+	const { t, locale } = useI18n();
+	const timelineBtnPx = locale === 'ru' ? 'px-[16px]' : 'px-[12px]';
 
 	// СОСТОЯНИЕ ОКНА И РАЗМЕРОВ ЭКРАНА 
 	const [windowSize, setWindowSize] = useState({
@@ -487,12 +527,22 @@ export default function App() {
 
 	// --- МОДАЛЬНЫЕ ОКНА ---
 	const [activeModal, setActiveModal] = useState<
-		'activation' | 'welcome' | 'createProject' | 'wizard' | 'glossary' | 'export' | null
+		| 'activation'
+		| 'welcome'
+		| 'createProject'
+		| 'wizard'
+		| 'glossary'
+		| 'export'
+		| 'settings'
+		| 'findReplace'
+		| null
 	>(null);
+	const [findHighlight, setFindHighlight] = useState<FindMatch | null>(null);
 	const [currentProject, setCurrentProject] = useState<ProjectData | null>(null);
 	const [generatedSegments, setGeneratedSegments] = useState<SubtitleSegment[]>([]);
 	const [activeSubtitleFileId, setActiveSubtitleFileId] = useState<string | null>(null);
 	const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number>(-1);
+	const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<number>>(() => new Set());
 	const [isConfigFolderOpen, setIsConfigFolderOpen] = useState(false);
 	const [isSubtitlesFolderOpen, setIsSubtitlesFolderOpen] = useState(false);
 	/** Затемнение/подсветка мастера для пустого проекта — только один раз за «сессию» этого проекта (сброс при смене path). */
@@ -524,10 +574,19 @@ export default function App() {
 		origEnd: number;
 		t0: number;
 	} | null>(null);
+	const timelineGroupMoveRef = useRef<{
+		t0: number;
+		minDelta: number;
+		maxDelta: number;
+		origs: Map<number, { start: number; end: number }>;
+	} | null>(null);
 	const segmentBodyDragMovedRef = useRef(false);
 	const timelineRangeSelectDragRef = useRef<{ t0: number } | null>(null);
+	const selectedSegmentIdsRef = useRef<Set<number>>(new Set());
 	const undoSegmentsStackRef = useRef<SubtitleSegment[][]>([]);
 	const redoSegmentsStackRef = useRef<SubtitleSegment[][]>([]);
+	const undoProjectStackRef = useRef<ProjectData[]>([]);
+	const lastUndoDomainRef = useRef<'project' | 'subtitle' | null>(null);
 
 	const [videoDuration, setVideoDuration] = useState(0);
 	const [currentPlaybackTime, setCurrentPlaybackTime] = useState(0);
@@ -553,6 +612,25 @@ export default function App() {
 		start: number;
 		end: number;
 	} | null>(null);
+	/** Точные границы последнего rubber-band выделения (для Retranscribe и т.п.). */
+	const [timelineRubberRange, setTimelineRubberRange] = useState<{ start: number; end: number } | null>(null);
+	const [timelineContextMenu, setTimelineContextMenu] = useState<{
+		x: number;
+		y: number;
+		ids: number[];
+		range: { start: number; end: number } | null;
+	} | null>(null);
+	const [retranscribeBusy, setRetranscribeBusy] = useState<{ stage: 'audio' | 'transcribe' | 'translate' | 'apply' } | null>(null);
+	const [retranscribeError, setRetranscribeError] = useState<string | null>(null);
+	const [retranscribeSetup, setRetranscribeSetup] = useState<{ range: { start: number; end: number } } | null>(null);
+	const [retranscribeLanguage, setRetranscribeLanguage] = useState<string>('English');
+	const [retranscribePrompt, setRetranscribePrompt] = useState<string>('');
+	const [projectFileMenu, setProjectFileMenu] = useState<{ x: number; y: number; file: ProjectFile } | null>(null);
+	const [selectedTreeItem, setSelectedTreeItem] = useState<
+		| { kind: 'file'; id: string }
+		| { kind: 'folder'; name: 'config' | 'video' | 'subtitles' }
+		| null
+	>(null);
 
 	const projectDirtyRef = useRef(false);
 	const markProjectDirty = useCallback(() => {
@@ -643,6 +721,7 @@ export default function App() {
 
 	segmentsRef.current = generatedSegments;
 	currentProjectRef.current = currentProject;
+	selectedSegmentIdsRef.current = selectedSegmentIds;
 
 	useLayoutEffect(() => {
 		if (selectedSegmentIndex < 0) return;
@@ -653,16 +732,59 @@ export default function App() {
 		);
 		row?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
 	}, [selectedSegmentIndex, generatedSegments]);
+
+	const ensureTimelineCenteredAtTime = useCallback((t: number) => {
+		const scr = timelineScrollRef.current;
+		const inner = timelineInnerRef.current;
+		if (!scr || !inner) return;
+		const td = timelineTotalDurationRef.current;
+		const innerW = inner.offsetWidth;
+		if (td <= 0 || innerW <= 0) return;
+		const x = (Math.max(0, t) / td) * innerW;
+		const viewLeft = scr.scrollLeft;
+		const viewRight = viewLeft + scr.clientWidth;
+		const margin = 24;
+		if (x < viewLeft + margin || x > viewRight - margin) {
+			const target = Math.max(0, Math.min(scr.scrollWidth - scr.clientWidth, x - scr.clientWidth / 2));
+			scr.scrollLeft = target;
+		}
+	}, []);
+
+	const selectSegmentAndSeek = useCallback((idxOrUpdater: number | ((prev: number) => number)) => {
+		setSelectedSegmentIndex((prev) => {
+			const next = typeof idxOrUpdater === 'function' ? idxOrUpdater(prev) : idxOrUpdater;
+			if (next < 0) return next;
+			const seg = segmentsRef.current[next];
+			if (seg) {
+				const t = Math.max(0, seg.start);
+				setCurrentPlaybackTime(t);
+				const v = videoRef.current;
+				if (v) {
+					try { v.currentTime = t; } catch { /* noop */ }
+				}
+				ensureTimelineCenteredAtTime(t);
+			}
+			return next;
+		});
+	}, [ensureTimelineCenteredAtTime]);
 	timelineTotalDurationRef.current = timelineTotalDuration;
 	currentPlaybackTimeRef.current = currentPlaybackTime;
 
 	const currentVideoSubtitleLine = useMemo(() => {
 		const t = currentPlaybackTime;
+		const sel = selectedSegmentIndex >= 0 ? generatedSegments[selectedSegmentIndex] : null;
+		if (sel) {
+			const tolerance = 0.6;
+			if (t >= sel.start - tolerance && t < sel.end) {
+				const tr = sel.translation?.trim();
+				return tr ?? '';
+			}
+		}
 		const seg = generatedSegments.find((s) => t >= s.start && t < s.end);
 		if (!seg) return '';
 		const tr = seg.translation?.trim();
 		return tr ?? '';
-	}, [generatedSegments, currentPlaybackTime]);
+	}, [generatedSegments, currentPlaybackTime, selectedSegmentIndex]);
 
 	const timelineSegmentsSorted = useMemo(
 		() =>
@@ -798,45 +920,43 @@ export default function App() {
 			console.error('save project', e);
 			const detail = e instanceof Error ? e.message : String(e);
 			try {
-				await message(detail, { title: 'Ошибка сохранения', kind: 'error' });
+				await message(detail, { title: t('dialog.saveErrorTitle'), kind: 'error' });
 			} catch {
-				window.alert(`Ошибка сохранения: ${detail}`);
+				window.alert(`${t('dialog.saveErrorTitle')}: ${detail}`);
 			}
 			return false;
 		}
-	}, [chatMessages, clearProjectDirty, exportSrtForProject, flushSubtitleEditorToProject]);
+	}, [chatMessages, clearProjectDirty, exportSrtForProject, flushSubtitleEditorToProject, t]);
 
 	const maybeSaveBeforeSwitchingProject = useCallback(async (): Promise<boolean> => {
 		flushSubtitleEditorToProject();
 		if (!projectDirtyRef.current) return true;
 		let saveFirst: boolean;
 		try {
-			saveFirst = await ask('В проекте есть несохранённые изменения. Сохранить перед продолжением?', {
-				title: 'Subtitle Studio',
+			saveFirst = await ask(t('dialog.saveBeforeSwitch'), {
+				title: t('dialog.appTitle'),
 				kind: 'warning'
 			});
 		} catch {
-			saveFirst = window.confirm(
-				'В проекте есть несохранённые изменения. Сохранить перед продолжением?'
-			);
+			saveFirst = window.confirm(t('dialog.saveBeforeSwitch'));
 		}
 		if (saveFirst) {
 			return await handleSaveProject();
 		}
 		return true;
-	}, [handleSaveProject, flushSubtitleEditorToProject]);
+	}, [handleSaveProject, flushSubtitleEditorToProject, t]);
 
 	const handleExitProject = useCallback(async () => {
 		flushSubtitleEditorToProject();
 		if (currentProjectRef.current && projectDirtyRef.current) {
 			let saveFirst: boolean;
 			try {
-				saveFirst = await ask('Сохранить изменения перед закрытием проекта?', {
-					title: 'Subtitle Studio',
+				saveFirst = await ask(t('dialog.saveBeforeExit'), {
+					title: t('dialog.appTitle'),
 					kind: 'warning'
 				});
 			} catch {
-				saveFirst = window.confirm('Сохранить изменения перед закрытием проекта?');
+				saveFirst = window.confirm(t('dialog.saveBeforeExit'));
 			}
 			if (saveFirst) {
 				const ok = await handleSaveProject();
@@ -848,20 +968,69 @@ export default function App() {
 		setGeneratedSegments([]);
 		setActiveSubtitleFileId(null);
 		setSelectedSegmentIndex(-1);
+		setSelectedSegmentIds(new Set());
+		setTimelineRubberRange(null);
+		setTimelineContextMenu(null);
 		hydrateAgentChatFromProject(null);
 		undoSegmentsStackRef.current = [];
 		redoSegmentsStackRef.current = [];
+		undoProjectStackRef.current = [];
+		lastUndoDomainRef.current = null;
 		clearProjectDirty();
 		setActiveMenu(null);
 		setActiveModal(null);
-	}, [handleSaveProject, clearProjectDirty, flushSubtitleEditorToProject, hydrateAgentChatFromProject]);
+	}, [handleSaveProject, clearProjectDirty, flushSubtitleEditorToProject, hydrateAgentChatFromProject, t]);
 
 	const pushSubtitleHistorySnapshot = useCallback(() => {
 		if (!activeSubtitleFileId) return;
 		undoSegmentsStackRef.current.push(cloneSubtitleSegments(segmentsRef.current));
 		if (undoSegmentsStackRef.current.length > MAX_SUBTITLE_UNDO) undoSegmentsStackRef.current.shift();
 		redoSegmentsStackRef.current = [];
+		lastUndoDomainRef.current = 'subtitle';
 	}, [activeSubtitleFileId]);
+
+	const pushProjectHistorySnapshot = useCallback(() => {
+		const cp = currentProjectRef.current;
+		if (!cp) return;
+		undoProjectStackRef.current.push(structuredClone(cp));
+		if (undoProjectStackRef.current.length > MAX_SUBTITLE_UNDO) undoProjectStackRef.current.shift();
+		lastUndoDomainRef.current = 'project';
+	}, []);
+
+	const applyProjectSnapshot = useCallback((project: ProjectData) => {
+		currentProjectRef.current = project;
+		setCurrentProject(project);
+		const active =
+			activeSubtitleFileId != null
+				? project.files.find((f) => f.id === activeSubtitleFileId)
+				: null;
+		const fallback =
+			active ??
+			project.files.find(
+				(f) => f.file_type === 'Subtitle' && (f.subtitle_segments?.length ?? 0) > 0
+			) ??
+			project.files.find((f) => f.file_type === 'Subtitle') ??
+			project.files.find((f) => f.file_type === 'Video') ??
+			null;
+		setActiveSubtitleFileId(fallback?.id ?? null);
+		setGeneratedSegments(fallback?.subtitle_segments ?? []);
+		setSelectedSegmentIndex((fallback?.subtitle_segments?.length ?? 0) > 0 ? 0 : -1);
+		setSelectedSegmentIds(new Set());
+		setTimelineRubberRange(null);
+		setTimelineInsertRange(null);
+		setSelectedTreeItem(null);
+		markProjectDirty();
+	}, [activeSubtitleFileId, markProjectDirty]);
+
+	const performProjectUndo = useCallback(async () => {
+		const prev = undoProjectStackRef.current.pop();
+		if (!prev) return false;
+		applyProjectSnapshot(prev);
+		await projectService.save(prev);
+		clearProjectDirty();
+		if (undoProjectStackRef.current.length === 0) lastUndoDomainRef.current = null;
+		return true;
+	}, [applyProjectSnapshot, clearProjectDirty]);
 
 	const applySubtitleSegmentsSnapshot = useCallback(
 		(segments: SubtitleSegment[]) => {
@@ -893,6 +1062,7 @@ export default function App() {
 		const prev = stack.pop()!;
 		redoSegmentsStackRef.current.push(cloneSubtitleSegments(segmentsRef.current));
 		applySubtitleSegmentsSnapshot(prev);
+		if (stack.length === 0) lastUndoDomainRef.current = null;
 	}, [activeSubtitleFileId, applySubtitleSegmentsSnapshot]);
 
 	const performSubtitleRedo = useCallback(() => {
@@ -906,13 +1076,42 @@ export default function App() {
 
 	const handleDeleteSelectedSubtitle = useCallback(() => {
 		if (!activeSubtitleFileId) return;
-		if (selectedSegmentIndex < 0) return;
-		const seg = segmentsRef.current[selectedSegmentIndex];
-		if (!seg) return;
 		const cp = currentProjectRef.current;
 		if (!cp) return;
-		pushSubtitleHistorySnapshot();
 		const fileId = activeSubtitleFileId;
+		const segs = segmentsRef.current;
+		const multiSelIds = selectedSegmentIdsRef.current;
+
+		if (multiSelIds.size > 0) {
+			const idsToDelete = new Set<number>(multiSelIds);
+			const filtered = segs.filter((s) => !idsToDelete.has(s.id));
+			if (filtered.length === segs.length) return;
+			const firstDeletedIdx = segs.findIndex((s) => idsToDelete.has(s.id));
+			pushSubtitleHistorySnapshot();
+			const segments = sortAndRenumberSubtitleIds(filtered);
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === fileId ? { ...f, subtitle_segments: segments } : f
+				)
+			};
+			currentProjectRef.current = nextProject;
+			setGeneratedSegments(segments);
+			setCurrentProject(nextProject);
+			markProjectDirty();
+			setSelectedSegmentIds(new Set());
+			setTimelineRubberRange(null);
+			setTimelineInsertRange(null);
+			const newLen = segments.length;
+			if (newLen === 0) setSelectedSegmentIndex(-1);
+			else setSelectedSegmentIndex(Math.min(Math.max(0, firstDeletedIdx), newLen - 1));
+			return;
+		}
+
+		if (selectedSegmentIndex < 0) return;
+		const seg = segs[selectedSegmentIndex];
+		if (!seg) return;
+		pushSubtitleHistorySnapshot();
 		const deletedIndex = selectedSegmentIndex;
 		try {
 			const segments = deleteSegmentById(segmentsRef.current, seg.id);
@@ -937,6 +1136,378 @@ export default function App() {
 		}
 	}, [activeSubtitleFileId, selectedSegmentIndex, pushSubtitleHistorySnapshot, markProjectDirty]);
 
+	const handleImportOriginalSubtitles = useCallback(async () => {
+		if (!currentProjectRef.current) {
+			await message(t('dialog.openProjectFirst'), { kind: 'info', title: t('dialog.importTitle') });
+			return;
+		}
+		const selected = await open({
+			multiple: false,
+			directory: false,
+			title: t('dialog.importOriginalDialog'),
+			filters: [{ name: t('dialog.subtitlesFilter'), extensions: ['srt', 'vtt'] }]
+		});
+		if (!selected || typeof selected !== 'string') return;
+
+		let parsed: SubtitleSegment[];
+		try {
+			parsed = await projectService.parseSubtitleFile(selected);
+		} catch (e: unknown) {
+			const msg = e instanceof Error ? e.message : String(e);
+			await message(t('dialog.importOriginalFailed', { detail: msg }), {
+				kind: 'error',
+				title: t('dialog.importTitle')
+			});
+			return;
+		}
+		if (parsed.length === 0) {
+			await message(t('dialog.noSegments'), { kind: 'warning', title: t('dialog.importTitle') });
+			return;
+		}
+
+		const cp = currentProjectRef.current;
+		if (!cp) return;
+		const now = new Date().toISOString();
+
+		if (activeSubtitleFileId) {
+			const active = cp.files.find((f) => f.id === activeSubtitleFileId);
+			if (active && active.file_type === 'Subtitle') {
+				const existing = active.subtitle_segments ?? [];
+				pushSubtitleHistorySnapshot();
+				const merged: SubtitleSegment[] = parsed.map((p, i) => ({
+					...p,
+					translation:
+						existing.length === parsed.length
+							? existing[i]?.translation ?? null
+							: null
+				}));
+				const nextProject: ProjectData = {
+					...cp,
+					files: cp.files.map((f) =>
+						f.id === activeSubtitleFileId
+							? { ...f, subtitle_segments: merged, updated_at: now }
+							: f
+					),
+					updated_at: now
+				};
+				currentProjectRef.current = nextProject;
+				setCurrentProject(nextProject);
+				setGeneratedSegments(merged);
+				setSelectedSegmentIndex(merged.length > 0 ? 0 : -1);
+				markProjectDirty();
+				return;
+			}
+		}
+
+		const video =
+			activeVideoFile ?? cp.files.find((f) => f.file_type === 'Video') ?? null;
+		const stem = video ? video.name.replace(/\.[^/.\\]+$/, '') || 'subtitles' : 'subtitles';
+		const subName = `${stem}.srt`;
+		const subId = crypto.randomUUID();
+		const newSub: ProjectFile = {
+			id: subId,
+			name: subName,
+			file_type: 'Subtitle',
+			path: `subtitles/${subName}`,
+			subtitle_segments: parsed.map((p) => ({ ...p, translation: null })),
+			linked_file_id: video?.id ?? null,
+			created_at: now,
+			updated_at: now
+		} as ProjectFile;
+		let nextFiles = cp.files;
+		if (video) {
+			nextFiles = nextFiles.map((f) =>
+				f.id === video.id ? { ...f, linked_file_id: subId, updated_at: now } : f
+			);
+		}
+		nextFiles = [...nextFiles, newSub];
+		const nextProject: ProjectData = {
+			...cp,
+			files: nextFiles,
+			updated_at: now
+		};
+		currentProjectRef.current = nextProject;
+		setCurrentProject(nextProject);
+		setActiveSubtitleFileId(subId);
+		setGeneratedSegments(newSub.subtitle_segments ?? []);
+		setSelectedSegmentIndex((newSub.subtitle_segments?.length ?? 0) > 0 ? 0 : -1);
+		markProjectDirty();
+	}, [activeSubtitleFileId, activeVideoFile, pushSubtitleHistorySnapshot, markProjectDirty, t]);
+
+	const handleImportTranslatedSubtitles = useCallback(async () => {
+		if (!currentProjectRef.current) {
+			await message(t('dialog.openProjectFirst'), { kind: 'info', title: t('dialog.importTitle') });
+			return;
+		}
+		const cp = currentProjectRef.current;
+		const selected = await open({
+			multiple: false,
+			directory: false,
+			title: t('dialog.importTranslatedDialog'),
+			filters: [{ name: t('dialog.subtitlesFilter'), extensions: ['srt', 'vtt'] }]
+		});
+		if (!selected || typeof selected !== 'string') return;
+
+		let parsed: SubtitleSegment[];
+		try {
+			parsed = await projectService.parseSubtitleFile(selected);
+		} catch (e: unknown) {
+			const msg = e instanceof Error ? e.message : String(e);
+			await message(t('dialog.importTranslatedFailed', { detail: msg }), {
+				kind: 'error',
+				title: t('dialog.importTitle')
+			});
+			return;
+		}
+		if (parsed.length === 0) {
+			await message(t('dialog.noSegments'), { kind: 'warning', title: t('dialog.importTitle') });
+			return;
+		}
+
+		const now = new Date().toISOString();
+		const active = activeSubtitleFileId
+			? cp.files.find((f) => f.id === activeSubtitleFileId)
+			: null;
+
+		if (active?.file_type === 'Subtitle') {
+			const existing = active.subtitle_segments ?? [];
+			pushSubtitleHistorySnapshot();
+			const merged: SubtitleSegment[] = existing.length > 0
+				? existing.map((s, i) => {
+					const p = parsed[i];
+					return p ? { ...s, translation: p.text } : s;
+				})
+				: parsed.map((p) => ({
+					...p,
+					text: '',
+					translation: p.text
+				}));
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === activeSubtitleFileId
+						? { ...f, subtitle_segments: merged, updated_at: now }
+						: f
+				),
+				updated_at: now
+			};
+			currentProjectRef.current = nextProject;
+			setCurrentProject(nextProject);
+			setGeneratedSegments(merged);
+			setSelectedSegmentIndex(merged.length > 0 ? 0 : -1);
+			markProjectDirty();
+			return;
+		}
+
+		pushProjectHistorySnapshot();
+		const video =
+			active?.file_type === 'Video'
+				? active
+				: activeVideoFile ?? cp.files.find((f) => f.file_type === 'Video') ?? null;
+		const stem = video ? video.name.replace(/\.[^/.\\]+$/, '') || 'subtitles' : 'subtitles';
+		const subName = `${stem}.translated.srt`;
+		const subId = crypto.randomUUID();
+		const importedSegments: SubtitleSegment[] = parsed.map((p) => ({
+			...p,
+			text: '',
+			translation: p.text
+		}));
+		const newSub: ProjectFile = {
+			id: subId,
+			name: subName,
+			file_type: 'Subtitle',
+			path: `subtitles/${subName}`,
+			subtitle_segments: importedSegments,
+			linked_file_id: video?.id ?? null,
+			created_at: now,
+			updated_at: now
+		} as ProjectFile;
+		let nextFiles = cp.files;
+		if (video) {
+			nextFiles = nextFiles.map((f) =>
+				f.id === video.id ? { ...f, linked_file_id: subId, updated_at: now } : f
+			);
+		}
+		nextFiles = [...nextFiles, newSub];
+		const nextProject: ProjectData = {
+			...cp,
+			files: nextFiles,
+			updated_at: now
+		};
+		currentProjectRef.current = nextProject;
+		setCurrentProject(nextProject);
+		setActiveSubtitleFileId(subId);
+		setGeneratedSegments(importedSegments);
+		setSelectedSegmentIndex(importedSegments.length > 0 ? 0 : -1);
+		markProjectDirty();
+	}, [
+		activeSubtitleFileId,
+		activeVideoFile,
+		pushSubtitleHistorySnapshot,
+		pushProjectHistorySnapshot,
+		markProjectDirty,
+		t
+	]);
+
+	const handleDeleteEpisode = useCallback(async (videoFile: ProjectFile) => {
+		const cp = currentProjectRef.current;
+		if (!cp) return;
+		if (videoFile.file_type !== 'Video') return;
+		const confirmed = await ask(
+			t('dialog.deleteEpisodeConfirm', { name: videoFile.name }),
+			{ kind: 'warning', title: t('dialog.deleteEpisodeTitle') }
+		);
+		if (!confirmed) return;
+		pushProjectHistorySnapshot();
+		try {
+			const updated = await projectService.deleteEpisode(cp.path, videoFile.id);
+			const linkedSubId = videoFile.linked_file_id;
+			const wasActive =
+				activeSubtitleFileId === videoFile.id ||
+				(linkedSubId != null && activeSubtitleFileId === linkedSubId);
+			currentProjectRef.current = updated;
+			setCurrentProject(updated);
+			if (wasActive) {
+				const fallback = updated.files.find(
+					(f) =>
+						f.file_type === 'Subtitle' &&
+						(f.subtitle_segments?.length ?? 0) > 0
+				) ?? updated.files.find((f) => f.file_type === 'Subtitle')
+					?? updated.files.find((f) => f.file_type === 'Video');
+				setActiveSubtitleFileId(fallback?.id ?? null);
+				setGeneratedSegments(fallback?.subtitle_segments ?? []);
+				setSelectedSegmentIndex((fallback?.subtitle_segments?.length ?? 0) > 0 ? 0 : -1);
+				setSelectedSegmentIds(new Set());
+				setTimelineRubberRange(null);
+				setTimelineInsertRange(null);
+				undoSegmentsStackRef.current = [];
+				redoSegmentsStackRef.current = [];
+				const v = videoRef.current;
+				if (v) {
+					try {
+						v.pause();
+						v.currentTime = 0;
+					} catch (err) {
+						console.warn('reset video after episode delete', err);
+					}
+				}
+				setIsVideoPlaying(false);
+				setCurrentPlaybackTime(0);
+			}
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			await message(t('dialog.deleteEpisodeFailed', { detail: msg }), {
+				kind: 'error',
+				title: t('dialog.deleteEpisodeTitle')
+			});
+		}
+	}, [activeSubtitleFileId, pushProjectHistorySnapshot, t]);
+
+	const handleDeleteSelectedTreeItem = useCallback(async () => {
+		const cp = currentProjectRef.current;
+		if (!cp) return;
+		const sel = selectedTreeItem;
+		if (!sel) return;
+
+		if (sel.kind === 'file') {
+			const file = cp.files.find((f) => f.id === sel.id);
+			if (!file) {
+				setSelectedTreeItem(null);
+				return;
+			}
+			if (file.file_type === 'Video') {
+				await handleDeleteEpisode(file);
+				setSelectedTreeItem(null);
+				return;
+			}
+			const confirmed = await ask(t('dialog.deleteFileConfirm', { name: file.name }), {
+				kind: 'warning',
+				title: t('dialog.deleteFileTitle')
+			});
+			if (!confirmed) return;
+			try {
+				pushProjectHistorySnapshot();
+				await projectService.removeFileFromProject(cp.path, file.id, true);
+				const opened = await projectService.open(cp.path);
+				currentProjectRef.current = opened;
+				setCurrentProject(opened);
+				if (activeSubtitleFileId === file.id) {
+					setActiveSubtitleFileId(null);
+					setGeneratedSegments([]);
+					setSelectedSegmentIndex(-1);
+					setSelectedSegmentIds(new Set());
+					setTimelineRubberRange(null);
+					setTimelineInsertRange(null);
+					undoSegmentsStackRef.current = [];
+					redoSegmentsStackRef.current = [];
+				}
+				setSelectedTreeItem(null);
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				await message(t('dialog.deleteFailed', { detail: msg }), {
+					kind: 'error',
+					title: t('dialog.deleteFileTitle')
+				});
+			}
+			return;
+		}
+
+		const folder = sel.name;
+		const filesInFolder = cp.files.filter((f) => {
+			if (folder === 'config') return f.file_type === 'Config';
+			if (folder === 'video') return f.file_type === 'Video';
+			if (folder === 'subtitles') return f.file_type === 'Subtitle';
+			return false;
+		});
+		if (filesInFolder.length === 0) {
+			setSelectedTreeItem(null);
+			return;
+		}
+		const confirmed = await ask(
+			t('dialog.deleteFolderConfirm', { folder, count: filesInFolder.length }),
+			{ kind: 'warning', title: t('dialog.deleteFolderTitle') }
+		);
+		if (!confirmed) return;
+		try {
+			pushProjectHistorySnapshot();
+			if (folder === 'video') {
+				for (const v of filesInFolder) {
+					try {
+						await projectService.deleteEpisode(cp.path, v.id);
+					} catch (e) {
+						console.warn('delete episode failed', v.id, e);
+					}
+				}
+			} else {
+				for (const f of filesInFolder) {
+					try {
+						await projectService.removeFileFromProject(cp.path, f.id, true);
+					} catch (e) {
+						console.warn('remove file failed', f.id, e);
+					}
+				}
+			}
+			const opened = await projectService.open(cp.path);
+			currentProjectRef.current = opened;
+			setCurrentProject(opened);
+			setActiveSubtitleFileId(null);
+			setGeneratedSegments([]);
+			setSelectedSegmentIndex(-1);
+			setSelectedSegmentIds(new Set());
+			setTimelineRubberRange(null);
+			setTimelineInsertRange(null);
+			undoSegmentsStackRef.current = [];
+			redoSegmentsStackRef.current = [];
+			setSelectedTreeItem(null);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			await message(t('dialog.deleteFolderFailed', { detail: msg }), {
+				kind: 'error',
+				title: t('dialog.deleteFolderTitle')
+			});
+		}
+	}, [selectedTreeItem, activeSubtitleFileId, handleDeleteEpisode, pushProjectHistorySnapshot, t]);
+
 	const handleSelectProject = useCallback(async (path: string) => {
 		const canProceed = await maybeSaveBeforeSwitchingProject();
 		if (!canProceed) return;
@@ -944,6 +1515,8 @@ export default function App() {
 			const projectData = await projectService.open(path);
 			undoSegmentsStackRef.current = [];
 			redoSegmentsStackRef.current = [];
+			undoProjectStackRef.current = [];
+			lastUndoDomainRef.current = null;
 			setCurrentProject(projectData);
 			hydrateAgentChatFromProject(projectData);
 			const firstSubWithSegments = projectData.files.find(
@@ -972,17 +1545,15 @@ export default function App() {
 						? error.message
 						: String(error);
 			try {
-				await message(
-					`Укажите папку проекта Subtitle Studio — в корне должен быть файл project.json. Обычная папка без него не подойдёт.\n\n${detail}`,
-					{ title: 'Не удалось открыть проект', kind: 'error' }
-				);
+				await message(t('dialog.openProjectFailed', { detail }), {
+					title: t('dialog.openProjectFailedTitle'),
+					kind: 'error'
+				});
 			} catch {
-				window.alert(
-					`Не удалось открыть проект. Нужна папка с project.json.\n\n${detail}`
-				);
+				window.alert(t('dialog.openProjectFailedAlert', { detail }));
 			}
 		}
-	}, [maybeSaveBeforeSwitchingProject, clearProjectDirty, hydrateAgentChatFromProject]);
+	}, [maybeSaveBeforeSwitchingProject, clearProjectDirty, hydrateAgentChatFromProject, t]);
 
 	const activateProjectTrack = useCallback(
 		async (file: ProjectFile) => {
@@ -1031,7 +1602,7 @@ export default function App() {
 				if (file.file_type === 'Subtitle') {
 					let proj: ProjectData = cp;
 					let segs = file.subtitle_segments ?? [];
-					if (!segs.length && !file.id.startsWith('disk:')) {
+					if (file.subtitle_segments == null && !file.id.startsWith('disk:')) {
 						const abs = joinProjectPath(cp.path, file.path.replace(/\\/g, '/'));
 						segs = await projectService.importExistingSubtitles(abs, cp.path, file.id);
 						const opened = await projectService.open(cp.path);
@@ -1056,7 +1627,7 @@ export default function App() {
 						if (sub) {
 							let proj: ProjectData = cp;
 							let segs = sub.subtitle_segments ?? [];
-							if (!segs.length) {
+							if (sub.subtitle_segments == null) {
 								const abs = joinProjectPath(cp.path, sub.path.replace(/\\/g, '/'));
 								segs = await projectService.importExistingSubtitles(abs, cp.path, sub.id);
 								const opened = await projectService.open(cp.path);
@@ -1551,45 +2122,60 @@ ${changesText}
 	const menuItems = useMemo(
 		() => [
 			{
-				label: 'File',
+				id: 'file',
+				label: t('menu.file'),
 				items: [
-					{ label: 'New Project', action: () => setActiveModal('createProject') },
-					{ label: 'Open Project', action: () => void handleOpenProjectDialog() },
-					{ label: 'Save', action: () => void handleSaveProject() },
-					{ label: 'Exit', action: () => void handleExitProject() },
+					{ label: t('menu.newProject'), action: () => setActiveModal('createProject') },
+					{ label: t('menu.openProject'), action: () => void handleOpenProjectDialog() },
+					{ label: t('menu.importOriginal'), action: () => void handleImportOriginalSubtitles() },
+					{ label: t('menu.importTranslated'), action: () => void handleImportTranslatedSubtitles() },
+					{ label: t('menu.save'), action: () => void handleSaveProject() },
+					{ label: t('menu.settings'), action: () => setActiveModal('settings') },
+					{ label: t('menu.exit'), action: () => void handleExitProject() },
 				],
 			},
 			{
-				label: 'Edit',
+				id: 'edit',
+				label: t('menu.edit'),
 				items: [
-					{ label: 'Undo', action: () => void performSubtitleUndo() },
-					{ label: 'Redo', action: () => void performSubtitleRedo() },
-					{ label: 'Delete', action: () => void handleDeleteSelectedSubtitle() },
-					{ label: 'Find' },
-				],
-			},
-			{ label: 'Tools', items: [{ label: 'Spell check' }, { label: 'Batch convert' }] },
-			{ label: 'Video', items: [{ label: 'Open video file' }, { label: 'Audio track' }] },
-			{
-				label: 'Help',
-				items: [
-					{ label: 'About' },
-					{ label: 'Updates' },
+					{ label: t('menu.undo'), action: () => void performSubtitleUndo() },
+					{ label: t('menu.redo'), action: () => void performSubtitleRedo() },
+					{ label: t('menu.delete'), action: () => void handleDeleteSelectedSubtitle() },
 					{
-						label: isDarkTheme ? 'Switch to light theme' : 'Switch to dark theme',
-						action: () => setIsDarkTheme((prev) => !prev),
+						label: t('menu.find'),
+						action: () => {
+							if (!currentProjectRef.current) return;
+							setActiveModal('findReplace');
+						}
 					},
 				],
 			},
+			{
+				id: 'tools',
+				label: t('menu.tools'),
+				items: [{ label: t('menu.spellCheck') }, { label: t('menu.batchConvert') }],
+			},
+			{
+				id: 'video',
+				label: t('menu.video'),
+				items: [{ label: t('menu.openVideoFile') }, { label: t('menu.audioTrack') }],
+			},
+			{
+				id: 'help',
+				label: t('menu.help'),
+				items: [{ label: t('menu.about') }, { label: t('menu.updates') }],
+			},
 		],
 		[
+			t,
 			performSubtitleUndo,
 			performSubtitleRedo,
 			handleDeleteSelectedSubtitle,
-			isDarkTheme,
 			handleOpenProjectDialog,
 			handleSaveProject,
-			handleExitProject
+			handleExitProject,
+			handleImportOriginalSubtitles,
+			handleImportTranslatedSubtitles
 		]
 	);
 
@@ -1619,6 +2205,34 @@ ${changesText}
 			markProjectDirty();
 		},
 		[activeSubtitleFileId, pushSubtitleHistorySnapshot, markProjectDirty]
+	);
+
+	const applyFindReplaceSegments = useCallback(
+		(nextList: SubtitleSegment[]) => {
+			if (!activeSubtitleFileId) return;
+			const cp = currentProjectRef.current;
+			if (!cp) return;
+			pushSubtitleHistorySnapshot();
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: nextList } : f
+				)
+			};
+			currentProjectRef.current = nextProject;
+			setCurrentProject(nextProject);
+			setGeneratedSegments(nextList);
+			markProjectDirty();
+		},
+		[activeSubtitleFileId, pushSubtitleHistorySnapshot, markProjectDirty]
+	);
+
+	const handleFindSelectMatch = useCallback(
+		(match: FindMatch) => {
+			setFindHighlight(match);
+			selectSegmentAndSeek(match.segmentIndex);
+		},
+		[selectSegmentAndSeek]
 	);
 
 	const commitSegEditorStart = useCallback(() => {
@@ -1774,6 +2388,155 @@ ${changesText}
 		void updateSegmentAtIndex(selectedSegmentIndex, { end: newEnd });
 	}, [selectedSegmentIndex, generatedSegments, currentPlaybackTime, timelineTotalDuration, updateSegmentAtIndex]);
 
+	const handleRetranscribeRange = useCallback(
+		async (
+			range: { start: number; end: number },
+			opts: { sourceLanguage: string; userPrompt: string }
+		) => {
+			const cp = currentProjectRef.current;
+			const fileId = activeSubtitleFileId;
+			if (!cp || !fileId) return;
+			const videoFile = cp.files.find((f) => {
+				if (f.id === fileId && f.file_type === 'Video') return true;
+				if (f.id === fileId && f.file_type === 'Subtitle' && f.linked_file_id) {
+					const v = cp.files.find((x) => x.id === f.linked_file_id && x.file_type === 'Video');
+					return Boolean(v);
+				}
+				return false;
+			});
+			let videoAbsPath: string | null = null;
+			if (videoFile?.file_type === 'Video') {
+				videoAbsPath = joinProjectPath(cp.path, videoFile.path);
+			} else if (videoFile?.file_type === 'Subtitle' && videoFile.linked_file_id) {
+				const v = cp.files.find((f) => f.id === videoFile.linked_file_id && f.file_type === 'Video');
+				if (v) videoAbsPath = joinProjectPath(cp.path, v.path);
+			}
+			if (!videoAbsPath) {
+				const v = cp.files.find((f) => f.file_type === 'Video');
+				if (v) videoAbsPath = joinProjectPath(cp.path, v.path);
+			}
+			if (!videoAbsPath) {
+				setRetranscribeError('Не нашёл видеофайл проекта для извлечения аудио.');
+				return;
+			}
+
+			const lo = Math.max(0, range.start);
+			const hi = Math.max(lo + MIN_SEGMENT_DURATION, range.end);
+
+			setRetranscribeError(null);
+			setRetranscribeBusy({ stage: 'audio' });
+
+			const audioFileName = `retranscribe_${Date.now()}.mp3`;
+			const audioRelPath = `config/${audioFileName}`;
+			const audioOut = joinProjectPath(cp.path, audioRelPath);
+
+			try {
+				const hasApiKey = await projectService.getApiKeyStatus();
+				if (!hasApiKey) throw new Error('OpenAI API key не задан. Активируйте приложение.');
+
+				await projectService.extractAudioRange(videoAbsPath, lo, hi, audioOut);
+
+				setRetranscribeBusy({ stage: 'transcribe' });
+				const glossaryOriginals = (cp.glossary ?? [])
+					.map((e) => e.source.trim())
+					.filter(Boolean)
+					.filter(
+						(value, index, arr) =>
+							arr.findIndex((x) => x.toLowerCase() === value.toLowerCase()) === index
+					);
+				const userPromptTrimmed = opts.userPrompt.trim();
+				let whisperPrompt: string | undefined;
+				if (userPromptTrimmed.length > 0 && glossaryOriginals.length > 0) {
+					whisperPrompt = `${userPromptTrimmed}\n\nImportant names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
+				} else if (userPromptTrimmed.length > 0) {
+					whisperPrompt = userPromptTrimmed;
+				} else if (glossaryOriginals.length > 0) {
+					whisperPrompt = `Important names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
+				}
+
+				const isoLang =
+					RETRANSCRIBE_LANGUAGE_ISO[opts.sourceLanguage] ??
+					(opts.sourceLanguage.trim().length === 2 ? opts.sourceLanguage.trim().toLowerCase() : undefined);
+
+				const rawSegments = await projectService.transcribeAudio(
+					audioOut,
+					isoLang,
+					whisperPrompt,
+					cp.glossary ?? []
+				);
+
+				if (rawSegments.length === 0) {
+					throw new Error('Whisper не вернул сегментов для выделенного диапазона.');
+				}
+
+				setRetranscribeBusy({ stage: 'translate' });
+				const targetLang = (cp.target_language || '').trim();
+				let translatedMap = new Map<number, string>();
+				if (targetLang.length > 0) {
+					try {
+						const translations = await projectService.translateBatch(
+							rawSegments,
+							targetLang,
+							'Natural subtitle translation',
+							cp.glossary ?? []
+						);
+						translatedMap = new Map(translations.map((t) => [t.id, t.translated_text]));
+					} catch (e) {
+						console.error('Retranscribe translate failed', e);
+					}
+				}
+
+				setRetranscribeBusy({ stage: 'apply' });
+				const baseList = segmentsRef.current;
+				const remaining = baseList.filter((s) => !(s.start < hi && s.end > lo));
+				const maxId = remaining.reduce((m, s) => Math.max(m, s.id), 0);
+				const newSegments: SubtitleSegment[] = rawSegments.map((s, i) => {
+					const start = Math.max(0, s.start + lo);
+					const end = Math.max(start + MIN_SEGMENT_DURATION, s.end + lo);
+					const tr = translatedMap.get(s.id);
+					return {
+						...s,
+						id: maxId + 1 + i,
+						start,
+						end,
+						duration: Math.max(0, end - start),
+						translation: tr && tr.length > 0 ? tr : (s.translation ?? null)
+					};
+				});
+
+				const merged = [...remaining, ...newSegments].sort((a, b) => a.start - b.start);
+				pushSubtitleHistorySnapshot();
+				const next: ProjectData = {
+					...cp,
+					files: cp.files.map((f) =>
+						f.id === fileId ? { ...f, subtitle_segments: merged } : f
+					)
+				};
+				currentProjectRef.current = next;
+				setCurrentProject(next);
+				setGeneratedSegments(merged);
+				markProjectDirty();
+
+				setSelectedSegmentIds(new Set());
+				setTimelineRubberRange(null);
+				setTimelineInsertRange(null);
+				const firstNewIdx = merged.findIndex((s) => s.id === newSegments[0]?.id);
+				if (firstNewIdx >= 0) setSelectedSegmentIndex(firstNewIdx);
+				setRetranscribeBusy(null);
+			} catch (err) {
+				console.error('retranscribe range', err);
+				const detail = err instanceof Error ? err.message : String(err);
+				setRetranscribeError(detail);
+				setRetranscribeBusy(null);
+			} finally {
+				projectService
+					.deleteProjectFileArtifact(cp.path, audioRelPath)
+					.catch((err) => console.warn('cleanup retranscribe audio failed:', err));
+			}
+		},
+		[activeSubtitleFileId, markProjectDirty, pushSubtitleHistorySnapshot]
+	);
+
 	const setSegmentStartEndLocal = useCallback(
 		(index: number, start: number, end: number) => {
 			const dur = Math.max(0, end - start);
@@ -1801,6 +2564,54 @@ ${changesText}
 		[activeSubtitleFileId]
 	);
 
+	const applySegmentDeltaLocal = useCallback(
+		(updates: Map<number, { start: number; end: number }>) => {
+			if (updates.size === 0) return;
+			const apply = (s: SubtitleSegment) => {
+				const u = updates.get(s.id);
+				if (!u) return s;
+				return { ...s, start: u.start, end: u.end, duration: Math.max(0, u.end - u.start) };
+			};
+			setGeneratedSegments((prev) => prev.map(apply));
+			setCurrentProject((cp) => {
+				if (!cp || !activeSubtitleFileId) return cp;
+				return {
+					...cp,
+					files: cp.files.map((f) => {
+						if (f.id !== activeSubtitleFileId || !f.subtitle_segments) return f;
+						return { ...f, subtitle_segments: f.subtitle_segments.map(apply) };
+					})
+				};
+			});
+		},
+		[activeSubtitleFileId]
+	);
+
+	const commitSegmentBatchUpdate = useCallback(
+		(updates: Map<number, { start: number; end: number }>) => {
+			if (updates.size === 0) return;
+			const cp = currentProjectRef.current;
+			if (!cp || !activeSubtitleFileId) return;
+			const apply = (s: SubtitleSegment) => {
+				const u = updates.get(s.id);
+				if (!u) return s;
+				return { ...s, start: u.start, end: u.end, duration: Math.max(0, u.end - u.start) };
+			};
+			const nextList = segmentsRef.current.map(apply);
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: nextList } : f
+				)
+			};
+			currentProjectRef.current = nextProject;
+			setCurrentProject(nextProject);
+			setGeneratedSegments(nextList);
+			markProjectDirty();
+		},
+		[activeSubtitleFileId, markProjectDirty]
+	);
+
 	const clientXToTimelineTime = useCallback((clientX: number): number => {
 		const inner = timelineInnerRef.current;
 		const scr = timelineScrollRef.current;
@@ -1811,6 +2622,20 @@ ${changesText}
 		const w = inner.offsetWidth;
 		if (w <= 0 || td <= 0) return 0;
 		return Math.max(0, Math.min(td, (x / w) * td));
+	}, []);
+
+	const timelineScrollFromPointerNearEdge = useCallback((clientX: number) => {
+		const scr = timelineScrollRef.current;
+		if (!scr) return;
+		const rect = scr.getBoundingClientRect();
+		if (clientX < rect.left + TIMELINE_EDGE_SCROLL_MARGIN) {
+			const d = rect.left + TIMELINE_EDGE_SCROLL_MARGIN - clientX;
+			scr.scrollLeft = Math.max(0, scr.scrollLeft - (TIMELINE_EDGE_SCROLL_BASE + d * 0.22));
+		} else if (clientX > rect.right - TIMELINE_EDGE_SCROLL_MARGIN) {
+			const d = clientX - (rect.right - TIMELINE_EDGE_SCROLL_MARGIN);
+			const maxScroll = Math.max(0, scr.scrollWidth - scr.clientWidth);
+			scr.scrollLeft = Math.min(maxScroll, scr.scrollLeft + (TIMELINE_EDGE_SCROLL_BASE + d * 0.22));
+		}
 	}, []);
 
 	const beginTimelineRangeSelect = useCallback(
@@ -1827,6 +2652,7 @@ ${changesText}
 
 			const onMove = (ev: PointerEvent) => {
 				if (!timelineRangeSelectDragRef.current) return;
+				timelineScrollFromPointerNearEdge(ev.clientX);
 				const t = clientXToTimelineTime(ev.clientX);
 				const d = timelineRangeSelectDragRef.current;
 				setTimelineRangePreview({ a: d.t0, b: t });
@@ -1843,12 +2669,32 @@ ${changesText}
 				const lo = Math.min(t0, t1);
 				const hi = Math.max(t0, t1);
 				if (hi - lo >= MIN_SEGMENT_DURATION) {
+					const segs = segmentsRef.current;
+					const insideIds: number[] = [];
+					let firstIdx = -1;
+					for (let i = 0; i < segs.length; i++) {
+						const s = segs[i];
+						if (s.start < hi && s.end > lo) {
+							insideIds.push(s.id);
+							if (firstIdx < 0) firstIdx = i;
+						}
+					}
+					setTimelineRubberRange({ start: lo, end: hi });
+					if (insideIds.length > 0) {
+						setSelectedSegmentIds(new Set(insideIds));
+						setTimelineInsertRange(null);
+						setSelectedSegmentIndex(firstIdx);
+						return;
+					}
+					setSelectedSegmentIds(new Set());
 					setTimelineInsertRange({ start: lo, end: hi });
 					setCurrentPlaybackTime(lo);
 					const v = videoRef.current;
 					if (v) v.currentTime = lo;
 				} else {
+					setSelectedSegmentIds(new Set());
 					setTimelineInsertRange(null);
+					setTimelineRubberRange(null);
 					const seekT = Math.max(0, Math.min(td, t1));
 					setCurrentPlaybackTime(seekT);
 					const v = videoRef.current;
@@ -1858,7 +2704,7 @@ ${changesText}
 			window.addEventListener('pointermove', onMove);
 			window.addEventListener('pointerup', onUp);
 		},
-		[clientXToTimelineTime]
+		[clientXToTimelineTime, timelineScrollFromPointerNearEdge]
 	);
 
 	const canSplitAtPlayhead = useMemo(() => {
@@ -1884,6 +2730,7 @@ ${changesText}
 			const onMove = (e: MouseEvent) => {
 				const drag = timelineEdgeDragRef.current;
 				if (!drag) return;
+				timelineScrollFromPointerNearEdge(e.clientX);
 				const segs = segmentsRef.current;
 				const t = clientXToTimelineTime(e.clientX);
 				const maxT = timelineTotalDurationRef.current;
@@ -1915,17 +2762,106 @@ ${changesText}
 			window.addEventListener('mousemove', onMove);
 			window.addEventListener('mouseup', onUp);
 		},
-		[activeSubtitleFileId, clientXToTimelineTime, setSegmentStartEndLocal, updateSegmentAtIndex]
+		[activeSubtitleFileId, clientXToTimelineTime, setSegmentStartEndLocal, timelineScrollFromPointerNearEdge, updateSegmentAtIndex]
+	);
+
+	const beginTimelineGroupMove = useCallback(
+		(ev: React.MouseEvent) => {
+			if (!activeSubtitleFileId) return;
+			const selSet = selectedSegmentIdsRef.current;
+			if (selSet.size <= 1) return false;
+			ev.preventDefault();
+			ev.stopPropagation();
+
+			const segs = segmentsRef.current;
+			const sorted = [...segs].sort((a, b) => a.start - b.start);
+			const indexInSorted = new Map(sorted.map((s, i) => [s.id, i] as const));
+			const selectedItems = sorted.filter((s) => selSet.has(s.id));
+			if (selectedItems.length === 0) return false;
+
+			const totalDur = timelineTotalDurationRef.current;
+			let minDelta = -Infinity;
+			let maxDelta = Infinity;
+			for (const s of selectedItems) {
+				const i = indexInSorted.get(s.id) ?? -1;
+				let prevNonSelEnd = 0;
+				for (let j = i - 1; j >= 0; j--) {
+					if (!selSet.has(sorted[j].id)) { prevNonSelEnd = sorted[j].end; break; }
+				}
+				let nextNonSelStart = totalDur;
+				for (let j = i + 1; j < sorted.length; j++) {
+					if (!selSet.has(sorted[j].id)) { nextNonSelStart = sorted[j].start; break; }
+				}
+				minDelta = Math.max(minDelta, prevNonSelEnd - s.start);
+				maxDelta = Math.min(maxDelta, nextNonSelStart - s.end);
+			}
+			const minStart = Math.min(...selectedItems.map((s) => s.start));
+			const maxEnd = Math.max(...selectedItems.map((s) => s.end));
+			minDelta = Math.max(minDelta, -minStart);
+			maxDelta = Math.min(maxDelta, totalDur - maxEnd);
+
+			const origs = new Map<number, { start: number; end: number }>();
+			for (const s of selectedItems) origs.set(s.id, { start: s.start, end: s.end });
+
+			const undoSnap = cloneSubtitleSegments(segmentsRef.current);
+			const t0 = clientXToTimelineTime(ev.clientX);
+			timelineGroupMoveRef.current = { t0, minDelta, maxDelta, origs };
+
+			const onMove = (e: MouseEvent) => {
+				const mv = timelineGroupMoveRef.current;
+				if (!mv) return;
+				timelineScrollFromPointerNearEdge(e.clientX);
+				let delta = clientXToTimelineTime(e.clientX) - mv.t0;
+				delta = Math.max(mv.minDelta, Math.min(mv.maxDelta, delta));
+				const updates = new Map<number, { start: number; end: number }>();
+				mv.origs.forEach((o, id) => {
+					updates.set(id, { start: o.start + delta, end: o.end + delta });
+				});
+				applySegmentDeltaLocal(updates);
+			};
+			const onUp = () => {
+				window.removeEventListener('mousemove', onMove);
+				window.removeEventListener('mouseup', onUp);
+				const mv = timelineGroupMoveRef.current;
+				timelineGroupMoveRef.current = null;
+				if (!mv) return;
+				const cur = segmentsRef.current;
+				const finalUpdates = new Map<number, { start: number; end: number }>();
+				let changed = false;
+				for (const s of cur) {
+					const orig = mv.origs.get(s.id);
+					if (!orig) continue;
+					if (Math.abs(s.start - orig.start) > 1e-4 || Math.abs(s.end - orig.end) > 1e-4) {
+						changed = true;
+					}
+					finalUpdates.set(s.id, { start: s.start, end: s.end });
+				}
+				if (changed) {
+					segmentBodyDragMovedRef.current = true;
+					undoSegmentsStackRef.current.push(undoSnap);
+					if (undoSegmentsStackRef.current.length > MAX_SUBTITLE_UNDO) undoSegmentsStackRef.current.shift();
+					redoSegmentsStackRef.current = [];
+					commitSegmentBatchUpdate(finalUpdates);
+				}
+			};
+			window.addEventListener('mousemove', onMove);
+			window.addEventListener('mouseup', onUp);
+			return true;
+		},
+		[activeSubtitleFileId, applySegmentDeltaLocal, clientXToTimelineTime, commitSegmentBatchUpdate, timelineScrollFromPointerNearEdge]
 	);
 
 	const beginTimelineSegmentMove = useCallback(
 		(index: number, ev: React.MouseEvent) => {
 			if (!activeSubtitleFileId) return;
 			if ((ev.target as HTMLElement).closest('[data-tl-edge]')) return;
-			ev.preventDefault();
-			ev.stopPropagation();
 			const seg = segmentsRef.current[index];
 			if (!seg) return;
+			if (selectedSegmentIdsRef.current.has(seg.id) && selectedSegmentIdsRef.current.size > 1) {
+				if (beginTimelineGroupMove(ev)) return;
+			}
+			ev.preventDefault();
+			ev.stopPropagation();
 			const undoSnap = cloneSubtitleSegments(segmentsRef.current);
 			const t0 = clientXToTimelineTime(ev.clientX);
 			timelineSegmentMoveRef.current = {
@@ -1937,6 +2873,7 @@ ${changesText}
 			const onMove = (e: MouseEvent) => {
 				const mv = timelineSegmentMoveRef.current;
 				if (!mv) return;
+				timelineScrollFromPointerNearEdge(e.clientX);
 				const segs = segmentsRef.current;
 				const prev = mv.index > 0 ? segs[mv.index - 1] : null;
 				const next = mv.index < segs.length - 1 ? segs[mv.index + 1] : null;
@@ -1972,7 +2909,7 @@ ${changesText}
 			window.addEventListener('mousemove', onMove);
 			window.addEventListener('mouseup', onUp);
 		},
-		[activeSubtitleFileId, clientXToTimelineTime, setSegmentStartEndLocal, updateSegmentAtIndex]
+		[activeSubtitleFileId, clientXToTimelineTime, setSegmentStartEndLocal, timelineScrollFromPointerNearEdge, updateSegmentAtIndex]
 	);
 	
 	const openWizard = async () => {
@@ -2013,7 +2950,15 @@ ${changesText}
 			/* e.code — физическая клавиша (KeyZ и т.д.), работает в любой раскладке */
 			if (e.code === 'KeyZ' && !e.shiftKey) {
 				e.preventDefault();
-				void performSubtitleUndo();
+				if (lastUndoDomainRef.current === 'project') {
+					void performProjectUndo();
+				} else if (lastUndoDomainRef.current === 'subtitle') {
+					void performSubtitleUndo();
+				} else {
+					void performProjectUndo().then((done) => {
+						if (!done) void performSubtitleUndo();
+					});
+				}
 				return;
 			}
 			if (e.code === 'KeyY' || (e.code === 'KeyZ' && e.shiftKey)) {
@@ -2024,31 +2969,65 @@ ${changesText}
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
-	}, [activeModal, performSubtitleUndo, performSubtitleRedo]);
+	}, [activeModal, performSubtitleUndo, performSubtitleRedo, performProjectUndo]);
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			if (e.code !== 'Delete') return;
 			if (activeModal !== null) return;
 			if (shouldIgnoreSpacebarForVideo(e.target)) return;
-			if (!activeSubtitleFileId || selectedSegmentIndex < 0) return;
-			e.preventDefault();
-			void handleDeleteSelectedSubtitle();
+			if (selectedTreeItem) {
+				e.preventDefault();
+				void handleDeleteSelectedTreeItem();
+				return;
+			}
+			const hasMulti = selectedSegmentIdsRef.current.size > 0;
+			const hasSubtitleSel = activeSubtitleFileId && (hasMulti || selectedSegmentIndex >= 0);
+			if (hasSubtitleSel) {
+				e.preventDefault();
+				void handleDeleteSelectedSubtitle();
+				return;
+			}
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
-	}, [activeModal, activeSubtitleFileId, selectedSegmentIndex, handleDeleteSelectedSubtitle]);
+	}, [
+		activeModal,
+		activeSubtitleFileId,
+		selectedSegmentIndex,
+		handleDeleteSelectedSubtitle,
+		selectedTreeItem,
+		handleDeleteSelectedTreeItem
+	]);
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			if (e.code !== 'Escape') return;
 			setTimelineInsertRange(null);
 			setTimelineRangePreview(null);
+			setSelectedSegmentIds(new Set());
+			setTimelineRubberRange(null);
+			setTimelineContextMenu(null);
+			setSelectedTreeItem(null);
+			setProjectFileMenu(null);
 			timelineRangeSelectDragRef.current = null;
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
 	}, []);
+
+	useEffect(() => {
+		if (!selectedTreeItem) return;
+		const onMouseDown = (e: MouseEvent) => {
+			const target = e.target as HTMLElement | null;
+			if (!target) return;
+			if (target.closest('[data-project-tree]')) return;
+			if (target.closest('[data-project-file-menu]')) return;
+			setSelectedTreeItem(null);
+		};
+		window.addEventListener('mousedown', onMouseDown);
+		return () => window.removeEventListener('mousedown', onMouseDown);
+	}, [selectedTreeItem]);
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
@@ -2060,12 +3039,12 @@ ${changesText}
 			if (n === 0) return;
 			e.preventDefault();
 			if (e.code === 'ArrowLeft') {
-				setSelectedSegmentIndex((i) => {
+				selectSegmentAndSeek((i) => {
 					if (i < 0) return n - 1;
 					return Math.max(0, i - 1);
 				});
 			} else {
-				setSelectedSegmentIndex((i) => {
+				selectSegmentAndSeek((i) => {
 					if (i < 0) return 0;
 					return Math.min(n - 1, i + 1);
 				});
@@ -2073,7 +3052,7 @@ ${changesText}
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
-	}, [activeModal, activeSubtitleFileId]);
+	}, [activeModal, activeSubtitleFileId, selectSegmentAndSeek]);
 
 	useEffect(() => {
 		let disposed = false;
@@ -2165,8 +3144,17 @@ ${changesText}
 	useEffect(() => {
 		if (!activeVideoAbsolutePath || !currentProject) return;
 		let cancelled = false;
-		const outJson = joinProjectPath(currentProject.path, 'config', 'waveform_cache.json');
-		const outPng = joinProjectPath(currentProject.path, 'config', 'waveform.png');
+		const videoIdForCache = activeVideoFile?.id ?? 'shared';
+		const outJson = joinProjectPath(
+			currentProject.path,
+			'config',
+			`waveform_cache_${videoIdForCache}.json`
+		);
+		const outPng = joinProjectPath(
+			currentProject.path,
+			'config',
+			`waveform_${videoIdForCache}.png`
+		);
 		(async () => {
 			setWaveformImageSrc(null);
 			try {
@@ -2198,7 +3186,7 @@ ${changesText}
 		return () => {
 			cancelled = true;
 		};
-	}, [activeVideoAbsolutePath, currentProject?.path]);
+	}, [activeVideoAbsolutePath, currentProject?.path, activeVideoFile?.id]);
 
 	useEffect(() => {
 		const v = videoRef.current;
@@ -2615,14 +3603,14 @@ ${changesText}
 					{/* Пункты меню */}
 					<div className="flex items-center gap-0.5">
 						{menuItems.map((menu) => (
-							<div key={menu.label} className="relative">
+							<div key={menu.id} className="relative">
 								<button 
 									onClick={(e) => {
 										e.stopPropagation();
-										setActiveMenu(activeMenu === menu.label ? null : menu.label);
+										setActiveMenu(activeMenu === menu.id ? null : menu.id);
 									}}
 									className={`px-2 h-[24px] flex items-center text-[12px] font-inter rounded-sm transition-colors 
-										${activeMenu === menu.label 
+										${activeMenu === menu.id 
 											? 'bg-primary-main text-white' 
 											: 'text-text-primary hover:bg-secondary-hover'}`}
 								>
@@ -2630,14 +3618,14 @@ ${changesText}
 								</button>
 
 								{/* Выпадающий список */}
-								{activeMenu === menu.label && (
-									<div className="rounded-[8px] absolute left-0 top-[26px] min-w-[160px] bg-surface-secondary border border-border-default shadow-lg py-1 flex flex-col z-[110]">
+								{activeMenu === menu.id && (
+									<div className="rounded-[8px] absolute left-0 top-[26px] w-max min-w-[160px] bg-surface-secondary border border-border-default shadow-lg py-1 flex flex-col z-[110]">
 										{menu.items.map((subItem) => (
 										<button
 											key={subItem.label}
-											className="px-3 h-[28px] flex items-center text-[12px] font-inter text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors"
+											className="px-3 h-[28px] flex items-center text-[12px] font-inter whitespace-nowrap text-text-primary hover:bg-primary-main hover:text-white text-left transition-colors"
 											onClick={() => {
-												subItem.action?.();
+												if ('action' in subItem) subItem.action();
 												setActiveMenu(null);
 											}}
 										>
@@ -2654,7 +3642,7 @@ ${changesText}
 				{/* ЦЕНТРАЛЬНАЯ ЧАСТЬ Название проекта */}
 				<div className="flex-1 flex justify-center items-center h-full overflow-hidden px-4">
 					<span className="text-[11px] text-text-primary font-inter truncate">
-						{currentProject?.name ?? 'Untitled'} - subtitlestudio
+						{currentProject?.name ?? t('app.untitled')} - subtitlestudio
 					</span>
 				</div>
 
@@ -2694,7 +3682,7 @@ ${changesText}
 							<div className="flex flex-col items-center gap-[30px]">
 								<button
 									type="button"
-									title="Создать новый проект"
+									title={t('sidebar.newProject')}
 									onClick={() => setActiveModal('createProject')}
 									className="group w-7 h-7 flex items-center justify-center shrink-0"
 								>
@@ -2707,7 +3695,7 @@ ${changesText}
 
 								<button
 									type="button"
-									title="Открыть проект"
+									title={t('sidebar.openProject')}
 									onClick={() => void handleOpenProjectDialog()}
 									className="group w-7 h-7 flex items-center justify-center shrink-0"
 								>
@@ -2720,7 +3708,7 @@ ${changesText}
 
 								<button
 									type="button"
-									title="Сохранить проект"
+									title={t('sidebar.saveProject')}
 									onClick={() => void handleSaveProject()}
 									disabled={!currentProject}
 									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
@@ -2749,7 +3737,7 @@ ${changesText}
 							<button
 								type="button"
 								onClick={openWizard}
-								title="Пошаговый мастер"
+								title={t('sidebar.wizard')}
 								className={`group relative z-[1] h-[48px] w-[48px] shrink-0 rounded-full flex items-center justify-center transition-colors ${
 									shouldHighlightWizardCta
 										? 'bg-primary-hover shadow-[0_0_28px_rgba(255,255,255,0.45),0_0_56px_rgba(255,255,255,0.22)]'
@@ -2768,9 +3756,10 @@ ${changesText}
 							<div className="flex flex-col items-center gap-[30px]">
 								<button
 									type="button"
-									title="Экспорт"
+									title={t('sidebar.export')}
+									disabled={!currentProject}
 									onClick={() => setActiveModal('export')}
-									className="group w-7 h-7 flex items-center justify-center shrink-0"
+									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
 								>
 									<span
 										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
@@ -2781,9 +3770,10 @@ ${changesText}
 
 								<button
 									type="button"
-									title="Глоссарий"
+									title={t('sidebar.glossary')}
+									disabled={!currentProject}
 									onClick={() => setActiveModal('glossary')}
-									className="group w-7 h-7 flex items-center justify-center shrink-0"
+									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
 								>
 									<span
 										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
@@ -2792,7 +3782,13 @@ ${changesText}
 									/>
 								</button>
 
-								<button type="button" title="Поиск" className="group w-7 h-7 flex items-center justify-center shrink-0">
+								<button
+									type="button"
+									title={t('sidebar.search')}
+									disabled={!currentProject}
+									onClick={() => setActiveModal('findReplace')}
+									className="group w-7 h-7 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
+								>
 									<span
 										className={`${SIDEBAR_ICON_CLASS} bg-text-primary`}
 										style={sidebarIconMaskStyle(iconSearch)}
@@ -2806,19 +3802,20 @@ ${changesText}
 
 				{/* ПАНЕЛЬ ИЕРАРХИЯ ПРОЕКТА */}
 				<div 
+					data-project-tree
 					style={{ width: `${projectTreeWidth}px`, maxWidth: `${LIMITS.PROJECT_TREE.MAX}px` }}
 					className="flex flex-col h-full bg-surface-bg shrink-0 min-h-0 relative select-none border-r border-border-default antialiased"
 				>
 					{/* Заголовок */}
 					<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
 						<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
-							{currentProject?.name ?? 'No project'}
+							{currentProject?.name ?? t('app.noProject')}
 						</span>
 						
 						<div className="flex items-center gap-[12px] shrink-0">
 							<button
 								type="button"
-								title="Новый файл"
+								title={t('projectTree.newFile')}
 								onClick={handleProjectTreeNewFile}
 								disabled={!currentProject}
 								className="group w-4 h-4 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
@@ -2832,7 +3829,7 @@ ${changesText}
 
 							<button
 								type="button"
-								title="Новая папка"
+								title={t('projectTree.newFolder')}
 								onClick={handleProjectTreeNewFolder}
 								disabled={!currentProject}
 								className="group w-4 h-4 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
@@ -2847,12 +3844,29 @@ ${changesText}
 					</div>
 
 					{/* Список файлов */}
-					<div className="flex-1 min-w-0 overflow-y-auto p-3 bg-surface-bg subtitle-table-scroll project-tree-scroll">
-						<div className="flex flex-col gap-[8px]">
+					<div
+						className="flex-1 min-w-0 overflow-y-auto p-3 bg-surface-bg subtitle-table-scroll project-tree-scroll"
+						onMouseDown={(e) => {
+							if (e.target === e.currentTarget) setSelectedTreeItem(null);
+						}}
+					>
+						<div
+							className="flex flex-col gap-[8px] min-h-full"
+							onMouseDown={(e) => {
+								if (e.target === e.currentTarget) setSelectedTreeItem(null);
+							}}
+						>
 						
 							<div 
-								className="flex items-center gap-[8px] cursor-pointer group h-4"
-								onClick={() => setIsConfigFolderOpen(!isConfigFolderOpen)}
+								className={`flex items-center gap-[8px] cursor-pointer group h-4 rounded-[3px] ${
+									selectedTreeItem?.kind === 'folder' && selectedTreeItem.name === 'config'
+										? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+										: ''
+								}`}
+								onClick={() => {
+									setIsConfigFolderOpen(!isConfigFolderOpen);
+									setSelectedTreeItem({ kind: 'folder', name: 'config' });
+								}}
 							>
 								{isConfigFolderOpen ? <ChevronDown size={12} className="text-text-primary/70 shrink-0" /> : <ChevronRight size={12} className="text-text-primary/70 shrink-0" />}
 								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
@@ -2865,7 +3879,15 @@ ${changesText}
 									<div className="w-[1px] bg-border-default shrink-0" />
 									<div className="flex flex-col gap-[8px] flex-1">
 										{treeFiles.config.map((file) => (
-											<div key={file.id} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
+											<div
+												key={file.id}
+												onClick={() => setSelectedTreeItem({ kind: 'file', id: file.id })}
+												className={`hover:text-primary-main cursor-pointer truncate h-4 flex items-center rounded-[3px] px-[2px] ${
+													selectedTreeItem?.kind === 'file' && selectedTreeItem.id === file.id
+														? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+														: ''
+												}`}
+											>
 												<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
 													{file.name}
 												</span>
@@ -2877,8 +3899,15 @@ ${changesText}
 
 							<div className="flex flex-col gap-[8px]">
 								<div 
-									className="flex items-center gap-[8px] cursor-pointer h-4"
-									onClick={() => setIsVideoFolderOpen(!isVideoFolderOpen)}
+									className={`flex items-center gap-[8px] cursor-pointer h-4 rounded-[3px] ${
+										selectedTreeItem?.kind === 'folder' && selectedTreeItem.name === 'video'
+											? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+											: ''
+									}`}
+									onClick={() => {
+										setIsVideoFolderOpen(!isVideoFolderOpen);
+										setSelectedTreeItem({ kind: 'folder', name: 'video' });
+									}}
 								>
 									{isVideoFolderOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
 									<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
@@ -2896,14 +3925,27 @@ ${changesText}
 													key={file.id}
 													role="button"
 													tabIndex={0}
-													onClick={() => void activateProjectTrack(file)}
+													onClick={() => {
+														setSelectedTreeItem({ kind: 'file', id: file.id });
+														void activateProjectTrack(file);
+													}}
+													onContextMenu={(e) => {
+														e.preventDefault();
+														e.stopPropagation();
+														setSelectedTreeItem({ kind: 'file', id: file.id });
+														setProjectFileMenu({ x: e.clientX, y: e.clientY, file });
+													}}
 													onKeyDown={(e) => {
 														if (e.key === 'Enter' || e.key === ' ') {
 															e.preventDefault();
 															void activateProjectTrack(file);
 														}
 													}}
-													className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center"
+													className={`hover:text-primary-main cursor-pointer truncate h-4 flex items-center rounded-[3px] px-[2px] ${
+														selectedTreeItem?.kind === 'file' && selectedTreeItem.id === file.id
+															? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+															: ''
+													}`}
 												>
 													<span
 														className={`font-inter font-semibold text-[12px] leading-none tracking-normal ${
@@ -2923,8 +3965,15 @@ ${changesText}
 
 							<div className="flex flex-col gap-[8px]">
 								<div 
-									className="flex items-center gap-[8px] cursor-pointer group h-4"
-									onClick={() => setIsSubtitlesFolderOpen(!isSubtitlesFolderOpen)}
+									className={`flex items-center gap-[8px] cursor-pointer group h-4 rounded-[3px] ${
+										selectedTreeItem?.kind === 'folder' && selectedTreeItem.name === 'subtitles'
+											? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+											: ''
+									}`}
+									onClick={() => {
+										setIsSubtitlesFolderOpen(!isSubtitlesFolderOpen);
+										setSelectedTreeItem({ kind: 'folder', name: 'subtitles' });
+									}}
 								>
 									{isSubtitlesFolderOpen ? <ChevronDown size={12} className="text-text-primary/70 shrink-0" /> : <ChevronRight size={12} className="text-text-primary/70 shrink-0" />}
 									<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
@@ -2941,14 +3990,21 @@ ${changesText}
 													key={file.id}
 													role="button"
 													tabIndex={0}
-													onClick={() => void activateProjectTrack(file)}
+													onClick={() => {
+														setSelectedTreeItem({ kind: 'file', id: file.id });
+														void activateProjectTrack(file);
+													}}
 													onKeyDown={(e) => {
 														if (e.key === 'Enter' || e.key === ' ') {
 															e.preventDefault();
 															void activateProjectTrack(file);
 														}
 													}}
-													className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center"
+													className={`hover:text-primary-main cursor-pointer truncate h-4 flex items-center rounded-[3px] px-[2px] ${
+														selectedTreeItem?.kind === 'file' && selectedTreeItem.id === file.id
+															? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+															: ''
+													}`}
 												>
 													<span
 														className={`font-inter font-semibold text-[12px] leading-none tracking-normal ${
@@ -2967,7 +4023,15 @@ ${changesText}
 							</div>
 
 							{treeFiles.root.map((file) => (
-								<div key={file.id} className="hover:text-primary-main cursor-pointer truncate h-4 flex items-center">
+								<div
+									key={file.id}
+									onClick={() => setSelectedTreeItem({ kind: 'file', id: file.id })}
+									className={`hover:text-primary-main cursor-pointer truncate h-4 flex items-center rounded-[3px] px-[2px] ${
+										selectedTreeItem?.kind === 'file' && selectedTreeItem.id === file.id
+											? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+											: ''
+									}`}
+								>
 									<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
 										{file.name}
 									</span>
@@ -2998,13 +4062,13 @@ ${changesText}
 					{/* Заголовок */}
 					<div className="h-[44px] flex items-center justify-between px-3 bg-panel-header border-b border-border-default shrink-0 gap-[12px]">
 						<span className="text-h1-heading text-text-primary truncate font-inter pr-1">
-							AI-agent
+							{t('aiAgent.title')}
 						</span>
 						
 						<div className="flex items-center gap-[12px] shrink-0">
 							<button
 								type="button"
-								title="Добавить"
+								title={t('aiAgent.add')}
 								onClick={handleAiAgentAdd}
 								className="group w-4 h-4 flex items-center justify-center shrink-0"
 							>
@@ -3017,7 +4081,7 @@ ${changesText}
 
 							<button
 								type="button"
-								title="Ещё"
+								title={t('aiAgent.more')}
 								onClick={handleAiAgentMore}
 								className="group w-4 h-4 flex items-center justify-center shrink-0"
 							>
@@ -3037,7 +4101,7 @@ ${changesText}
 					>
 						{chatMessages.length === 0 && !isAgentBusy && (
 							<div className="m-auto text-center text-caption font-inter text-text-primary/50 px-4">
-								Задайте вопрос агенту или попросите изменить реплики
+								{t('aiAgent.emptyHint')}
 							</div>
 						)}
 
@@ -3061,7 +4125,7 @@ ${changesText}
 													<div className="flex flex-col gap-[4px]">
 														<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
 															<span className="text-caption text-text-primary font-inter break-words">
-																{msg.attachedSegment.translation || 'Без перевода'}
+																{msg.attachedSegment.translation || t('aiAgent.noTranslation')}
 															</span>
 														</div>
 														<div className="min-h-[22px] bg-panel-header rounded-[2px] p-[4px] flex items-center">
@@ -3100,7 +4164,7 @@ ${changesText}
 												<div className="flex items-center justify-between gap-2">
 													<button
 														type="button"
-														title={expanded ? 'Свернуть' : 'Развернуть'}
+														title={expanded ? t('aiAgent.collapse') : t('aiAgent.expand')}
 														aria-expanded={expanded}
 														onClick={() => toggleDiffExpanded(msg.id)}
 														className="group flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-primary transition-colors hover:bg-text-primary/15"
@@ -3119,25 +4183,25 @@ ${changesText}
 																	onClick={() => handleUndoEdits(msg.id)}
 																	className="text-caption font-inter text-text-secondary px-[8px] py-[2px] rounded-[6px] transition-all duration-150 hover:bg-inline-error hover:text-text-primary active:scale-90 active:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inline-error/60"
 																>
-																	Undo
+																	{t('aiAgent.undo')}
 																</button>
 																<button
 																	type="button"
 																	onClick={() => handleKeepEdits(msg.id)}
 																	className="text-caption font-inter text-text-secondary px-[8px] py-[2px] rounded-[6px] transition-all duration-150 hover:bg-inline-success hover:text-text-primary active:scale-90 active:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inline-success/60"
 																>
-																	Keep
+																	{t('aiAgent.keep')}
 																</button>
 															</>
 														)}
 														{msg.editStatus === 'kept' && (
 															<span className="text-caption font-inter text-text-primary/60">
-																Kept
+																{t('aiAgent.kept')}
 															</span>
 														)}
 														{msg.editStatus === 'reverted' && (
 															<span className="text-caption font-inter text-text-primary/60">
-																Reverted
+																{t('aiAgent.reverted')}
 															</span>
 														)}
 													</div>
@@ -3146,7 +4210,7 @@ ${changesText}
 												{!expanded && (
 													<p className="text-caption font-inter text-text-primary/70">
 														{msg.edits.length}{' '}
-														{msg.edits.length === 1 ? 'change' : 'changes'}
+														{msg.edits.length === 1 ? t('aiAgent.change') : t('aiAgent.changes')}
 													</p>
 												)}
 
@@ -3188,7 +4252,7 @@ ${changesText}
 							<div className="self-start max-w-[95%]">
 								<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px]">
 									<p className="text-body-reg text-text-primary/60 font-inter leading-tight">
-										Агент думает...
+										{t('aiAgent.thinking')}
 									</p>
 								</div>
 							</div>
@@ -3208,17 +4272,17 @@ ${changesText}
 										<div className="flex-1 h-[1px] bg-border-default" />
 										<button
 											type="button"
-											title="Убрать реплику"
+											title={t('aiAgent.removeAttachment')}
 											onClick={() => setPendingAttachedSegment(null)}
 											className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors"
 										>
-											Remove
+											{t('aiAgent.remove')}
 										</button>
 									</div>
 									<div className="flex flex-col gap-[4px]">
 										<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
 											<span className="text-caption text-text-primary font-inter break-words">
-												{pendingAttachedSegment.translation || 'Без перевода'}
+												{pendingAttachedSegment.translation || t('aiAgent.noTranslation')}
 											</span>
 										</div>
 										<div className="min-h-[22px] bg-panel-header rounded-[2px] p-[4px] flex items-center">
@@ -3236,7 +4300,7 @@ ${changesText}
 								onChange={(e) => setChatInput(e.target.value)}
 								onKeyDown={handleChatInputKeyDown}
 								disabled={isAgentBusy}
-								placeholder="Помоги, пожалуйста, перевести..."
+								placeholder={t('aiAgent.placeholder')}
 								className="w-full h-full p-3 pr-[56px] bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto no-scrollbar disabled:opacity-60"
 								rows={3}
 							/>
@@ -3244,7 +4308,7 @@ ${changesText}
 							<div className="absolute right-3 bottom-3">
 								<button
 									type="button"
-									title="Send message"
+									title={t('aiAgent.sendMessage')}
 									onClick={() => void handleSendChatMessage()}
 									disabled={isAgentBusy || chatInput.trim().length === 0}
 									className="group/send flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-0 bg-secondary-hover p-0 outline-none transition-colors hover:bg-primary-main focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-50"
@@ -3298,7 +4362,7 @@ ${changesText}
 									</colgroup>
 										<thead className="sticky top-0 bg-surface-secondary z-20">
 											<tr className="h-[25px]">
-												{['#', 'Start time', 'End time', 'Duration'].map((label, idx) => (
+												{['#', t('table.startTime'), t('table.endTime'), t('table.duration')].map((label, idx) => (
 													<th 
 														key={idx} 
 														style={{ width: `${colWidths[idx]}px` }}
@@ -3312,10 +4376,10 @@ ${changesText}
 													</th>
 												))}
 												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
-													<div className="truncate w-full">Translation</div>
+													<div className="truncate w-full">{t('table.translation')}</div>
 												</th>
 												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
-													<div className="truncate w-full">Original text</div>
+													<div className="truncate w-full">{t('table.originalText')}</div>
 												</th>
 											</tr>
 										</thead>
@@ -3325,10 +4389,10 @@ ${changesText}
 												<tr
 													key={`${segment.id}-${idx}`}
 													data-subtitle-row-index={idx}
-													onClick={() => setSelectedSegmentIndex(idx)}
+													onClick={() => selectSegmentAndSeek(idx)}
 													className={`h-[25px] hover:bg-black/5 transition-colors group text-table cursor-pointer scroll-mt-[25px] ${
 														selectedSegmentIndex === idx ? 'bg-black/10' : ''
-													}`}
+													} ${findHighlight?.segmentIndex === idx ? 'bg-primary-main/15 ring-1 ring-inset ring-primary-main' : ''}`}
 												>
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
 														<div className="truncate">{segment.id}</div>
@@ -3342,10 +4406,22 @@ ${changesText}
 													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
 														<div className="truncate">{segment.duration.toFixed(3)}</div>
 													</td>
-													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+													<td
+														className={`py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text ${
+															findHighlight?.segmentIndex === idx && findHighlight.field === 'translation'
+																? 'bg-primary-main/25'
+																: ''
+														}`}
+													>
 														<div className="truncate">{segment.translation || '-'}</div>
 													</td>
-													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text">
+													<td
+														className={`py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text ${
+															findHighlight?.segmentIndex === idx && findHighlight.field === 'text'
+																? 'bg-primary-main/25'
+																: ''
+														}`}
+													>
 														<div className="truncate">{segment.text}</div>
 													</td>
 												</tr>
@@ -3372,7 +4448,7 @@ ${changesText}
 									{/* Инпуты в один ряд */}
 									<div className="flex gap-[4px]">
 										<div className="flex flex-col gap-[4px]">
-											<label className="text-caption text-text-primary">Start time</label>
+											<label className="text-caption text-text-primary">{t('table.startTime')}</label>
 											<input 
 												type="text"
 												inputMode="text"
@@ -3391,7 +4467,7 @@ ${changesText}
 											/>
 										</div>
 										<div className="flex flex-col gap-[4px]">
-											<label className="text-caption text-text-primary">Duration</label>
+											<label className="text-caption text-text-primary">{t('table.duration')}</label>
 											<input 
 												type="text"
 												inputMode="decimal"
@@ -3417,22 +4493,22 @@ ${changesText}
 											<button
 												type="button"
 												disabled={selectedSegmentIndex <= 0}
-												onClick={() => setSelectedSegmentIndex((i) => Math.max(0, i - 1))}
+												onClick={() => selectSegmentAndSeek((i) => Math.max(0, i - 1))}
 												className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
 											>
-												&lt; Prev
+												{t('table.prev')}
 											</button>
 											<button
 												type="button"
 												disabled={selectedSegmentIndex < 0 || selectedSegmentIndex >= generatedSegments.length - 1}
 												onClick={() =>
-													setSelectedSegmentIndex((i) =>
+													selectSegmentAndSeek((i) =>
 														Math.min(generatedSegments.length - 1, i + 1)
 													)
 												}
 												className="flex-1 h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
 											>
-												Next &gt;
+												{t('table.next')}
 											</button>
 										</div>
 										<button
@@ -3441,18 +4517,18 @@ ${changesText}
 											disabled={selectedSegmentIndex < 0 || !generatedSegments[selectedSegmentIndex]}
 											className="w-full h-[24px] py-[4px] bg-primary-main hover:bg-primary-hover disabled:opacity-40 text-white text-caption rounded-sm transition-colors"
 										>
-											Ask agent
+											{t('table.askAgent')}
 										</button>
 									</div>
 								</div>
 
 								{/* Колонна 2 Translation */}
 								<div className="flex-1 flex flex-col gap-[4px] min-w-0 ml-[12px]">
-									<label className="text-caption text-text-primary">Translation</label>
+									<label className="text-caption text-text-primary">{t('table.translation')}</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
-											placeholder="Translation..."
+											placeholder={t('table.translationPlaceholder')}
 											value={segEditorTranslation}
 											onChange={(e) => setSegEditorTranslation(e.target.value)}
 											onBlur={() => {
@@ -3466,10 +4542,10 @@ ${changesText}
 									{/* Вертикальная статистика */}
 									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
 										<span className="truncate">
-											Total length: {segEditorTranslation.length}
+											{t('table.totalLength')}: {segEditorTranslation.length}
 										</span>
 										<span className="truncate">
-											Chars/sec:{' '}
+											{t('table.charsPerSec')}:{' '}
 											{(() => {
 												const d = parseFloat(segEditorDuration.replace(',', '.'));
 												return Number.isFinite(d) && d > 0
@@ -3482,11 +4558,11 @@ ${changesText}
 
 								{/* Колонна 3 Original Text */}
 								<div className="flex-1 flex flex-col gap-[4px] min-w-0">
-									<label className="text-caption text-text-primary">Original text</label>
+									<label className="text-caption text-text-primary">{t('table.originalText')}</label>
 									<div className="flex-1 min-h-0 relative">
 										<textarea 
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
-											placeholder="Original text..."
+											placeholder={t('table.originalPlaceholder')}
 											value={segEditorOriginal}
 											onChange={(e) => setSegEditorOriginal(e.target.value)}
 											onBlur={() => {
@@ -3498,10 +4574,10 @@ ${changesText}
 									{/* Вертикальная статистика */}
 									<div className="flex flex-col text-caption text-text-primary overflow-hidden gap-[2px] mt-[4px]">
 										<span className="truncate">
-											Total length: {segEditorOriginal.length}
+											{t('table.totalLength')}: {segEditorOriginal.length}
 										</span>
 										<span className="truncate">
-											Chars/sec:{' '}
+											{t('table.charsPerSec')}:{' '}
 											{(() => {
 												const d = parseFloat(segEditorDuration.replace(',', '.'));
 												return Number.isFinite(d) && d > 0
@@ -3563,7 +4639,7 @@ ${changesText}
 											/>
 										) : (
 											<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
-												Video Preview
+												{t('video.preview')}
 											</div>
 										)}
 										<div className="absolute bottom-12 z-10 w-full text-center px-10 pointer-events-none">
@@ -3596,8 +4672,8 @@ ${changesText}
 												<div className="flex items-center gap-[12px] shrink-0 min-w-0">
 														<button
 															type="button"
-															title={isVideoPlaying ? 'Пауза' : 'Воспроизведение'}
-															aria-label={isVideoPlaying ? 'Пауза' : 'Воспроизведение'}
+															title={isVideoPlaying ? t('video.pause') : t('video.play')}
+															aria-label={isVideoPlaying ? t('video.pause') : t('video.play')}
 															disabled={!videoSrc}
 															className={`group/vplay ${VIDEO_CTRL_BTN_CLASS}`}
 															onClick={() => {
@@ -3617,8 +4693,8 @@ ${changesText}
 														</button>
 														<button
 															type="button"
-															title="Стоп"
-															aria-label="Стоп"
+															title={t('video.stop')}
+															aria-label={t('video.stop')}
 															disabled={!videoSrc}
 															className={`group/vstop ${VIDEO_CTRL_BTN_CLASS}`}
 															onClick={() => {
@@ -3639,13 +4715,13 @@ ${changesText}
 															type="button"
 															title={
 																videoMuted || volume < 1e-4
-																	? 'Включить звук'
-																	: 'Выключить звук'
+																	? t('video.unmute')
+																	: t('video.mute')
 															}
 															aria-label={
 																videoMuted || volume < 1e-4
-																	? 'Включить звук'
-																	: 'Выключить звук'
+																	? t('video.unmute')
+																	: t('video.mute')
 															}
 															disabled={!videoSrc}
 															className={`group/vvol ${VIDEO_CTRL_BTN_CLASS}`}
@@ -3697,10 +4773,15 @@ ${changesText}
 												</div>
 
 												{/* Таймкоды */}
-												<div className="flex items-center gap-1 text-[12px] text-body-med text-text-primary shrink-0">
-														<span>{formatPlaybackClock(currentPlaybackTime)}</span>
+												<div
+													className="flex items-center gap-1 text-[12px] text-body-med text-text-primary shrink-0 tabular-nums whitespace-nowrap"
+													style={{ fontVariantNumeric: 'tabular-nums' }}
+												>
+														<span className="inline-block text-right">
+															{formatPlaybackClock(currentPlaybackTime)}
+														</span>
 														<span className="text-text-secondary/40">/</span>
-														<span className="text-text-secondary">
+														<span className="inline-block text-text-secondary">
 															{formatPlaybackClock(timelineTotalDuration)}
 														</span>
 												</div>
@@ -3731,41 +4812,52 @@ ${changesText}
 							<div className="w-[100px] border-r border-border-default flex flex-col gap-[4px] p-2 bg-surface-panel shrink-0">
 								<button
 									type="button"
-									disabled={!currentProject || !activeSubtitleFileId}
+									disabled={!currentProject || !activeSubtitleFileId || selectedSegmentIds.size > 0}
 									title={
-										timelineInsertRange
-											? `Insert empty subtitle ${timelineInsertRange.start.toFixed(2)}s – ${timelineInsertRange.end.toFixed(2)}s (or clear with Esc)`
-											: 'Insert empty subtitle at playhead (default 1s), or drag on the timeline to set range'
+										selectedSegmentIds.size > 0
+											? t('timeline.insertBlockedSelection')
+											: timelineInsertRange
+												? t('timeline.insertRange', {
+														start: timelineInsertRange.start.toFixed(2),
+														end: timelineInsertRange.end.toFixed(2)
+													})
+												: t('timeline.insertPlayhead')
 									}
 									onClick={() => void handleTimelineInsert()}
-									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+									className={`h-[24px] ${timelineBtnPx} py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center`}
 								>
-									Insert
+									{t('timeline.insert')}
 								</button>
 								<button
 									type="button"
-									disabled={selectedSegmentIndex < 0}
+									disabled={selectedSegmentIndex < 0 || selectedSegmentIds.size > 0}
+									title={
+										selectedSegmentIds.size > 0 ? t('timeline.setStartBlocked') : undefined
+									}
 									onClick={() => handleTimelineSetStart()}
-									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+									className={`h-[24px] ${timelineBtnPx} py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center`}
 								>
-									Set start
+									{t('timeline.setStart')}
 								</button>
 								<button
 									type="button"
-									disabled={selectedSegmentIndex < 0}
+									disabled={selectedSegmentIndex < 0 || selectedSegmentIds.size > 0}
+									title={
+										selectedSegmentIds.size > 0 ? t('timeline.setEndBlocked') : undefined
+									}
 									onClick={() => handleTimelineSetEnd()}
-									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+									className={`h-[24px] ${timelineBtnPx} py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center`}
 								>
-									Set end
+									{t('timeline.setEnd')}
 								</button>
 								<button
 									type="button"
 									disabled={!currentProject || !activeSubtitleFileId || !canSplitAtPlayhead}
-									title="Split selected subtitle at the playhead (both parts keep the same text)"
+									title={t('timeline.splitTitle')}
 									onClick={() => void handleTimelineSplit()}
-									className="h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center"
+									className={`h-[24px] ${timelineBtnPx} py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center`}
 								>
-									Split
+									{t('timeline.split')}
 								</button>
 							</div>
 
@@ -3784,6 +4876,16 @@ ${changesText}
 										className="relative h-full min-h-0 select-none"
 										style={{ width: `${Math.max(100, timelineZoomPercent)}%` }}
 										onPointerDown={beginTimelineRangeSelect}
+										onContextMenu={(e) => {
+											e.preventDefault();
+											const ids = Array.from(selectedSegmentIdsRef.current);
+											setTimelineContextMenu({
+												x: e.clientX,
+												y: e.clientY,
+												ids,
+												range: timelineRubberRange
+											});
+										}}
 									>
 										{/* Сетка */}
 										<div
@@ -3854,13 +4956,16 @@ ${changesText}
 												const left = (seg.start / timelineTotalDuration) * 100;
 												const w = Math.max(0, ((seg.end - seg.start) / timelineTotalDuration) * 100);
 												const isSel = idx === selectedSegmentIndex;
+												const isMultiSel = selectedSegmentIds.has(seg.id);
 												const tr = seg.translation?.trim() ?? '';
 												return (
 													<div
 														key={seg.id}
 														data-tl-segment
-														className={`absolute top-0 z-[11] h-full border-x border-[#A3E635] flex flex-col justify-between pointer-events-auto cursor-pointer ${
-															isSel ? 'bg-surface-secondary/10' : 'bg-surface-secondary/5'
+														className={`absolute top-0 z-[11] h-full flex flex-col justify-between pointer-events-auto cursor-pointer ${
+															isMultiSel
+																? 'border-x-2 border-primary-main bg-primary-main/20'
+																: `border-x border-[#A3E635] ${isSel ? 'bg-surface-secondary/10' : 'bg-surface-secondary/5'}`
 														}`}
 														style={{ left: `${left}%`, width: `${w}%` }}
 														onClick={(e) => {
@@ -3875,6 +4980,8 @@ ${changesText}
 															if (v) v.currentTime = t;
 															setCurrentPlaybackTime(t);
 															setSelectedSegmentIndex(idx);
+															setSelectedSegmentIds(new Set());
+															setTimelineRubberRange(null);
 														}}
 													>
 														<div
@@ -3917,8 +5024,8 @@ ${changesText}
 									<div className="flex items-center gap-3">
 										<button
 											type="button"
-											title="Уменьшить масштаб"
-											aria-label="Уменьшить масштаб"
+											title={t('timeline.zoomOut')}
+											aria-label={t('timeline.zoomOut')}
 											className={`group/tzoomout ${TIMELINE_ZOOM_BTN_CLASS}`}
 											onClick={() =>
 												setTimelineZoomPercent((z) => stepTimelineZoom(z, -1))
@@ -3937,8 +5044,8 @@ ${changesText}
 											min={TIMELINE_ZOOM_SLIDER_MIN}
 											max={TIMELINE_ZOOM_SLIDER_MAX}
 											step={1}
-											aria-label="Масштаб таймлайна"
-											title="Плавный зум таймлайна"
+											aria-label={t('timeline.zoomSmooth')}
+											title={t('timeline.zoomSmooth')}
 											className="timeline-zoom-slider h-[22px] w-[160px] cursor-pointer"
 											style={
 												{
@@ -3954,8 +5061,8 @@ ${changesText}
 
 										<button
 											type="button"
-											title="Увеличить масштаб"
-											aria-label="Увеличить масштаб"
+											title={t('timeline.zoomIn')}
+											aria-label={t('timeline.zoomIn')}
 											className={`group/tzoomin ${TIMELINE_ZOOM_BTN_CLASS}`}
 											onClick={() =>
 												setTimelineZoomPercent((z) => stepTimelineZoom(z, 1))
@@ -4027,12 +5134,18 @@ ${changesText}
 							<WizardModal
 								onClose={() => setActiveModal(null)}
 								projectPath={currentProject?.path}
-								onComplete={({ project, segments }) => {
+								onComplete={({ project, segments, subtitleFileId }) => {
 									undoSegmentsStackRef.current = [];
 									redoSegmentsStackRef.current = [];
+									currentProjectRef.current = project;
 									setCurrentProject(project);
 									setGeneratedSegments(segments);
+									const newSub =
+										(subtitleFileId
+											? project.files.find((f) => f.id === subtitleFileId)
+											: null) ?? null;
 									const withSeg =
+										newSub ??
 										project.files.find(
 											(f) =>
 												f.file_type === 'Subtitle' &&
@@ -4041,9 +5154,21 @@ ${changesText}
 										) ??
 										project.files.find(
 											(f) => (f.subtitle_segments?.length ?? 0) > 0
-										);
+										) ??
+										null;
 									setActiveSubtitleFileId(withSeg?.id ?? null);
 									setSelectedSegmentIndex(segments.length > 0 ? 0 : -1);
+									const v = videoRef.current;
+									if (v) {
+										try {
+											v.pause();
+											v.currentTime = 0;
+										} catch (err) {
+											console.warn('reset video after wizard', err);
+										}
+									}
+									setIsVideoPlaying(false);
+									setCurrentPlaybackTime(0);
 									if (withSeg?.id) {
 										const stem = getSourceVideoStem(project, withSeg.id);
 										void projectService
@@ -4076,10 +5201,10 @@ ${changesText}
 									if ((segmentsRef.current ?? []).length === 0) return;
 
 									void (async () => {
-										const confirmed = await ask(
-											'Хотите, чтобы агент обновил перевод по изменениям глоссария?',
-											{ title: 'Update subtitles', kind: 'info' }
-										);
+										const confirmed = await ask(t('dialog.glossaryUpdateConfirm'), {
+											title: t('dialog.glossaryUpdateTitle'),
+											kind: 'info'
+										});
 										if (!confirmed) return;
 										await applyGlossaryReplacementToSubtitles(changes);
 									})();
@@ -4089,13 +5214,259 @@ ${changesText}
 						)}
 
 						{activeModal === 'export' && (
-							<ExportModal onClose={() => setActiveModal(null)} />
+							<ExportModal
+								onClose={() => setActiveModal(null)}
+								projectPath={currentProject?.path ?? null}
+								subtitleFiles={treeFiles.subtitles}
+								onPrepareExport={async () => {
+									flushSubtitleEditorToProject();
+									const cp = currentProjectRef.current;
+									if (!cp) return;
+									const next: ProjectData = { ...cp, agent_chat: chatMessages };
+									currentProjectRef.current = next;
+									setCurrentProject(next);
+									await projectService.save(next);
+								}}
+							/>
+						)}
+
+						{activeModal === 'settings' && (
+							<SettingsModal
+								onClose={() => setActiveModal(null)}
+								isDarkTheme={isDarkTheme}
+								onDarkThemeChange={setIsDarkTheme}
+							/>
+						)}
+
+						{activeModal === 'findReplace' && (
+							<FindReplaceModal
+								onClose={() => {
+									setFindHighlight(null);
+									setActiveModal(null);
+								}}
+								segments={generatedSegments}
+								onSelectMatch={handleFindSelectMatch}
+								onSegmentsChange={applyFindReplaceSegments}
+							/>
 						)}
 
 
 
 						
 
+					</div>
+				</div>
+			)}
+
+			{timelineContextMenu && (() => {
+				const m = timelineContextMenu;
+				const hasRange = Boolean(m.range && m.range.end - m.range.start >= MIN_SEGMENT_DURATION);
+				const canRetranscribe = hasRange && Boolean(activeVideoAbsolutePath);
+				const selectedCount = selectedSegmentIds.size;
+				const canDelete = Boolean(activeSubtitleFileId) && (selectedCount > 0 || selectedSegmentIndex >= 0);
+				const deleteLabel =
+					selectedCount > 1
+						? t('timeline.deleteCount', { count: selectedCount })
+						: t('timeline.delete');
+				return (
+					<>
+						<div
+							className="fixed inset-0 z-[10500]"
+							onMouseDown={() => setTimelineContextMenu(null)}
+							onContextMenu={(e) => { e.preventDefault(); setTimelineContextMenu(null); }}
+						/>
+						<div
+							className="fixed z-[10501] min-w-[220px] py-1 bg-surface-secondary border border-border-default rounded-[8px] shadow-2xl"
+							style={{ left: m.x, top: m.y }}
+							onMouseDown={(e) => e.stopPropagation()}
+						>
+							<button
+								type="button"
+								disabled={!canRetranscribe}
+								onClick={() => {
+									if (!canRetranscribe || !m.range) return;
+									setTimelineContextMenu(null);
+									setRetranscribeError(null);
+									setRetranscribeSetup({ range: m.range });
+								}}
+								className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
+								title={
+									!hasRange
+										? t('timeline.retranscribeSelectRange')
+										: !activeVideoAbsolutePath
+											? t('timeline.retranscribeNoVideo')
+											: t('timeline.retranscribeHint')
+								}
+							>
+								{t('timeline.retranscribeRange')}
+							</button>
+							<button
+								type="button"
+								disabled={!canDelete}
+								onClick={() => {
+									if (!canDelete) return;
+									setTimelineContextMenu(null);
+									void handleDeleteSelectedSubtitle();
+								}}
+								className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
+								title={
+									!canDelete
+										? t('timeline.deleteSelectSubtitle')
+										: selectedCount > 0
+											? t('timeline.deleteSelectedPlural')
+											: t('timeline.deleteSelectedSingle')
+								}
+							>
+								{deleteLabel}
+							</button>
+						</div>
+					</>
+				);
+			})()}
+
+			{projectFileMenu && (
+				<>
+					<div
+						className="fixed inset-0 z-[10500]"
+						onMouseDown={() => setProjectFileMenu(null)}
+						onContextMenu={(e) => { e.preventDefault(); setProjectFileMenu(null); }}
+					/>
+					<div
+						data-project-file-menu
+						className="fixed z-[10501] min-w-[160px] py-1 bg-surface-secondary border border-border-default rounded-[8px] shadow-2xl"
+						style={{ left: projectFileMenu.x, top: projectFileMenu.y }}
+						onMouseDown={(e) => e.stopPropagation()}
+					>
+						<button
+							type="button"
+							onClick={() => {
+								const f = projectFileMenu.file;
+								setProjectFileMenu(null);
+								void handleDeleteEpisode(f);
+							}}
+							className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover"
+						>
+							{t('timeline.delete')}
+						</button>
+					</div>
+				</>
+			)}
+
+			{retranscribeSetup && (
+				<div className="fixed inset-0 flex items-center justify-center z-[10550] pointer-events-none">
+					<div className="pointer-events-auto w-[780px] h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+						<div className="flex items-center justify-end h-6 mb-[24px]">
+							<button
+								type="button"
+								onClick={() => setRetranscribeSetup(null)}
+								className="w-6 h-6 flex items-center justify-center text-text-secondary hover:opacity-70 transition-opacity"
+							>
+								<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+									<path d="M18 6L6 18M6 6l12 12" />
+								</svg>
+							</button>
+						</div>
+
+						<div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
+							<div className="flex flex-col pt-0">
+								<h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
+									{t('retranscribe.title')}
+								</h1>
+								<p className="text-body-reg text-text-secondary">
+									{t('retranscribe.desc')}
+								</p>
+							</div>
+							<div className="flex flex-col gap-[12px] h-full">
+								<div className="flex flex-col gap-[8px]">
+									<label className="text-caption text-text-primary">{t('retranscribe.sourceLanguage')}</label>
+									<select
+										value={retranscribeLanguage}
+										onChange={(e) => setRetranscribeLanguage(e.target.value)}
+										className="w-full h-[42px] px-3 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary"
+									>
+										{RETRANSCRIBE_LANGUAGE_OPTIONS.map((lang) => (
+											<option key={lang} value={lang}>{lang}</option>
+										))}
+									</select>
+								</div>
+								<div className="flex-1 flex flex-col gap-[8px] min-h-0">
+									<label className="text-caption text-text-primary">{t('retranscribe.prompt')}</label>
+									<textarea
+										value={retranscribePrompt}
+										onChange={(e) => setRetranscribePrompt(e.target.value)}
+										className="flex-1 min-h-0 w-full p-4 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary resize-none overflow-y-auto subtitle-table-scroll focus:outline-none focus:border-text-primary transition-colors placeholder:text-text-secondary/50"
+										placeholder={t('retranscribe.promptPlaceholder')}
+									/>
+								</div>
+							</div>
+						</div>
+
+						<div className="flex justify-end gap-3 mt-[32px]">
+							<button
+								type="button"
+								onClick={() => setRetranscribeSetup(null)}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover text-text-primary text-body-reg rounded-[5px] transition-colors"
+							>
+								{t('retranscribe.cancel')}
+							</button>
+							<button
+								type="button"
+								onClick={() => {
+									const range = retranscribeSetup.range;
+									setRetranscribeSetup(null);
+									void handleRetranscribeRange(range, {
+										sourceLanguage: retranscribeLanguage,
+										userPrompt: retranscribePrompt
+									});
+								}}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
+							>
+								{t('retranscribe.retranscribe')}
+							</button>
+						</div>
+					</div>
+				</div>
+			)}
+
+			{retranscribeBusy && (
+				<div className="fixed inset-0 flex items-center justify-center z-[10600] pointer-events-none">
+					<div className="pointer-events-auto w-[780px] h-[300px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none">
+						<div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
+							<div className="flex flex-col pt-0">
+								<h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
+									{t('retranscribe.working')}
+								</h1>
+								<p className="text-body-reg text-text-secondary">
+									{retranscribeBusy.stage === 'audio' && t('retranscribe.stageAudio')}
+									{retranscribeBusy.stage === 'transcribe' && t('retranscribe.stageTranscribe')}
+									{retranscribeBusy.stage === 'translate' && t('retranscribe.stageTranslate')}
+									{retranscribeBusy.stage === 'apply' && t('retranscribe.stageApply')}
+								</p>
+							</div>
+							<div className="flex items-center justify-center h-full">
+								<div className="w-[120px] h-[120px] border-[6px] border-border-default border-t-progress-bar rounded-full animate-spin" />
+							</div>
+						</div>
+					</div>
+				</div>
+			)}
+
+			{retranscribeError && (
+				<div className="fixed inset-0 flex items-center justify-center z-[10600] pointer-events-none">
+					<div className="pointer-events-auto w-[480px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-6 flex flex-col gap-4 select-none">
+						<h2 className="text-[18px] font-semibold text-text-primary">{t('retranscribe.errorTitle')}</h2>
+						<p className="text-body-reg text-text-secondary whitespace-pre-wrap break-words">
+							{retranscribeError}
+						</p>
+						<div className="flex justify-end">
+							<button
+								type="button"
+								onClick={() => setRetranscribeError(null)}
+								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors"
+							>
+								{t('retranscribe.ok')}
+							</button>
+						</div>
 					</div>
 				</div>
 			)}

@@ -1,6 +1,6 @@
 import type { SubtitleSegment } from '../services/projectService';
 
-function sortAndRenumberSubtitleIds(segments: SubtitleSegment[]): SubtitleSegment[] {
+export function sortAndRenumberSubtitleIds(segments: SubtitleSegment[]): SubtitleSegment[] {
 	const sorted = [...segments].sort((a, b) => {
 		if (a.start !== b.start) return a.start - b.start;
 		return a.id - b.id;
@@ -8,7 +8,6 @@ function sortAndRenumberSubtitleIds(segments: SubtitleSegment[]): SubtitleSegmen
 	return sorted.map((s, i) => ({ ...s, id: i + 1 }));
 }
 
-/** Как в Rust `insert_subtitle_segment`: вставка пустого блока и перенумерация id 1..n по времени. */
 export function insertEmptySegment(
 	segments: SubtitleSegment[],
 	start: number,
@@ -36,12 +35,11 @@ export function insertEmptySegment(
 	return { segments: renumbered, insertedId: inserted.id };
 }
 
-/** Как в Rust `delete_subtitle_segment`. */
+
 export function deleteSegmentById(segments: SubtitleSegment[], segmentId: number): SubtitleSegment[] {
 	return sortAndRenumberSubtitleIds(segments.filter((s) => s.id !== segmentId));
 }
 
-/** Разрез одного сегмента по времени splitTime; текст/перевод копируются во вторую часть. */
 export function splitSegmentAt(
 	segments: SubtitleSegment[],
 	index: number,
