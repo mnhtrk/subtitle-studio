@@ -3,10 +3,7 @@
   windows_subsystem = "windows"
 )]
 
-use tauri::Manager; 
-
 mod commands;
-mod cache;
 mod project;
 mod types;
 mod subtitle_parser; 
@@ -81,14 +78,7 @@ fn main() {
             commands::agent::chat_with_agent,
         ])
         
-        .setup(|app| {
-            let app_data_dir = app.path().app_data_dir().unwrap();
-            let cache_dir = app_data_dir.join("cache");
-            std::fs::create_dir_all(&cache_dir).ok();
-            
-            let cache = cache::Cache::new(cache_dir);
-            app.manage(cache);
-            
+        .setup(|_app| {
             println!("Subtitle Studio запущен");
             Ok(())
         })

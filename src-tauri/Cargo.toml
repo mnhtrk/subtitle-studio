@@ -26,6 +26,4 @@ tauri-plugin-dialog = "2"
 printpdf = "0.7"
 tempfile = "3.10" 
 uuid = { version = "1.8", features = ["v4"] }  
-sha2 = "0.10"
-hex = "0.4"
 lazy_static = "1.4"

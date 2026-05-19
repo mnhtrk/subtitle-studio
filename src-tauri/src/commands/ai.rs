@@ -9,7 +9,6 @@ use std::path::Path;
 use crate::postprocessing;
 use crate::audio_preprocessing;
 use crate::audio_preprocessing::SpeechSegment;
-use crate::cache::Cache;
 
 const DEBUG_LOG_MAX_CHARS: usize = 24_000;
 
@@ -170,18 +169,10 @@ pub async fn transcribe_audio(
     file_path: String,
     language: Option<String>,
     app_handle: tauri::AppHandle,
-    cache: tauri::State<'_, Cache>,
 ) -> Result<Vec<SubtitleSegment>, String> {
     println!("📝 Транскрибация файла: {}", file_path);
     
     let file_path_buf = Path::new(&file_path);
-    let file_hash = Cache::calculate_file_hash(file_path_buf)?;
-    
-    // Проверяем кэш
-    if let Some(cached) = cache.get_transcription(&file_hash).await? {
-        println!("✅ Найдено в кэше ({} сегментов)", cached.len());
-        return Ok(cached);
-    }
 
     // Получаем API-ключ
     let api_key = get_api_key()?;
@@ -191,7 +182,7 @@ pub async fn transcribe_audio(
     
     // Клонируем app_handle для отправки событий
     let app_handle_clone = app_handle.clone();
-    let operation_id = format!("transcribe_{}", file_hash);
+    let operation_id = format!("transcribe_{}", uuid::Uuid::new_v4());
     
     // Запускаем отправку прогресса в фоне
     tokio::spawn(async move {
@@ -274,9 +265,6 @@ pub async fn transcribe_audio(
     } else {
         None
     };
-
-    // Сохраняем в кэш
-    cache.set_transcription(&file_hash, &final_segments).await?;
     
     // Отправляем завершение
     let _ = progress_tx.send(ProgressEvent::Completed { 
