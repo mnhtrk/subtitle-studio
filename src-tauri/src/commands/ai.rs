@@ -5,13 +5,11 @@ use crate::project::glossary::apply_glossary;
 use tokio::sync::mpsc;
 use tauri::Emitter;
 use std::collections::{HashMap};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::path::Path;
 use crate::postprocessing;
-
-const WHISPER_MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
-/// Целевой размер одного куска при разбиении большого файла (18мб)
-const WHISPER_CHUNK_TARGET_BYTES: u64 = 18 * 1024 * 1024;
+use crate::audio_preprocessing;
+use crate::audio_preprocessing::SpeechSegment;
+use crate::cache::Cache;
 
 const DEBUG_LOG_MAX_CHARS: usize = 24_000;
 
@@ -171,19 +169,31 @@ fn get_api_key() -> Result<String, String> {
 pub async fn transcribe_audio(
     file_path: String,
     language: Option<String>,
-    prompt: Option<String>,
-    glossary: Option<Vec<GlossaryEntry>>,
     app_handle: tauri::AppHandle,
+    cache: tauri::State<'_, Cache>,
 ) -> Result<Vec<SubtitleSegment>, String> {
     println!("📝 Транскрибация файла: {}", file_path);
-
-    let api_key = get_api_key()?;
-
-    let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(10);
-
-    let app_handle_clone = app_handle.clone();
-    let operation_id = format!("transcribe_{}", uuid::Uuid::new_v4());
     
+    let file_path_buf = Path::new(&file_path);
+    let file_hash = Cache::calculate_file_hash(file_path_buf)?;
+    
+    // Проверяем кэш
+    if let Some(cached) = cache.get_transcription(&file_hash).await? {
+        println!("✅ Найдено в кэше ({} сегментов)", cached.len());
+        return Ok(cached);
+    }
+
+    // Получаем API-ключ
+    let api_key = get_api_key()?;
+    
+    // Создаём канал для отправки прогресса
+    let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(10);
+    
+    // Клонируем app_handle для отправки событий
+    let app_handle_clone = app_handle.clone();
+    let operation_id = format!("transcribe_{}", file_hash);
+    
+    // Запускаем отправку прогресса в фоне
     tokio::spawn(async move {
         while let Some(event) = progress_rx.recv().await {
             let _ = app_handle_clone.emit("ai_progress", ProgressPayload {
@@ -193,215 +203,71 @@ pub async fn transcribe_audio(
         }
     });
     
+    // Отправляем начальное событие
     let _ = progress_tx.send(ProgressEvent::Started { 
-        total_steps: 4, 
-        description: "Подготовка файла".to_string() 
+        total_steps: 5, 
+        description: "Анализ аудио".to_string() 
     }).await;
 
-    let _ = progress_tx.send(ProgressEvent::InProgress {
-        step: 1,
-        progress: 0.15,
-        description: "Подготовка аудио".to_string()
+    // Анализируем аудио для обнаружения сегментов с речью
+    let _ = progress_tx.send(ProgressEvent::InProgress { 
+        step: 1, 
+        progress: 0.2, 
+        description: "Обнаружение речи в аудио".to_string() 
     }).await;
-
-    let file_metadata = std::fs::metadata(&file_path)
-        .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
-    let file_size_bytes = file_metadata.len();
-
-    let language_code = language.clone().unwrap_or_else(|| "en".to_string());
-    let glossary_entries = glossary.unwrap_or_default();
-    let mut glossary_originals: Vec<String> = Vec::new();
-    for entry in &glossary_entries {
-        let source = entry.source.trim();
-        if source.is_empty() {
-            continue;
-        }
-        if !glossary_originals
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(source))
-        {
-            glossary_originals.push(source.to_string());
-        }
+    
+    let preprocessing_result = audio_preprocessing::detect_speech_segments(file_path_buf)
+        .await?;
+    
+    println!("🎧 Обнаружено {} сегментов с речью", preprocessing_result.speech_segments.len());
+    
+    if preprocessing_result.speech_segments.is_empty() {
+        return Err("В аудио не обнаружено речи".to_string());
     }
-
-    let base_prompt = prompt
-        .as_ref()
-        .map(|p| p.trim())
-        .filter(|p| !p.is_empty())
-        .map(|p| p.to_string());
-    let base_prompt_lower = base_prompt
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase();
-    let missing_glossary_originals: Vec<String> = glossary_originals
-        .into_iter()
-        .filter(|source| !base_prompt_lower.contains(&source.to_lowercase()))
-        .collect();
-    let glossary_prompt = if missing_glossary_originals.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "Important names/terms to keep exactly:\n{}",
-            missing_glossary_originals.join(", ")
-        ))
-    };
-    let whisper_prompt: Option<String> = match (base_prompt, glossary_prompt) {
-        (Some(base), Some(glossary_block)) => Some(format!("{}\n\n{}", base, glossary_block)),
-        (Some(base), None) => Some(base),
-        (None, Some(glossary_block)) => Some(glossary_block),
-        (None, None) => None,
-    };
-
-    println!(
-        "[transcribe_audio] whisper prompt assembled from user prompt + {} glossary original terms",
-        missing_glossary_originals.len()
-    );
-
-    let client = reqwest::Client::new();
-
-    let raw_segments: Vec<SubtitleSegment> = if file_size_bytes <= WHISPER_MAX_FILE_BYTES {
-        // Одиночный запрос: файл умещается в лимит Whisper.
-        let _ = progress_tx.send(ProgressEvent::InProgress {
-            step: 2,
-            progress: 0.45,
-            description: "Отправка в OpenAI".to_string()
-        }).await;
-
-        let file_data = std::fs::read(&file_path)
-            .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
-
-        let segments = whisper_call(
-            &client,
+    
+    // Если коэффициент тишины высокий (>70%), используем сегментированную транскрибацию
+    let segments = if preprocessing_result.silence_ratio > 0.7 {
+        transcribe_segmented_audio(
+            file_path_buf,
+            &preprocessing_result.speech_segments,
+            &language,
             &api_key,
-            file_data,
-            &language_code,
-            whisper_prompt.as_deref(),
-            "single",
-        ).await?;
-
-        let _ = progress_tx.send(ProgressEvent::InProgress {
-            step: 3,
-            progress: 0.85,
-            description: "Обработка результата".to_string()
-        }).await;
-
-        segments
+            &progress_tx,
+        ).await?
     } else {
-        let duration = crate::commands::audio::media_duration_seconds(Path::new(&file_path))
-            .await
-            .map_err(|e| format!("Не удалось получить длительность аудио: {}", e))?;
-        if duration <= 0.0 {
-            return Err("Файл аудио имеет нулевую длительность".to_string());
-        }
-
-        let chunk_count = ((file_size_bytes + WHISPER_CHUNK_TARGET_BYTES - 1)
-            / WHISPER_CHUNK_TARGET_BYTES) as usize;
-        let chunk_count = chunk_count.max(2);
-        let chunk_seconds = (duration / chunk_count as f64).max(1.0);
-
-        println!(
-            "Аудио ~{:.1} МБ, {:.1} c — режем на {} кусков по ~{:.1} c",
-            file_size_bytes as f64 / (1024.0 * 1024.0),
-            duration,
-            chunk_count,
-            chunk_seconds
-        );
-
-        let temp_dir = std::env::temp_dir()
-            .join(format!("whisper_chunks_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir)
-            .map_err(|e| format!("Не удалось создать временную папку: {}", e))?;
-
-        let mut all_segments: Vec<SubtitleSegment> = Vec::new();
-
-        for i in 0..chunk_count {
-            let chunk_start = (i as f64) * chunk_seconds;
-            let chunk_path: PathBuf = temp_dir.join(format!("chunk_{:03}.mp3", i));
-
-            let progress = 0.15 + (i as f64 / chunk_count as f64) * 0.70;
-            let _ = progress_tx.send(ProgressEvent::InProgress {
-                step: 2,
-                progress,
-                description: format!(
-                    "Транскрибация: кусок {} из {}",
-                    i + 1,
-                    chunk_count
-                ),
-            }).await;
-
-            extract_audio_chunk(
-                Path::new(&file_path),
-                &chunk_path,
-                chunk_start,
-                chunk_seconds,
-            ).await?;
-
-            let chunk_data = std::fs::read(&chunk_path)
-                .map_err(|e| format!("Ошибка чтения куска {}: {}", i + 1, e))?;
-            println!(
-                "  🎧 кусок {}/{}: {:.1} МБ",
-                i + 1,
-                chunk_count,
-                chunk_data.len() as f64 / (1024.0 * 1024.0)
-            );
-
-            let chunk_segments = whisper_call(
-                &client,
-                &api_key,
-                chunk_data,
-                &language_code,
-                whisper_prompt.as_deref(),
-                &format!("chunk {}/{}", i + 1, chunk_count),
-            ).await?;
-
-            for mut seg in chunk_segments {
-                seg.start += chunk_start;
-                seg.end += chunk_start;
-                seg.duration = (seg.end - seg.start).max(0.0);
-                all_segments.push(seg);
-            }
-        }
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-
-        let _ = progress_tx.send(ProgressEvent::InProgress {
-            step: 3,
-            progress: 0.9,
-            description: "Обработка результата".to_string()
-        }).await;
-
-        for (i, seg) in all_segments.iter_mut().enumerate() {
-            seg.id = (i + 1) as u32;
-        }
-        all_segments
+        // Используем стандартную транскрибацию для файлов с низким уровнем тишины
+        transcribe_full_audio(file_path_buf, &language, &api_key, &progress_tx).await?
     };
 
-    let segments = sanitize_whisper_segments(raw_segments);
-
-    let language_for_postprocessing = language.clone();
+    // Постобработка транскрибации
+    let _ = progress_tx.send(ProgressEvent::InProgress { 
+        step: 4, 
+        progress: 0.8, 
+        description: "Постобработка результата".to_string() 
+    }).await;
+    
     let postprocessed_result = postprocessing::postprocess_transcription(
         segments,
         postprocessing::PostProcessingOptions {
             fix_punctuation: true,
             fix_names: true,
-            target_language: language_for_postprocessing.unwrap_or_else(|| language_code.clone()),
+            target_language: language.unwrap_or("en".to_string()),
             style_prompt: Some("Профессиональные субтитры для видео".to_string()),
-            name_hints: whisper_prompt.clone(),
-            glossary: glossary_entries,
         },
         &api_key,
     ).await?;
 
     let final_segments = postprocessed_result.corrected_segments;
 
+    // Автоматическая генерация глоссария
     let _auto_glossary = if final_segments.len() > 5 {
         match auto_generate_glossary_from_segments(&final_segments, "ru", &api_key).await {
             Ok(glossary) => {
-                println!("Автоматический глоссарий создан: {} терминов", glossary.len());
+                println!("✅ Автоматический глоссарий создан: {} терминов", glossary.len());
                 Some(glossary)
             }
             Err(e) => {
-                println!("Ошибка генерации глоссария: {}", e);
+                println!("⚠️ Ошибка генерации глоссария: {}", e);
                 None
             }
         }
@@ -409,14 +275,210 @@ pub async fn transcribe_audio(
         None
     };
 
-    let _ = progress_tx.send(ProgressEvent::Completed {
-        result_count: final_segments.len()
+    // Сохраняем в кэш
+    cache.set_transcription(&file_hash, &final_segments).await?;
+    
+    // Отправляем завершение
+    let _ = progress_tx.send(ProgressEvent::Completed { 
+        result_count: final_segments.len() 
     }).await;
     
-    println!("Транскрибация завершена: {} сегментов", final_segments.len());
+    println!("✅ Транскрибация завершена: {} сегментов", final_segments.len());
     Ok(final_segments)
 }
 
+async fn transcribe_segmented_audio(
+    file_path: &Path,
+    speech_segments: &[SpeechSegment],
+    language: &Option<String>,
+    api_key: &str,
+    progress_tx: &mpsc::Sender<ProgressEvent>,
+) -> Result<Vec<SubtitleSegment>, String> {
+    let mut all_segments = Vec::new();
+    let total_segments = speech_segments.len();
+    
+    for (i, segment) in speech_segments.iter().enumerate() {
+        // Обновляем прогресс
+        let _ = progress_tx.send(ProgressEvent::InProgress { 
+            step: 2 + (i as u32),
+            progress: 0.2 + (0.5 * i as f64 / total_segments as f64),
+            description: format!("Транскрибация сегмента {}/{}", i + 1, total_segments)
+        }).await;
+        
+        // Создаем временный файл для сегмента
+        let temp_dir_result = tempfile::tempdir();
+        let temp_dir = match temp_dir_result {
+            Ok(dir) => dir,
+            Err(e) => return Err(format!("Ошибка создания временной директории: {}", e)),
+        };
+        
+        let segment_path = temp_dir.path().join(format!("segment_{}.wav", i));
+        
+        // Извлекаем сегмент с помощью FFmpeg
+        extract_audio_segment(file_path, &segment_path, segment.start_time, segment.end_time)
+            .await?;
+        
+        // Проверяем размер файла (должен быть > 0)
+        let metadata_result = std::fs::metadata(&segment_path);
+        let metadata = match metadata_result {
+            Ok(meta) => meta,
+            Err(e) => return Err(format!("Ошибка получения метаданных сегмента: {}", e)),
+        };
+        
+        if metadata.len() == 0 {
+            continue;
+        }
+        
+        // Транскрибируем сегмент
+        let file_data_result = std::fs::read(&segment_path);
+        let file_data = match file_data_result {
+            Ok(data) => data,
+            Err(e) => return Err(format!("Ошибка чтения сегмента: {}", e)),
+        };
+        
+        let client = reqwest::Client::new();
+        use reqwest::multipart;
+        
+        let file_part_result = multipart::Part::bytes(file_data)
+            .file_name("audio.mp3")
+            .mime_str("audio/mpeg");
+            
+        let file_part = match file_part_result {
+            Ok(part) => part,
+            Err(e) => return Err(format!("Ошибка создания multipart части: {}", e)),
+        };
+        
+        let form = multipart::Form::new()
+            .text("model", "whisper-1")
+            .text("language", language.clone().unwrap_or("en".to_string()))
+            .text("response_format", "verbose_json")
+            .part("file", file_part);
+
+        let res = client
+            .post("https://api.openai.com/v1/audio/transcriptions")
+            .bearer_auth(api_key)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Ошибка запроса к OpenAI: {}", e))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let error_text = res.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+            return Err(format!("OpenAI ошибка ({}): {}", status, error_text));
+        }
+
+        let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        let mut segments = parse_whisper_response(response)?;
+        
+        // Корректируем временные метки относительно оригинального файла
+        for seg in &mut segments {
+            seg.start += segment.start_time;
+            seg.end += segment.start_time;
+        }
+        
+        all_segments.extend(segments);
+    }
+    
+    Ok(all_segments)
+}
+
+async fn transcribe_full_audio(
+    file_path: &Path,
+    language: &Option<String>,
+    api_key: &str,
+    progress_tx: &mpsc::Sender<ProgressEvent>,
+) -> Result<Vec<SubtitleSegment>, String> {
+    // Читаем файл
+    let _ = progress_tx.send(ProgressEvent::InProgress { 
+        step: 2, 
+        progress: 0.4, 
+        description: "Чтение аудиофайла".to_string() 
+    }).await;
+    
+    let file_data = std::fs::read(file_path)
+        .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
+
+    // Подготавливаем запрос
+    let _ = progress_tx.send(ProgressEvent::InProgress { 
+        step: 3, 
+        progress: 0.6, 
+        description: "Отправка в OpenAI".to_string() 
+    }).await;
+    
+    let client = reqwest::Client::new();
+    use reqwest::multipart;
+    
+    let file_part = multipart::Part::bytes(file_data)
+        .file_name("audio.mp3")
+        .mime_str("audio/mpeg")
+        .map_err(|e| e.to_string())?;
+    
+    let form = multipart::Form::new()
+        .text("model", "whisper-1")
+        .text("language", language.clone().unwrap_or("en".to_string()))
+        .text("response_format", "verbose_json")
+        .part("file", file_part);
+
+    // Отправляем запрос
+    let _ = progress_tx.send(ProgressEvent::InProgress { 
+        step: 4, 
+        progress: 0.7, 
+        description: "Ожидание ответа от OpenAI".to_string() 
+    }).await;
+    
+    let res = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к OpenAI: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let error_text = res.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+        return Err(format!("OpenAI ошибка ({}): {}", status, error_text));
+    }
+
+    // Парсим ответ
+    let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    parse_whisper_response(response)
+}
+
+async fn extract_audio_segment(
+    input_path: &Path,
+    output_path: &Path,
+    start_time: f64,
+    end_time: f64,
+) -> Result<(), String> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+    
+    let duration = end_time - start_time;
+    
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-i")
+        .arg(input_path)
+        .arg("-ss")
+        .arg(start_time.to_string())
+        .arg("-t")
+        .arg(duration.to_string())
+        .arg("-acodec")
+        .arg("copy")
+        .arg(output_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    
+    let output = cmd.output().await
+        .map_err(|e| format!("Ошибка FFmpeg при извлечении сегмента: {}", e))?;
+    
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err("FFmpeg завершился с ошибкой при извлечении сегмента".to_string())
+    }
+}
 
 async fn auto_generate_glossary_from_segments(
     segments: &[SubtitleSegment],
@@ -818,158 +880,6 @@ fn json_seconds(v: &serde_json::Value) -> f64 {
         .or_else(|| v.as_u64().map(|n| n as f64))
         .or_else(|| v.as_i64().map(|n| n as f64))
         .unwrap_or(0.0)
-}
-
-/// Один запрос к Whisper API (verbose_json) для уже подготовленного буфера mp3
-/// Возвращает сырые сегменты без дедупликации и со start/end относительно
-/// начала переданного буфера.
-async fn whisper_call(
-    client: &reqwest::Client,
-    api_key: &str,
-    file_data: Vec<u8>,
-    language_code: &str,
-    prompt: Option<&str>,
-    log_label: &str,
-) -> Result<Vec<SubtitleSegment>, String> {
-    use reqwest::multipart;
-
-    let file_size_bytes = file_data.len();
-
-    let file_part = multipart::Part::bytes(file_data)
-        .file_name("audio.mp3")
-        .mime_str("audio/mpeg")
-        .map_err(|e| e.to_string())?;
-
-    let mut form = multipart::Form::new()
-        .text("model", "whisper-1")
-        .text("language", language_code.to_string())
-        .text("temperature", "0")
-        .text("response_format", "verbose_json")
-        .text("timestamp_granularities[]", "segment")
-        .text("timestamp_granularities[]", "word")
-        .part("file", file_part);
-
-    if let Some(p) = prompt {
-        if !p.trim().is_empty() {
-            form = form.text("prompt", p.to_string());
-        }
-    }
-
-    log_debug_block(
-        &format!("whisper [{log_label}]: запрос"),
-        &format!(
-            "model: whisper-1\n\
-language: {language_code}\n\
-temperature: 0\n\
-response_format: verbose_json\n\
-timestamp_granularities: segment, word\n\
-file: ({file_size_bytes} байт)\n\
-\n\
-prompt (опционально):\n{}",
-            prompt.unwrap_or("(не задан)")
-        ),
-    );
-
-    let res = client
-        .post("https://api.openai.com/v1/audio/transcriptions")
-        .bearer_auth(api_key)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("Ошибка запроса к OpenAI: {}", e))?;
-
-    if !res.status().is_success() {
-        let status = res.status();
-        let error_text = res.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
-        return Err(format!("OpenAI ошибка ({}): {}", status, error_text));
-    }
-
-    let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let response_pretty = serde_json::to_string_pretty(&response).unwrap_or_else(|e| e.to_string());
-    log_debug_block(
-        &format!("whisper [{log_label}]: ответ API (verbose_json)"),
-        &response_pretty,
-    );
-
-    parse_whisper_response(response)
-}
-
-/// Извлекает фрагмент аудио в новый mp3-файл через ffmpeg (-c copy
-/// без перекодирования — быстро) start_seconds ставится перед `-i`
-/// (input seek), что для CBR mp3 даёт точный и быстрый разрез.
-async fn extract_audio_chunk(
-    input_path: &Path,
-    output_path: &Path,
-    start_seconds: f64,
-    duration_seconds: f64,
-) -> Result<(), String> {
-    use tokio::process::Command;
-
-    let status = Command::new("ffmpeg")
-        .arg("-y")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-ss")
-        .arg(format!("{:.3}", start_seconds))
-        .arg("-t")
-        .arg(format!("{:.3}", duration_seconds))
-        .arg("-i")
-        .arg(input_path)
-        .arg("-c")
-        .arg("copy")
-        .arg(output_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map_err(|e| format!("Ошибка запуска ffmpeg: {}", e))?;
-
-    if !status.success() {
-        return Err(format!(
-            "ffmpeg не смог извлечь кусок аудио (start={:.3}, duration={:.3})",
-            start_seconds, duration_seconds
-        ));
-    }
-
-    if !output_path.exists() {
-        return Err("ffmpeg не создал файл куска аудио".to_string());
-    }
-
-    Ok(())
-}
-
-/// Whisper иногда повторяет один и тот же текст в нескольких подряд идущих сегментах
-/// (особенно при тишине / хвостах) — режем дубликаты по нормализованному ключу.
-fn whisper_segment_dedup_key(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
-}
-
-fn sanitize_whisper_segments(segments: Vec<SubtitleSegment>) -> Vec<SubtitleSegment> {
-    if segments.len() < 2 {
-        return segments;
-    }
-    let mut out: Vec<SubtitleSegment> = Vec::with_capacity(segments.len());
-    let mut prev_key: Option<String> = None;
-    for seg in segments {
-        let key = whisper_segment_dedup_key(&seg.text);
-        if key.is_empty() {
-            out.push(seg);
-            prev_key = Some(key);
-            continue;
-        }
-        if prev_key.as_deref() == Some(key.as_str()) {
-            continue;
-        }
-        prev_key = Some(key);
-        out.push(seg);
-    }
-    for (i, seg) in out.iter_mut().enumerate() {
-        seg.id = (i + 1) as u32;
-    }
-    out
 }
 
 fn parse_whisper_response(response: serde_json::Value) -> Result<Vec<SubtitleSegment>, String> {
