@@ -490,7 +490,6 @@ async fn whisper_call(
         .text("temperature", "0")
         .text("response_format", "verbose_json")
         .text("timestamp_granularities[]", "segment")
-        .text("timestamp_granularities[]", "word")
         .part("file", file_part);
 
     if let Some(p) = prompt {
@@ -506,7 +505,7 @@ async fn whisper_call(
 language: {language_code}\n\
 temperature: 0\n\
 response_format: verbose_json\n\
-timestamp_granularities: segment, word\n\
+timestamp_granularities: segment\n\
 file: ({file_size_bytes} байт)\n\
 \n\
 prompt (опционально):\n{}",
@@ -1082,46 +1081,28 @@ fn make_subtitle_segment(text: String, start: f64, end: f64) -> SubtitleSegment 
     }
 }
 
+/// Один элемент `segments[]` Whisper (timestamp_granularities: segment) → один субтитр.
 fn parse_whisper_response(response: serde_json::Value) -> Result<Vec<SubtitleSegment>, String> {
     let segments = response["segments"]
         .as_array()
         .ok_or("Нет сегментов в ответе Whisper".to_string())?;
 
-    let result: Vec<SubtitleSegment> = segments
+    let mut result: Vec<SubtitleSegment> = segments
         .iter()
-        .enumerate()
-        .filter_map(|(i, seg)| {
-            let mut start = json_seconds(&seg["start"]);
-            let mut end = json_seconds(&seg["end"]);
+        .filter_map(|seg| {
+            let start = json_seconds(&seg["start"]);
+            let end = json_seconds(&seg["end"]);
             let text = seg["text"].as_str().unwrap_or("").trim().to_string();
             if text.is_empty() || end <= start {
                 return None;
             }
-
-            if let Some(words) = seg["words"].as_array() {
-                if let (Some(first), Some(last)) = (words.first(), words.last()) {
-                    let ws = json_seconds(&first["start"]);
-                    let we = json_seconds(&last["end"]);
-                    if we > ws {
-                        start = ws;
-                        end = we;
-                    }
-                }
-            }
-
-            let duration = (end - start).max(0.0);
-            Some(SubtitleSegment {
-                id: (i + 1) as u32,
-                start,
-                end,
-                duration,
-                text,
-                translation: None,
-                speaker_gender: None,
-                flags: None,
-            })
+            Some(make_subtitle_segment(text, start, end))
         })
         .collect();
+
+    for (i, seg) in result.iter_mut().enumerate() {
+        seg.id = (i + 1) as u32;
+    }
 
     Ok(result)
 }
