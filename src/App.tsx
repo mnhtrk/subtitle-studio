@@ -44,7 +44,6 @@ import {
 } from './utils/subtitleSegmentsLocal';
 import {
 	applyAutoGlossaryToProject,
-	buildTranscriptionPrompt,
 	mergePromptHintsIntoGlossary,
 	parseTranslationHintsFromPrompt,
 	resolveIsoLanguage
@@ -1594,19 +1593,16 @@ export default function App() {
 				await projectService.extractAudioFromVideo(videoPath, audioOut);
 				setAiBusy({ operation: 'transcribe', stage: 'transcribe' });
 				const projectForPrompt = await projectService.open(cp.path);
-				const whisperPrompt = buildTranscriptionPrompt(
-					opts.userPrompt,
-					projectForPrompt.glossary ?? []
-				);
 				const isoLang =
 					RETRANSCRIBE_LANGUAGE_ISO[opts.sourceLanguage] ??
 					(opts.sourceLanguage.trim().length === 2
 						? opts.sourceLanguage.trim().toLowerCase()
 						: undefined);
+				const userPrompt = opts.userPrompt.trim();
 				const rawSegments = await projectService.transcribeAudio(
 					audioOut,
 					isoLang,
-					whisperPrompt,
+					userPrompt.length > 0 ? userPrompt : undefined,
 					projectForPrompt.glossary ?? []
 				);
 				if (rawSegments.length === 0) {
@@ -3100,31 +3096,15 @@ ${changesText}
 				await projectService.extractAudioRange(videoAbsPath, lo, hi, audioOut);
 
 				setRetranscribeBusy({ stage: 'transcribe' });
-				const glossaryOriginals = (cp.glossary ?? [])
-					.map((e) => e.source.trim())
-					.filter(Boolean)
-					.filter(
-						(value, index, arr) =>
-							arr.findIndex((x) => x.toLowerCase() === value.toLowerCase()) === index
-					);
-				const userPromptTrimmed = opts.userPrompt.trim();
-				let whisperPrompt: string | undefined;
-				if (userPromptTrimmed.length > 0 && glossaryOriginals.length > 0) {
-					whisperPrompt = `${userPromptTrimmed}\n\nImportant names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
-				} else if (userPromptTrimmed.length > 0) {
-					whisperPrompt = userPromptTrimmed;
-				} else if (glossaryOriginals.length > 0) {
-					whisperPrompt = `Important names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
-				}
-
 				const isoLang =
 					RETRANSCRIBE_LANGUAGE_ISO[opts.sourceLanguage] ??
 					(opts.sourceLanguage.trim().length === 2 ? opts.sourceLanguage.trim().toLowerCase() : undefined);
+				const userPromptTrimmed = opts.userPrompt.trim();
 
 				const rawSegments = await projectService.transcribeAudio(
 					audioOut,
 					isoLang,
-					whisperPrompt,
+					userPromptTrimmed.length > 0 ? userPromptTrimmed : undefined,
 					cp.glossary ?? []
 				);
 

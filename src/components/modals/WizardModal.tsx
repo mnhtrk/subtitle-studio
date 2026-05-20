@@ -10,7 +10,6 @@ import {
 } from '../../services/projectService';
 import {
   applyAutoGlossaryToProject,
-  buildTranscriptionPrompt,
   mergePromptHintsIntoGlossary,
   parseTranslationHintsFromPrompt,
   resolveIsoLanguage
@@ -229,14 +228,14 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
 
         const whisperLanguage = whisperLanguageCodes[sourceLanguage] ?? 'en';
         const projectForPrompt = await projectService.open(projectPath!);
-        const whisperPrompt = buildTranscriptionPrompt(contextPrompt, projectForPrompt.glossary);
+        const userPrompt = contextPrompt.trim();
         console.log('[Wizard] Whisper language:', whisperLanguage);
         console.log('[Wizard] Calling OpenAI Whisper');
         segments = await projectService.transcribeAudio(
           audioPath,
           whisperLanguage,
-          whisperPrompt,
-          projectForPrompt.glossary
+          userPrompt.length > 0 ? userPrompt : undefined,
+          projectForPrompt.glossary ?? []
         );
       } else {
         if (!subtitlePath) {

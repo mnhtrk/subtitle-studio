@@ -210,6 +210,124 @@ fn finalize_segments(mut intervals: Vec<(f64, f64)>, total_duration: f64) -> Vec
         .collect()
 }
 
+/// Порог тишины для ffmpeg silencedetect (не WebRTC VAD).
+const SILENCE_NOISE_DB: &str = "-35dB";
+/// Минимальная длительность тишины, чтобы вырезать (сек).
+const SILENCE_MIN_DURATION_SEC: f64 = 0.45;
+/// Минимальная длина участка с речью для отправки в Whisper.
+const MIN_NON_SILENT_SEC: f64 = 0.35;
+
+/// Участки аудио без длинной тишины — для транскрипции (таймкоды в исходной шкале).
+pub async fn detect_non_silent_intervals(
+    audio_path: &Path,
+    total_duration: f64,
+) -> Result<Vec<(f64, f64)>, String> {
+    if total_duration <= 0.05 {
+        return Ok(Vec::new());
+    }
+
+    let silence = run_ffmpeg_silencedetect(audio_path).await?;
+    let audible = invert_silence_to_audible(&silence, total_duration);
+
+    println!(
+        "[silence] дорожка {:.1} с: {} интервал(ов) тишины, {} участк(ов) с речью",
+        total_duration,
+        silence.len(),
+        audible.len()
+    );
+    for (i, (s, e)) in audible.iter().enumerate() {
+        println!(
+            "[silence]   речь {}: {:.2}–{:.2} с ({:.2} с)",
+            i + 1,
+            s,
+            e,
+            e - s
+        );
+    }
+
+    Ok(audible)
+}
+
+async fn run_ffmpeg_silencedetect(audio_path: &Path) -> Result<Vec<(f64, f64)>, String> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    let filter = format!(
+        "silencedetect=noise={}:d={}",
+        SILENCE_NOISE_DB, SILENCE_MIN_DURATION_SEC
+    );
+
+    let output = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-i",
+            audio_path.to_str().ok_or("Некорректный путь к аудио")?,
+            "-af",
+            &filter,
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("ffmpeg silencedetect: {}", e))?;
+
+    if !output.status.success() && output.stderr.is_empty() {
+        return Err("ffmpeg silencedetect завершился с ошибкой".to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(parse_silence_intervals(&stderr))
+}
+
+fn parse_silence_intervals(stderr: &str) -> Vec<(f64, f64)> {
+    let mut intervals = Vec::new();
+    let mut pending_start: Option<f64> = None;
+
+    for line in stderr.lines() {
+        if let Some(rest) = line.trim().strip_prefix("silence_start:") {
+            if let Ok(t) = rest.trim().parse::<f64>() {
+                pending_start = Some(t);
+            }
+        } else if let Some(rest) = line.trim().strip_prefix("silence_end:") {
+            let parts: Vec<&str> = rest.split('|').collect();
+            if let Ok(end) = parts[0].trim().parse::<f64>() {
+                if let Some(start) = pending_start.take() {
+                    if end > start {
+                        intervals.push((start, end));
+                    }
+                }
+            }
+        }
+    }
+
+    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    intervals
+}
+
+fn invert_silence_to_audible(silence: &[(f64, f64)], total_duration: f64) -> Vec<(f64, f64)> {
+    let mut audible = Vec::new();
+    let mut cursor = 0.0_f64;
+
+    for &(s_start, s_end) in silence {
+        if s_start > cursor + MIN_NON_SILENT_SEC {
+            audible.push((cursor, s_start.min(total_duration)));
+        }
+        cursor = s_end.max(cursor);
+    }
+
+    if cursor < total_duration - MIN_NON_SILENT_SEC {
+        audible.push((cursor, total_duration));
+    }
+
+    audible
+        .into_iter()
+        .filter(|(s, e)| *e - *s >= MIN_NON_SILENT_SEC)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +338,16 @@ mod tests {
         assert_eq!(segments.len(), 1);
         assert!(segments[0].start_time <= 0.0);
         assert!(segments[0].end_time >= 2.0);
+    }
+
+    #[test]
+    fn invert_silence_finds_gaps() {
+        let silence = vec![(2.0, 5.0), (10.0, 12.0)];
+        let audible = invert_silence_to_audible(&silence, 20.0);
+        assert_eq!(audible.len(), 3);
+        assert!((audible[0].0 - 0.0).abs() < 0.01);
+        assert!((audible[0].1 - 2.0).abs() < 0.01);
+        assert!((audible[1].0 - 5.0).abs() < 0.01);
+        assert!((audible[1].1 - 10.0).abs() < 0.01);
     }
 }

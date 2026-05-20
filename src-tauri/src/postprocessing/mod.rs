@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use crate::project::GlossaryEntry;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -83,45 +83,11 @@ pub async fn postprocess_transcription(
         println!("[postprocess] пропуск: fix_punctuation=false и fix_names=false");
     }
 
-    let corrected = if options.fix_punctuation {
-        ensure_terminal_punctuation(corrected)
-    } else {
-        corrected
-    };
-
     Ok(PostProcessingResult {
         corrected_segments: corrected,
         corrections_applied,
         processing_time_ms: start_time.elapsed().as_millis() as u64,
     })
-}
-
-fn ensure_terminal_punctuation(
-    segments: Vec<crate::project::SubtitleSegment>,
-) -> Vec<crate::project::SubtitleSegment> {
-    segments
-        .into_iter()
-        .map(|mut seg| {
-            let text = seg.text.trim_end();
-            if text.is_empty() || has_terminal_punctuation(text) || ends_with_open_fragment(text) {
-                return seg;
-            }
-
-            seg.text = format!("{}.", text);
-            seg
-        })
-        .collect()
-}
-
-fn has_terminal_punctuation(text: &str) -> bool {
-    text.chars()
-        .rev()
-        .find(|c| !c.is_whitespace() && !matches!(c, '"' | '\'' | '»' | '”' | ')' | ']'))
-        .is_some_and(|c| matches!(c, '.' | '!' | '?' | '…' | ':' | ';'))
-}
-
-fn ends_with_open_fragment(text: &str) -> bool {
-    text.ends_with('-') || text.ends_with('—') || text.ends_with("...")
 }
 
 fn build_authoritative_terms_block(name_hints: Option<&str>, glossary: &[GlossaryEntry]) -> String {
@@ -203,7 +169,9 @@ async fn fix_with_gpt(
 
     let mut tasks = Vec::<&'static str>::new();
     if fix_punctuation {
-        tasks.push("- добавь только необходимую пунктуацию и капитализацию: точки, запятые, тире, ?, !; если сегмент выглядит как завершённая фраза, обязательно поставь конечный знак препинания; не переписывай стиль и смысл");
+        tasks.push("- полностью расставь пунктуацию и капитализацию по смыслу фразы: запятые, точки, «!», «?», тире; Whisper часто пишет без знаков");
+        tasks.push("- пример: «Всем привет друзья с вами Брайн» → «Всем, привет, друзья, с вами Брайн.» (слова не меняй, только знаки и регистр)");
+        tasks.push("- не перефразируй и не добавляй слов; если сегмент — обрывок фразы, пунктуируй только то, что есть");
     }
     if fix_names {
         tasks.push("- исправь орфографические расхождения в именах персонажей, названиях локаций, брендах, аббревиатурах и терминах из авторитетного списка ниже");
@@ -214,22 +182,20 @@ async fn fix_with_gpt(
     let tasks_block = tasks.join("\n");
 
     let system_prompt = format!(
-        "Ты профессиональный редактор субтитров. Тебе дают сегменты с тайм-кодами от Whisper.\n\
-         Язык транскрипции: {target_language}. Стиль: {style}.\n\
-         Твоя задача похожа на spell-check из документации OpenAI: исправить только расхождения в написании\n\
-         имён/названий из предоставленного контекста, а также минимально восстановить пунктуацию.\n\
-         Используй только контекст, который есть во входных сегментах и в авторитетном списке ниже.{names_block}\n\n\
-         Задачи на каждый сегмент (НЕ объединяй сегменты, НЕ меняй id, НЕ меняй порядок, НЕ меняй смысл):\n\
+        "You correct a transcript from Whisper (OpenAI post-processing pattern).\n\
+         Language: {target_language}. Context style: {style}.\n\
+         Fix spelling of names/products/terms from the authoritative list below, and add full\n\
+         punctuation (commas, periods, ?, !, capitalization) as in edited subtitles. Use only the\n\
+         provided segment text and the list — do not invent content.{names_block}\n\n\
+         Per segment (same count and order as input):\n\
          {tasks_block}\n\n\
-         Жёсткие ограничения:\n\
-         - Не переводить текст и не локализовать его: это коррекция транскрипции, а не перевод.\n\
-         - Не перефразировать реплики.\n\
-         - Не добавлять слова, которых нет в аудио/контексте.\n\
-         - Если обычное слово одновременно похоже на имя из списка и стоит как обращение/имя персонажа в контексте, исправляй в пользу имени из списка.\n\
-         - Если сомневаешься, оставь исходный текст без изменений.\n\n\
-         Возвращай СТРОГО валидный JSON-объект вида:\n\
-         {{\"segments\": [{{\"id\": <число>, \"text\": \"исправленный текст сегмента\"}}]}}\n\
-         По одному объекту на каждый входной сегмент, в том же порядке. Без markdown и комментариев.",
+         Hard rules:\n\
+         - Do NOT merge or split segments; do NOT change id, start, or end (you only return id + text).\n\
+         - Do NOT paraphrase, translate, or add words not implied by the transcript.\n\
+         - If unsure, leave the segment text unchanged.\n\n\
+         Return STRICT valid JSON only:\n\
+         {{\"segments\": [{{\"id\": <number>, \"text\": \"corrected text\"}}]}}\n\
+         One object per input segment, same order. No markdown.",
         target_language = target_language,
         style = style,
         names_block = names_block,

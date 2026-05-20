@@ -184,23 +184,13 @@ export function mergePromptHintsIntoGlossary(
 	return next;
 }
 
+/** @deprecated Промпт для Whisper собирается на бэкенде (инструкции + user + глоссарий). */
 export function buildTranscriptionPrompt(
 	userPrompt: string,
-	glossary: GlossaryEntry[]
+	_glossary: GlossaryEntry[]
 ): string | undefined {
 	const manual = userPrompt.trim();
-	const glossaryOriginals = glossary
-		.map((e) => e.source.trim())
-		.filter(Boolean)
-		.filter((value, index, arr) => arr.findIndex((x) => x.toLowerCase() === value.toLowerCase()) === index);
-
-	if (manual.length > 0) {
-		if (glossaryOriginals.length === 0) return manual;
-		return `${manual}\n\nImportant names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
-	}
-
-	if (glossaryOriginals.length === 0) return undefined;
-	return `Important names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
+	return manual.length > 0 ? manual : undefined;
 }
 
 export async function applyAutoGlossaryToProject(
