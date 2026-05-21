@@ -490,6 +490,7 @@ async fn whisper_call(
         .text("temperature", "0")
         .text("response_format", "verbose_json")
         .text("timestamp_granularities[]", "segment")
+        .text("timestamp_granularities[]", "word")
         .part("file", file_part);
 
     if let Some(p) = prompt {
@@ -505,7 +506,7 @@ async fn whisper_call(
 language: {language_code}\n\
 temperature: 0\n\
 response_format: verbose_json\n\
-timestamp_granularities: segment\n\
+timestamp_granularities: segment, word\n\
 file: ({file_size_bytes} байт)\n\
 \n\
 prompt (опционально):\n{}",
@@ -1065,6 +1066,102 @@ fn json_seconds(v: &serde_json::Value) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[derive(Clone)]
+struct WhisperWord {
+    text: String,
+    start: f64,
+    end: f64,
+}
+
+fn parse_word_entry(w: &serde_json::Value) -> Option<WhisperWord> {
+    let text = w["word"].as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let start = json_seconds(&w["start"]);
+    let end = json_seconds(&w["end"]);
+    if end <= start {
+        return None;
+    }
+    Some(WhisperWord {
+        text: text.to_string(),
+        start,
+        end,
+    })
+}
+
+fn parse_whisper_words(response: &serde_json::Value) -> Vec<WhisperWord> {
+    response["words"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(parse_word_entry).collect())
+        .unwrap_or_default()
+}
+
+fn parse_segment_words(seg: &serde_json::Value) -> Vec<WhisperWord> {
+    seg["words"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(parse_word_entry).collect())
+        .unwrap_or_default()
+}
+
+/// Сокращения, после которых точка НЕ должна считаться концом предложения.
+const SENTENCE_END_EXCEPTIONS: &[&str] = &[
+    "mr", "mrs", "ms", "dr", "sr", "jr", "st", "prof", "capt", "lt",
+    "vs", "etc", "vol", "no", "fig",
+];
+
+fn word_ends_sentence(word: &str) -> bool {
+    let trimmed = word.trim_end_matches(|c: char| {
+        matches!(c, '"' | '\'' | '»' | '”' | '’' | ')' | ']' | '}')
+    });
+    let last = trimmed.chars().last();
+    if !matches!(last, Some('.') | Some('!') | Some('?') | Some('…')) {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    let stem = lower.trim_end_matches(|c: char| matches!(c, '.' | '!' | '?' | '…'));
+    if SENTENCE_END_EXCEPTIONS.contains(&stem) {
+        return false;
+    }
+    true
+}
+
+fn push_sentence<'a>(
+    buf: &mut Vec<&'a WhisperWord>,
+    out: &mut Vec<(String, f64, f64)>,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    let start = buf.first().unwrap().start;
+    let end = buf.last().unwrap().end;
+    let text = buf
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.chars().any(|c| c.is_alphanumeric()) {
+        out.push((text, start, end));
+    }
+    buf.clear();
+}
+
+/// Делит поток слов на предложения по терминальным знакам (`.`, `!`, `?`, `…`).
+/// Возвращает кортежи `(text, start, end)`; если знаков нет — один кортеж со всеми словами.
+fn split_words_into_sentences(words: &[WhisperWord]) -> Vec<(String, f64, f64)> {
+    let mut out: Vec<(String, f64, f64)> = Vec::new();
+    let mut buf: Vec<&WhisperWord> = Vec::new();
+
+    for w in words {
+        buf.push(w);
+        if word_ends_sentence(&w.text) {
+            push_sentence(&mut buf, &mut out);
+        }
+    }
+    push_sentence(&mut buf, &mut out);
+    out
+}
+
 const MIN_SUBTITLE_DURATION: f64 = 0.05;
 
 fn make_subtitle_segment(text: String, start: f64, end: f64) -> SubtitleSegment {
@@ -1081,24 +1178,65 @@ fn make_subtitle_segment(text: String, start: f64, end: f64) -> SubtitleSegment 
     }
 }
 
-/// Один элемент `segments[]` Whisper (timestamp_granularities: segment) → один субтитр.
+/// Один сегмент Whisper → одно или несколько предложений.
+/// При наличии `words[]` разрезаем по терминальной пунктуации и берём
+/// `start`/`end` каждого предложения из таймстампов первого/последнего слова.
 fn parse_whisper_response(response: serde_json::Value) -> Result<Vec<SubtitleSegment>, String> {
     let segments = response["segments"]
         .as_array()
         .ok_or("Нет сегментов в ответе Whisper".to_string())?;
 
-    let mut result: Vec<SubtitleSegment> = segments
-        .iter()
-        .filter_map(|seg| {
-            let start = json_seconds(&seg["start"]);
-            let end = json_seconds(&seg["end"]);
-            let text = seg["text"].as_str().unwrap_or("").trim().to_string();
-            if text.is_empty() || end <= start {
-                return None;
+    let all_words = parse_whisper_words(&response);
+    let mut result: Vec<SubtitleSegment> = Vec::new();
+
+    for seg in segments {
+        let seg_start = json_seconds(&seg["start"]);
+        let seg_end = json_seconds(&seg["end"]);
+        let seg_text = seg["text"].as_str().unwrap_or("").trim().to_string();
+        if seg_text.is_empty() || seg_end <= seg_start {
+            continue;
+        }
+
+        let nested = parse_segment_words(seg);
+        let words: Vec<WhisperWord> = if !nested.is_empty() {
+            nested
+        } else {
+            all_words
+                .iter()
+                .filter(|w| w.end > seg_start && w.start < seg_end)
+                .cloned()
+                .collect()
+        };
+
+        if words.is_empty() {
+            result.push(make_subtitle_segment(seg_text, seg_start, seg_end));
+            continue;
+        }
+
+        let sentences = split_words_into_sentences(&words);
+        match sentences.len() {
+            0 => {
+                result.push(make_subtitle_segment(seg_text, seg_start, seg_end));
             }
-            Some(make_subtitle_segment(text, start, end))
-        })
-        .collect();
+            1 => {
+                // Одно предложение в сегменте — сохраняем оригинальный текст
+                // Whisper (с лучшей пунктуацией), уточняя только границы.
+                let (_text, start, end) = &sentences[0];
+                result.push(make_subtitle_segment(seg_text, *start, *end));
+            }
+            _ => {
+                println!(
+                    "[whisper] сегмент [{:.3}..{:.3}] разрезан на {} предложений",
+                    seg_start,
+                    seg_end,
+                    sentences.len()
+                );
+                for (text, start, end) in sentences {
+                    result.push(make_subtitle_segment(text, start, end));
+                }
+            }
+        }
+    }
 
     for (i, seg) in result.iter_mut().enumerate() {
         seg.id = (i + 1) as u32;

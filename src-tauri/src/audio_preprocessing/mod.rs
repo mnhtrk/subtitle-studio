@@ -22,6 +22,12 @@ const FRAME_SAMPLES: usize = 480;
 const SAMPLE_RATE: f64 = 16_000.0;
 const MERGE_GAP_SEC: f64 = 0.35;
 const MIN_SEGMENT_SEC: f64 = 0.25;
+/// Макс. длина одного запроса Whisper при склейке соседних участков речи.
+const TRANSCRIBE_BATCH_MAX_SEC: f64 = 600.0;
+/// Оценка размера MP3 64 kbps (байт/с) для лимита 25 MB API.
+const MP3_64K_BYTES_PER_SEC: f64 = 8000.0;
+/// Склеивать соседние участки, если пауза между ними не больше (сек).
+const TRANSCRIBE_BATCH_MAX_GAP_SEC: f64 = 1.0;
 
 /// Вырезка для Whisper: секунда 0 в mp3 = `speech_start` в полном аудио (голубой offset на схеме).
 /// Без padding — иначе красные метки Whisper не совпадают с голубым таймлайном.
@@ -33,6 +39,63 @@ pub fn whisper_extract_range(
     let extract_start = speech_start.max(0.0);
     let extract_end = speech_end.min(total_duration).max(extract_start + 0.05);
     (extract_start, extract_end)
+}
+
+/// Группирует VAD-сегменты в батчи для Whisper: соседние склеиваются если пауза ≤ `max_gap_sec`,
+/// батч не длиннее `max_batch_sec`, длинные регионы режутся равными кусками.
+/// К каждому батчу добавляется `padding_sec` с обеих сторон (с учётом границ файла).
+pub fn plan_speech_batches(
+    speech_segments: &[SpeechSegment],
+    total_duration: f64,
+    max_batch_sec: f64,
+    max_gap_sec: f64,
+    padding_sec: f64,
+) -> Vec<(f64, f64)> {
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for seg in speech_segments {
+        let s = seg.start_time.max(0.0);
+        let e = seg.end_time.min(total_duration);
+        if e <= s {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if s - last.1 <= max_gap_sec && (e - last.0) <= max_batch_sec {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        merged.push((s, e));
+    }
+
+    let mut batches: Vec<(f64, f64)> = Vec::new();
+    for (s, e) in merged {
+        let len = e - s;
+        if len <= max_batch_sec || max_batch_sec <= 0.0 {
+            batches.push((s, e));
+            continue;
+        }
+        let n = ((len / max_batch_sec).ceil() as usize).max(1);
+        let chunk_len = len / n as f64;
+        for i in 0..n {
+            let cs = s + i as f64 * chunk_len;
+            let ce = if i + 1 == n {
+                e
+            } else {
+                s + (i + 1) as f64 * chunk_len
+            };
+            batches.push((cs, ce));
+        }
+    }
+
+    batches
+        .into_iter()
+        .map(|(s, e)| {
+            (
+                (s - padding_sec).max(0.0),
+                (e + padding_sec).min(total_duration),
+            )
+        })
+        .collect()
 }
 
 pub async fn detect_speech_segments(audio_path: &Path) -> Result<AudioPreprocessingResult, String> {
