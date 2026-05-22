@@ -268,6 +268,21 @@ const enMessages = {
 		confirmReplaceAll: 'Found {count} occurrence(s). Replace all?',
 		cancel: 'Cancel'
 	},
+	spellCheck: {
+		fullText: 'Full text',
+		lineOf: 'Line {current} of {total}',
+		editWholeText: 'Edit the whole text',
+		change: 'Change',
+		skipOne: 'Skip one',
+		skipAll: 'Skip all',
+		loading: 'Checking spelling…',
+		scanning: 'Checking subtitles…',
+		scanningHint: 'Translation column only. Progress is also printed to the dev console.',
+		scanProgress: '{done} / {total} lines · {found} typo(s)',
+		close: 'Close',
+		noIssues: 'Spell check complete: 0 typos found.',
+		scanFailed: 'Could not run spell check. Try again.'
+	},
 	glossary: {
 		title: 'Glossary',
 		desc: 'Define how the AI agent should translate specific names or terms.',
@@ -578,6 +593,21 @@ const ruMessages: Messages = {
 		replaceAll: 'Заменить всё',
 		confirmReplaceAll: 'Найдено: {count}. Заменить все вхождения?',
 		cancel: 'Отмена'
+	},
+	spellCheck: {
+		fullText: 'Полный текст',
+		lineOf: 'Строка {current} из {total}',
+		editWholeText: 'Редактировать весь текст',
+		change: 'Заменить',
+		skipOne: 'Пропустить',
+		skipAll: 'Пропустить все',
+		loading: 'Проверка орфографии…',
+		scanning: 'Проверка субтитров…',
+		scanningHint: 'Только колонка перевода. Прогресс также в консоли (терминал dev).',
+		scanProgress: '{done} / {total} строк · опечаток: {found}',
+		close: 'Закрыть',
+		noIssues: 'Проверка завершена: опечаток не найдено (0).',
+		scanFailed: 'Не удалось запустить проверку орфографии.'
 	},
 	glossary: {
 		title: 'Глоссарий',

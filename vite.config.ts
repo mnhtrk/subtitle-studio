@@ -10,6 +10,7 @@ export default defineConfig(async () => ({
     tailwindcss(),
   ],
 
+  assetsInclude: ["**/*.aff", "**/*.dic"],
   clearScreen: false,
   server: {
     port: 1420,

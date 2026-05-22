@@ -13,6 +13,8 @@ import { NewProjectModal } from './components/modals/NewProjectModal';
 import { WizardModal } from './components/modals/WizardModal';
 import { ExportModal } from './components/modals/ExportModal';
 import { FindReplaceModal } from './components/modals/FindReplaceModal';
+import { SpellCheckLoadingOverlay, SpellCheckModal } from './components/modals/SpellCheckModal';
+import { scanSubtitleSpellIssues, type SpellIssue } from './utils/spellcheck';
 import type { FindMatch } from './utils/findReplace';
 import { GlossaryModal, type GlossaryReplacementChange } from './components/modals/GlossaryModal';
 import { ActivationModal } from './components/modals/ActivationModal';
@@ -638,10 +640,18 @@ export default function App() {
 		| 'export'
 		| 'settings'
 		| 'findReplace'
+		| 'spellCheck'
 		| 'about'
 		| null
 	>(null);
 	const [findHighlight, setFindHighlight] = useState<FindMatch | null>(null);
+	const [spellCheckIssues, setSpellCheckIssues] = useState<SpellIssue[]>([]);
+	const [spellCheckScanning, setSpellCheckScanning] = useState(false);
+	const [spellCheckScanProgress, setSpellCheckScanProgress] = useState<{
+		done: number;
+		total: number;
+		found: number;
+	} | null>(null);
 	const [glossaryAgentPrompt, setGlossaryAgentPrompt] = useState<GlossaryReplacementChange[] | null>(
 		null
 	);
@@ -2711,6 +2721,38 @@ ${changesText}
 		);
 	}, [timelineRubberRange, activeVideoAbsolutePath]);
 
+	const handleOpenSpellCheck = useCallback(async () => {
+		if (!currentProjectRef.current || generatedSegments.length === 0) return;
+		setSpellCheckScanning(true);
+		setSpellCheckScanProgress({ done: 0, total: generatedSegments.length, found: 0 });
+		console.log('[spellcheck] menu: start scan');
+		try {
+			const issues = await scanSubtitleSpellIssues(generatedSegments, locale, (p) => {
+				setSpellCheckScanProgress(p);
+			});
+			if (issues.length === 0) {
+				void message(t('spellCheck.noIssues'), {
+					kind: 'info',
+					title: t('menu.spellCheck')
+				});
+				return;
+			}
+			setSpellCheckIssues(issues);
+			setActiveModal('spellCheck');
+		} catch (e) {
+			const detail = e instanceof Error ? e.message : String(e);
+			console.error('spellcheck scan', e);
+			void message(`${t('spellCheck.scanFailed')}\n${detail}`, {
+				kind: 'error',
+				title: t('menu.spellCheck')
+			});
+		} finally {
+			setSpellCheckScanning(false);
+			setSpellCheckScanProgress(null);
+			console.log('[spellcheck] menu: scan finished');
+		}
+	}, [generatedSegments, locale, t]);
+
 	const menuItems = useMemo(
 		(): Array<{ id: string; label: string; items: MenuSubItem[] }> => [
 			{
@@ -2745,7 +2787,11 @@ ${changesText}
 							setActiveModal('findReplace');
 						}
 					},
-					{ label: t('menu.spellCheck') },
+					{
+						label: t('menu.spellCheck'),
+						disabled: generatedSegments.length === 0 || spellCheckScanning,
+						action: () => void handleOpenSpellCheck()
+					},
 				],
 			},
 			{
@@ -2832,7 +2878,10 @@ ${changesText}
 			canRetranscribeRangeMenu,
 			timelineRubberRange,
 			ensureApiKeyForAi,
-			openAiTranslateSetup
+			openAiTranslateSetup,
+			generatedSegments.length,
+			spellCheckScanning,
+			handleOpenSpellCheck
 		]
 	);
 
@@ -2888,6 +2937,14 @@ ${changesText}
 		(match: FindMatch) => {
 			setFindHighlight(match);
 			selectSegmentAndSeek(match.segmentIndex);
+		},
+		[selectSegmentAndSeek]
+	);
+
+	const handleSpellSelectIssue = useCallback(
+		(issue: SpellIssue) => {
+			setFindHighlight(null);
+			selectSegmentAndSeek(issue.segmentIndex);
 		},
 		[selectSegmentAndSeek]
 	);
@@ -5959,11 +6016,26 @@ ${changesText}
 							/>
 						)}
 
+						{activeModal === 'spellCheck' && spellCheckIssues.length > 0 && (
+							<SpellCheckModal
+								onClose={() => {
+									setSpellCheckIssues([]);
+									setActiveModal(null);
+								}}
+								segments={generatedSegments}
+								initialIssues={spellCheckIssues}
+								onSelectIssue={handleSpellSelectIssue}
+								onSegmentsChange={applyFindReplaceSegments}
+							/>
+						)}
+
 						{activeModal === 'about' && (
 							<AboutModal onClose={() => setActiveModal(null)} />
 						)}
 				</>
 			)}
+
+			{spellCheckScanning && <SpellCheckLoadingOverlay progress={spellCheckScanProgress} />}
 
 			{glossaryAgentPrompt && (
 				<div className="fixed inset-0 z-[10001] flex items-center justify-center pointer-events-none">
