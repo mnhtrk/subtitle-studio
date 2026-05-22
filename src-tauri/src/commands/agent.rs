@@ -328,7 +328,7 @@ struct AgentTurnJson {
     message: String,
     #[serde(default)]
     actions: Vec<serde_json::Value>,
-    /// Старый формат ответа модели
+    // legacy json от gpt
     action: Option<serde_json::Value>,
     #[serde(default)]
     suggestions: Option<Vec<String>>,

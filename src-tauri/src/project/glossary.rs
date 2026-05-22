@@ -1,6 +1,6 @@
 use super::GlossaryEntry;
 
-/// Применить глоссарий к тексту (заменяет термины с учётом регистра)
+// замена терминов из глоссария
 pub fn apply_glossary(text: &str, glossary: &[GlossaryEntry]) -> String {
     if glossary.is_empty() {
         return text.to_string();
@@ -8,14 +8,14 @@ pub fn apply_glossary(text: &str, glossary: &[GlossaryEntry]) -> String {
     
     let mut result = text.to_string();
     
-    // Сортируем по длине (длинные термины первыми, чтобы избежать частичных замен)
+    // длинные термины первыми (иначе частичные матчи)
     let mut sorted_glossary: Vec<&GlossaryEntry> = glossary.iter().collect();
     sorted_glossary.sort_by(|a, b| b.source.len().cmp(&a.source.len()));
     
     for entry in sorted_glossary {
         let source = entry.source.trim();
         let target = entry.target.trim();
-        // Пустой target (черновик глоссария после транскрипции) не должен вырезать имена
+        // пустой target не трогаем (черновик после транскрипции)
         if source.is_empty() || target.is_empty() {
             continue;
         }

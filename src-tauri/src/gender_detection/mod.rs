@@ -1,18 +1,13 @@
 use std::path::Path;
-use crate::audio_preprocessing;
+use std::process::Stdio;
+
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{ChildStdin, ChildStdout, Command};
+
 use crate::project::{SpeakerGender, SubtitleSegment};
 
-const SAMPLE_RATE: u32 = 16_000;
-const FRAME_SIZE: usize = 1024;
-const HOP_SIZE: usize = 512;
-const MIN_PITCH_HZ: f64 = 75.0;
-const MAX_PITCH_HZ: f64 = 350.0;
-/// Медианная F0 ниже порога: чаще мужской голос
-const MALE_PITCH_BELOW_HZ: f64 = 155.0;
-/// Медианная F0 выше порога: чаще женский голос
-const FEMALE_PITCH_ABOVE_HZ: f64 = 185.0;
-
-/// Пол говорящего по F0 для каждого сегмента
+// пол по репликам через python sidecar
 pub async fn assign_speaker_genders(
     audio_path: &Path,
     segments: &mut [SubtitleSegment],
@@ -21,116 +16,219 @@ pub async fn assign_speaker_genders(
         return Ok(());
     }
 
-    let pcm = audio_preprocessing::decode_pcm_16k_mono(audio_path).await?;
-    let sr = SAMPLE_RATE as f64;
+    let paths = crate::ml_sidecar::resolve_script("classify.py")?;
+    println!(
+        "[gender] sidecar python={:?} script={:?}",
+        paths.python_exe, paths.script_path
+    );
 
-    for segment in segments.iter_mut() {
-        let start_idx = (segment.start * sr).floor() as usize;
-        let end_idx = ((segment.end * sr).ceil() as usize).min(pcm.len());
+    let mut child = Command::new(&paths.python_exe)
+        .arg(&paths.script_path)
+        .current_dir(&paths.work_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUNBUFFERED", "1")
+        .spawn()
+        .map_err(|e| format!("Не удалось запустить gender sidecar: {}", e))?;
 
-        if end_idx <= start_idx || end_idx - start_idx < SAMPLE_RATE as usize / 20 {
-            segment.speaker_gender = Some(SpeakerGender::Unknown);
-            continue;
+    let mut stdin = child.stdin.take().ok_or("нет stdin у sidecar")?;
+    let stdout = child.stdout.take().ok_or("нет stdout у sidecar")?;
+    let stderr = child.stderr.take().ok_or("нет stderr у sidecar")?;
+
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !line.is_empty() {
+                eprintln!("[gender-py-stderr] {}", line);
+            }
         }
+    });
 
-        let slice = &pcm[start_idx..end_idx];
-        segment.speaker_gender = Some(detect_gender_from_pcm(slice, SAMPLE_RATE));
+    let mut reader = BufReader::new(stdout).lines();
+
+    let init_cmd = json!({
+        "cmd": "init",
+        "audio_path": audio_path.to_string_lossy(),
+    });
+    send_cmd(&mut stdin, init_cmd).await?;
+
+    let t_init = std::time::Instant::now();
+    loop {
+        let line = read_line(&mut reader).await?;
+        let event = match parse_event(&line) {
+            Some(v) => v,
+            None => continue,
+        };
+        match event.get("type").and_then(|x| x.as_str()) {
+            Some("log") => {
+                if let Some(msg) = event.get("msg").and_then(|x| x.as_str()) {
+                    println!("[gender-py] {}", msg);
+                }
+            }
+            Some("ready") => {
+                let duration = event
+                    .get("duration")
+                    .and_then(|x| x.as_f64())
+                    .unwrap_or(0.0);
+                let device = event
+                    .get("device")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("?");
+                println!(
+                    "[gender] sidecar готов за {:.2}s, audio_duration={:.2}s, device={}",
+                    t_init.elapsed().as_secs_f32(),
+                    duration,
+                    device,
+                );
+                break;
+            }
+            Some("error") => {
+                let err = event
+                    .get("error")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("неизвестная ошибка");
+                let _ = child.kill().await;
+                return Err(format!("sidecar init error: {}", err));
+            }
+            _ => {}
+        }
     }
 
-    let male = segments
-        .iter()
-        .filter(|s| matches!(s.speaker_gender, Some(SpeakerGender::Male)))
-        .count();
-    let female = segments
-        .iter()
-        .filter(|s| matches!(s.speaker_gender, Some(SpeakerGender::Female)))
-        .count();
-    let unknown = segments.len() - male - female;
+    let total = segments.len();
+    let t_classify = std::time::Instant::now();
+    let mut male = 0usize;
+    let mut female = 0usize;
+    let mut unknown = 0usize;
+    let mut total_inf_ms = 0.0f64;
+
+    for seg in segments.iter_mut() {
+        let req = json!({
+            "cmd": "classify",
+            "id": seg.id,
+            "start": seg.start,
+            "end": seg.end,
+        });
+        send_cmd(&mut stdin, req).await?;
+
+        loop {
+            let line = read_line(&mut reader).await?;
+            let event = match parse_event(&line) {
+                Some(v) => v,
+                None => continue,
+            };
+            match event.get("type").and_then(|x| x.as_str()) {
+                Some("log") => {
+                    if let Some(msg) = event.get("msg").and_then(|x| x.as_str()) {
+                        println!("[gender-py] {}", msg);
+                    }
+                }
+                Some("result") => {
+                    let gender_str = event
+                        .get("gender")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("unknown");
+                    let scores = event.get("scores").cloned().unwrap_or(json!({}));
+                    let duration_ms = event
+                        .get("duration_ms")
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(0.0);
+                    let reason = event.get("reason").and_then(|x| x.as_str()).unwrap_or("");
+                    total_inf_ms += duration_ms;
+
+                    let g = match gender_str {
+                        "male" => SpeakerGender::Male,
+                        "female" => SpeakerGender::Female,
+                        _ => SpeakerGender::Unknown,
+                    };
+                    seg.speaker_gender = Some(g);
+                    match g {
+                        SpeakerGender::Male => male += 1,
+                        SpeakerGender::Female => female += 1,
+                        SpeakerGender::Unknown => unknown += 1,
+                    }
+
+                    let reason_part = if reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", reason)
+                    };
+                    println!(
+                        "[gender] #{} [{:.2}..{:.2}] -> {} scores={} inf={:.1}ms{}",
+                        seg.id, seg.start, seg.end, gender_str, scores, duration_ms, reason_part,
+                    );
+                    break;
+                }
+                Some("error") => {
+                    let err = event
+                        .get("error")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("неизвестная ошибка");
+                    eprintln!("[gender] error для #{}: {}", seg.id, err);
+                    seg.speaker_gender = Some(SpeakerGender::Unknown);
+                    unknown += 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let _ = send_cmd(&mut stdin, json!({"cmd": "quit"})).await;
+    drop(stdin);
+    let _ = child.wait().await;
+
+    let avg = if total > 0 {
+        total_inf_ms / total as f64
+    } else {
+        0.0
+    };
     println!(
-        "[gender] сегментов: {} (male: {}, female: {}, unknown: {})",
-        segments.len(),
+        "[gender] обработано {} сегментов за {:.2}s (avg inf {:.1}ms/seg; male={} female={} unknown={})",
+        total,
+        t_classify.elapsed().as_secs_f32(),
+        avg,
         male,
         female,
-        unknown
+        unknown,
     );
 
     Ok(())
 }
 
-fn detect_gender_from_pcm(samples: &[i16], sample_rate: u32) -> SpeakerGender {
-    let mut pitches = Vec::new();
-    let mut offset = 0usize;
-
-    while offset + FRAME_SIZE <= samples.len() {
-        let frame = &samples[offset..offset + FRAME_SIZE];
-        if frame_rms(frame) >= 0.012 {
-            if let Some(hz) = estimate_pitch_hz(frame, sample_rate) {
-                pitches.push(hz);
-            }
-        }
-        offset += HOP_SIZE;
-    }
-
-    if pitches.is_empty() {
-        return SpeakerGender::Unknown;
-    }
-
-    pitches.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median = pitches[pitches.len() / 2];
-
-    if median < MALE_PITCH_BELOW_HZ {
-        SpeakerGender::Male
-    } else if median > FEMALE_PITCH_ABOVE_HZ {
-        SpeakerGender::Female
-    } else {
-        SpeakerGender::Unknown
-    }
-}
-
-fn frame_rms(frame: &[i16]) -> f64 {
-    let sum: f64 = frame
-        .iter()
-        .map(|&s| {
-            let x = s as f64 / 32768.0;
-            x * x
-        })
-        .sum();
-    (sum / frame.len() as f64).sqrt()
-}
-
-fn estimate_pitch_hz(frame: &[i16], sample_rate: u32) -> Option<f64> {
-    let samples: Vec<f64> = frame.iter().map(|&s| s as f64 / 32768.0).collect();
-    let min_lag = (sample_rate as f64 / MAX_PITCH_HZ).floor() as usize;
-    let max_lag = (sample_rate as f64 / MIN_PITCH_HZ).ceil() as usize;
-    let max_lag = max_lag.min(samples.len() / 2);
-
-    if min_lag >= max_lag {
+fn parse_event(line: &str) -> Option<Value> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
         return None;
     }
-
-    let mut best_lag = min_lag;
-    let mut best_corr = f64::MIN;
-
-    for lag in min_lag..=max_lag {
-        let corr = autocorrelation(&samples, lag);
-        if corr > best_corr {
-            best_corr = corr;
-            best_lag = lag;
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(v) => Some(v),
+        Err(_) => {
+            eprintln!("[gender-py-raw] {}", trimmed);
+            None
         }
     }
-
-    if best_corr < 0.02 {
-        return None;
-    }
-
-    Some(sample_rate as f64 / best_lag as f64)
 }
 
-fn autocorrelation(samples: &[f64], lag: usize) -> f64 {
-    let n = samples.len().saturating_sub(lag);
-    if n == 0 {
-        return 0.0;
-    }
-    let sum: f64 = (0..n).map(|i| samples[i] * samples[i + lag]).sum();
-    sum / n as f64
+async fn send_cmd(stdin: &mut ChildStdin, value: Value) -> Result<(), String> {
+    let line = value.to_string() + "\n";
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| format!("Ошибка записи в sidecar: {}", e))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|e| format!("Ошибка flush sidecar: {}", e))?;
+    Ok(())
 }
+
+async fn read_line(reader: &mut Lines<BufReader<ChildStdout>>) -> Result<String, String> {
+    reader
+        .next_line()
+        .await
+        .map_err(|e| format!("Ошибка чтения sidecar: {}", e))?
+        .ok_or_else(|| "sidecar закрылся неожиданно".to_string())
+}
+

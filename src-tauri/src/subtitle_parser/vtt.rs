@@ -30,7 +30,7 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
             continue;
         }
         
-        // Проверяем строку времени
+        // таймкод?
         if let Some(captures) = time_regex.captures(line) {
             let start_hours = captures[1].parse::<u32>().unwrap_or(0);
             let start_minutes = captures[2].parse::<u32>().unwrap_or(0);
@@ -75,7 +75,7 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
                 flags: None,
             });
         } else {
-            // Пропускаем другие строки (идентификаторы, заметки и т.д.)
+            // мусорные строки vtt
             i += 1;
         }
     }

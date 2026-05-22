@@ -191,7 +191,6 @@ pub struct InsertSubtitleSegmentResult {
     pub inserted_id: u32,
 }
 
-/// Вставить пустой субтитр в заданном интервале времени (сегменты пересортировываются по start)
 #[tauri::command]
 pub async fn insert_subtitle_segment(
     project_path: String,
@@ -242,7 +241,7 @@ pub async fn insert_subtitle_segment(
             .position(|s| (s.start - start).abs() < 1e-9 && (s.end - end).abs() < 1e-9)
             .ok_or_else(|| "Не удалось сопоставить вставленный сегмент".to_string())?;
 
-        /* Порядковые id 1..n по времени — номер субтитра совпадает с позицией после вставки */
+        // id 1..n по start после вставки
         for (i, seg) in segments.iter_mut().enumerate() {
             seg.id = (i + 1) as u32;
         }
@@ -268,7 +267,6 @@ pub struct DeleteSubtitleSegmentResult {
     pub segments: Vec<SubtitleSegment>,
 }
 
-/// Удалить сегмент по id, остальные перенумеровать 1..n по времени
 #[tauri::command]
 pub async fn delete_subtitle_segment(
     project_path: String,

@@ -6,4 +6,4 @@ pub mod audio;
 pub mod sync;
 pub mod quality;
 pub mod notifications;
-pub mod agent; 
+pub mod agent;

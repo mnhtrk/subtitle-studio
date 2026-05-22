@@ -10,7 +10,7 @@ pub async fn extract_audio_from_video(
 ) -> Result<String, String> {
     println!("Извлечение аудио из видео: {}", video_path);
     
-    // Проверяем существование исходного файла
+    // файл есть?
     let video_path_buf = Path::new(&video_path);
     if !video_path_buf.exists() {
         return Err(format!("Видео файл не найден: {}", video_path));
@@ -22,7 +22,7 @@ pub async fn extract_audio_from_video(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     
-    // Проверяем FFmpeg
+    // ffmpeg?
     let ffmpeg_available = is_ffmpeg_available().await;
     if !ffmpeg_available {
         return Err("FFmpeg не установлен в системе".to_string());
@@ -55,11 +55,11 @@ pub async fn extract_audio_from_video(
         format!("Ошибка запуска FFmpeg: {}", e)
     })?;
     
-    // Проверяем результат
+    // ok?
     if output.status.success() {
         println!("Аудио успешно извлечено: {}", output_path);
         
-        // Проверяем, что файл создан и имеет ненулевой размер
+        // не пустой файл
         if output_path_buf.exists() {
             let metadata = std::fs::metadata(&output_path).map_err(|e| e.to_string())?;
             if metadata.len() > 0 {
@@ -159,7 +159,7 @@ pub async fn extract_audio_range(
     }
 }
 
-/// Проверяет доступность FFmpeg в системе
+// ffmpeg есть?
 async fn is_ffmpeg_available() -> bool {
     let output = Command::new("ffmpeg")
         .arg("-version")
@@ -174,7 +174,7 @@ async fn is_ffmpeg_available() -> bool {
     }
 }
 
-/// Получает информацию о медиафайле через FFprobe (часть FFmpeg)
+// ffprobe инфо
 #[tauri::command]
 pub async fn get_media_info(video_path: String) -> Result<MediaInfo, String> {
     let video_path_buf = Path::new(&video_path);
@@ -182,7 +182,7 @@ pub async fn get_media_info(video_path: String) -> Result<MediaInfo, String> {
         return Err(format!("Файл не найден: {}", video_path));
     }
     
-    // Проверяем FFprobe
+    // ffprobe?
     let ffprobe_available = is_ffprobe_available().await;
     if !ffprobe_available {
         return Err("FFprobe не доступен. Убедитесь, что FFmpeg установлен.".to_string());

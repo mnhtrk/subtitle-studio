@@ -27,8 +27,7 @@ export interface ConversationTurn {
 
 export interface AgentChatOptions {
   sessionId: string;
-  /** Предыдущие реплики чата (без текущего сообщения) */
-  conversationHistory?: ConversationTurn[];
+  conversationHistory?: ConversationTurn[]; // без текущего msg
 }
 
 export const agentService = {
@@ -48,7 +47,6 @@ export const agentService = {
   }
 };
 
-/** id сессии агента для проекта */
 export function agentSessionIdForProject(projectId: string | null | undefined): string {
   if (projectId && projectId.trim().length > 0) {
     return `project-${projectId.trim()}`;

@@ -15,8 +15,7 @@ export interface SubtitleSegment {
   duration: number;
   text: string;
   translation?: string | null;
-  /** Пол говорящего (авто при транскрибации) */
-  speaker_gender?: SpeakerGender | null;
+  speaker_gender?: SpeakerGender | null; // авто после транскрибации
 }
 
 export interface ProjectFile {
@@ -26,8 +25,7 @@ export interface ProjectFile {
   path: string;
   duration?: number | null;
   subtitle_segments?: SubtitleSegment[] | null;
-  /* * Связанный файл эпизода: у субтитров id видео, у видео id субтитров */
-  linked_file_id?: string | null;
+  linked_file_id?: string | null; // видео <-> саб
   created_at: string;
   updated_at: string;
 }
@@ -52,13 +50,12 @@ export interface ProjectData {
   updated_at: string;
 }
 
-/* * Ответ `auto_generate_glossary` (черновые термины перед слиянием в проект) */
+// черновик глоссария от auto_generate
 export interface GlossaryTermGenerated {
   source: string;
   target: string;
   frequency: number;
   confidence: number;
-  /** character | location | organization | concept | title | other */
   category?: string;
 }
 
@@ -90,17 +87,17 @@ export const projectService = {
     return await invoke('save_api_key', { key });
   },
 
-  // Get recent projects for welcome modal
+  // недавние проекты
   getRecent: async (): Promise<RecentProject[]> => {
     return await invoke('list_recent_projects');
   },
 
-  // Open existing project
+  // открыть проект
   open: async (path: string): Promise<ProjectData> => {
     return await invoke('open_project', { path });
   },
 
-  // Create new project
+  // новый проект
   create: async (name: string, path: string, targetLanguage: string) => {
     return await invoke('create_project', { 
       name, 
@@ -134,9 +131,10 @@ export const projectService = {
     filePath: string,
     language?: string,
     prompt?: string,
-    glossary?: GlossaryEntry[]
+    glossary?: GlossaryEntry[],
+    skipVad?: boolean
   ): Promise<SubtitleSegment[]> => {
-    return await invoke('transcribe_audio', { filePath, language, prompt, glossary });
+    return await invoke('transcribe_audio', { filePath, language, prompt, glossary, skipVad });
   },
 
   importExistingSubtitles: async (
@@ -178,7 +176,7 @@ export const projectService = {
     return await invoke('update_glossary', { projectPath, entries });
   },
 
-  /** Черновой глоссарий по частым словам + GPt */
+  // черновик глоссария (gpt)
   autoGenerateGlossary: async (
     segments: SubtitleSegment[],
     options: AutoGlossaryOptions

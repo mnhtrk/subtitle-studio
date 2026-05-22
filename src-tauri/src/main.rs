@@ -8,9 +8,10 @@ mod project;
 mod types;
 mod subtitle_parser; 
 mod postprocessing;
-mod audio_preprocessing;
 mod agent;
 mod gender_detection;
+mod ml_sidecar;
+mod vad;
 
 use tauri_plugin_sql::{Migration, MigrationKind};
 
@@ -79,7 +80,17 @@ fn main() {
             commands::agent::chat_with_agent,
         ])
         
-        .setup(|_app| {
+        .setup(|app| {
+            use tauri::Manager;
+            // таскбар icon.ico
+            if let Ok(icon) =
+                tauri::image::Image::from_bytes(include_bytes!("../icons/icon.ico"))
+            {
+                let icon = icon.to_owned();
+                for window in app.webview_windows().values() {
+                    let _ = window.set_icon(icon.clone());
+                }
+            }
             println!("Subtitle Studio запущен");
             Ok(())
         })

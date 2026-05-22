@@ -11,6 +11,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
         "title": "Subtitle Studio",
         "width": 1400,
         "height": 900,
@@ -38,12 +39,13 @@
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis"],
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.ico"
+    "resources": [
+      "sidecar/ml/vad.py",
+      "sidecar/ml/classify.py",
+      "sidecar/ml/requirements.txt",
+      "sidecar/ml/README.md"
     ],
+    "icon": ["icons/icon.ico"],
     "windows": {
       "webviewInstallMode": {
         "type": "skip"

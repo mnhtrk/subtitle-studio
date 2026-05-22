@@ -5,14 +5,15 @@ use crate::project::glossary::apply_glossary;
 use tokio::sync::mpsc;
 use tauri::Emitter;
 use std::collections::{HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use crate::gender_detection;
 use crate::postprocessing;
+use crate::vad;
 
 const DEBUG_LOG_MAX_CHARS: usize = 24_000;
-/// Лимит OpenAI Transcriptions API (25 MB), с запасом.
+// лимит whisper ~25mb, чуть меньше на всякий
 const WHISPER_MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
-/// Целевой размер одного куска при разбиении большого файла.
+// кусок при нарезке жирного файла
 const WHISPER_CHUNK_TARGET_BYTES: u64 = 18 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -58,7 +59,7 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
         });
     }
     
-    // Проверяем api ключ
+    // проверка ключа
     let client = reqwest::Client::new();
     let res = client
         .get("https://api.openai.com/v1/models")
@@ -69,7 +70,7 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
     match res {
         Ok(response) => {
             if response.status().is_success() {
-                // Получаем список доступных моделей
+                // какие модели доступны
                 let models: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
                 let available_models: Vec<String> = models["data"]
                     .as_array()
@@ -173,6 +174,7 @@ pub async fn transcribe_audio(
     language: Option<String>,
     prompt: Option<String>,
     glossary: Option<Vec<GlossaryEntry>>,
+    skip_vad: Option<bool>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<SubtitleSegment>, String> {
     println!("📝 Транскрибация файла: {}", file_path);
@@ -210,7 +212,7 @@ pub async fn transcribe_audio(
 
     let file_metadata = std::fs::metadata(&file_path)
         .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
-    let file_size_bytes = file_metadata.len();
+    let _file_size_bytes = file_metadata.len();
 
     let glossary_entries = glossary.unwrap_or_default();
     let mut glossary_originals: Vec<String> = Vec::new();
@@ -245,136 +247,82 @@ pub async fn transcribe_audio(
             missing_glossary_originals.join(", ")
         ))
     };
-    let whisper_prompt: Option<String> = match (base_prompt, glossary_prompt) {
-        (Some(base), Some(glossary_block)) => Some(format!("{}\n\n{}", base, glossary_block)),
-        (Some(base), None) => Some(base),
-        (None, Some(glossary_block)) => Some(glossary_block),
-        (None, None) => None,
-    };
+    // anchor в конце промпта - whisper копирует пунктуацию
+    let style_anchor = whisper_style_anchor(&language_code);
+    let mut prompt_parts: Vec<String> = Vec::new();
+    if let Some(base) = base_prompt {
+        prompt_parts.push(base);
+    }
+    if let Some(glossary_block) = glossary_prompt {
+        prompt_parts.push(glossary_block);
+    }
+    prompt_parts.push(style_anchor);
+    let whisper_prompt: Option<String> = Some(prompt_parts.join("\n\n"));
 
     println!(
-        "[transcribe_audio] whisper prompt: user + {} glossary terms, language={}",
+        "[transcribe_audio] whisper prompt: user + {} glossary terms + style anchor, language={}",
         missing_glossary_originals.len(),
         language_code
     );
 
+    let audio_path = Path::new(&file_path);
     let client = reqwest::Client::new();
 
-    let raw_segments: Vec<SubtitleSegment> = if file_size_bytes <= WHISPER_MAX_FILE_BYTES {
+    let raw_segments = if skip_vad.unwrap_or(false) {
+        println!("[transcribe_audio] VAD выкл (ручной отрывок)");
         let _ = progress_tx
             .send(ProgressEvent::InProgress {
                 step: 2,
-                progress: 0.45,
-                description: "Отправка в OpenAI".to_string(),
+                progress: 0.35,
+                description: "Whisper".to_string(),
             })
             .await;
-
-        let file_data = std::fs::read(&file_path)
-            .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
-
-        let segments = whisper_call(
+        transcribe_whisper_direct(
             &client,
             &api_key,
-            file_data,
+            audio_path,
             &language_code,
             whisper_prompt.as_deref(),
-            "single",
+            &progress_tx,
         )
-        .await?;
-
-        let _ = progress_tx
-            .send(ProgressEvent::InProgress {
-                step: 3,
-                progress: 0.85,
-                description: "Обработка результата".to_string(),
-            })
-            .await;
-
-        segments
+        .await?
     } else {
-        let duration = crate::commands::audio::media_duration_seconds(Path::new(&file_path))
-            .await
-            .map_err(|e| format!("Не удалось получить длительность аудио: {}", e))?;
-        if duration <= 0.0 {
-            return Err("Файл аудио имеет нулевую длительность".to_string());
-        }
-
-        let chunk_count = ((file_size_bytes + WHISPER_CHUNK_TARGET_BYTES - 1)
-            / WHISPER_CHUNK_TARGET_BYTES) as usize;
-        let chunk_count = chunk_count.max(2);
-        let chunk_seconds = (duration / chunk_count as f64).max(1.0);
-
-        println!(
-            "Аудио ~{:.1} МБ, {:.1} с — {} кусков по ~{:.1} с",
-            file_size_bytes as f64 / (1024.0 * 1024.0),
-            duration,
-            chunk_count,
-            chunk_seconds
-        );
-
-        let temp_dir = std::env::temp_dir().join(format!("whisper_chunks_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir)
-            .map_err(|e| format!("Не удалось создать временную папку: {}", e))?;
-
-        let mut all_segments: Vec<SubtitleSegment> = Vec::new();
-
-        for i in 0..chunk_count {
-            let chunk_start = (i as f64) * chunk_seconds;
-            let chunk_path: PathBuf = temp_dir.join(format!("chunk_{:03}.mp3", i));
-
-            let progress = 0.15 + (i as f64 / chunk_count as f64) * 0.70;
-            let _ = progress_tx
-                .send(ProgressEvent::InProgress {
-                    step: 2,
-                    progress,
-                    description: format!("Транскрибация: кусок {} из {}", i + 1, chunk_count),
-                })
-                .await;
-
-            extract_audio_chunk(
-                Path::new(&file_path),
-                &chunk_path,
-                chunk_start,
-                chunk_seconds,
-            )
-            .await?;
-
-            let chunk_data = std::fs::read(&chunk_path)
-                .map_err(|e| format!("Ошибка чтения куска {}: {}", i + 1, e))?;
-
-            let chunk_segments = whisper_call(
-                &client,
-                &api_key,
-                chunk_data,
-                &language_code,
-                whisper_prompt.as_deref(),
-                &format!("chunk {}/{}", i + 1, chunk_count),
-            )
-            .await?;
-
-            for mut seg in chunk_segments {
-                seg.start += chunk_start;
-                seg.end += chunk_start;
-                seg.duration = (seg.end - seg.start).max(0.0);
-                all_segments.push(seg);
-            }
-        }
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-
         let _ = progress_tx
             .send(ProgressEvent::InProgress {
-                step: 3,
-                progress: 0.9,
-                description: "Обработка результата".to_string(),
+                step: 1,
+                progress: 0.25,
+                description: "VAD: поиск речи".to_string(),
             })
             .await;
 
-        for (i, seg) in all_segments.iter_mut().enumerate() {
-            seg.id = (i + 1) as u32;
+        let speech_segments =
+            vad::detect_speech_segments(audio_path, vad::VadParams::default()).await?;
+
+        if speech_segments.is_empty() {
+            return Err(
+                "VAD: речь не найдена (порог в vad/mod.rs VadParams::threshold)".into(),
+            );
         }
-        all_segments
+
+        transcribe_vad_speech_segments(
+            &client,
+            &api_key,
+            audio_path,
+            &speech_segments,
+            &language_code,
+            whisper_prompt.as_deref(),
+            &progress_tx,
+        )
+        .await?
     };
+
+    let _ = progress_tx
+        .send(ProgressEvent::InProgress {
+            step: 3,
+            progress: 0.85,
+            description: "Обработка результата".to_string(),
+        })
+        .await;
 
     let segments = sanitize_whisper_segments(raw_segments);
 
@@ -428,7 +376,28 @@ pub async fn transcribe_audio(
     Ok(final_segments)
 }
 
-/// Нормализация языка для Whisper (ISO 639-1). Без fallback на en — иначе русское аудио даёт «мусор».
+fn whisper_style_anchor(language_code: &str) -> String {
+    let lang = language_code.trim().to_lowercase();
+    match lang.as_str() {
+        "ru" => "Привет, друг. Как дела сегодня? Я в порядке, спасибо! Давай начнём.".to_string(),
+        "uk" => "Привіт, друже. Як справи сьогодні? Все добре, дякую! Почнемо.".to_string(),
+        "be" => "Прывітанне, дружа. Як справы сёння? Усё добра, дзякуй! Пачнём.".to_string(),
+        "pl" => "Cześć, przyjacielu. Jak się dzisiaj masz? Wszystko dobrze, dziękuję! Zaczynajmy.".to_string(),
+        "cs" => "Ahoj, příteli. Jak se dnes máš? Dobře, díky! Začneme.".to_string(),
+        "sk" => "Ahoj, priateľu. Ako sa dnes máš? Dobre, vďaka! Začnime.".to_string(),
+        "de" => "Hallo, Freund. Wie geht es dir heute? Mir geht es gut, danke! Lass uns anfangen.".to_string(),
+        "fr" => "Bonjour, ami. Comment vas-tu aujourd'hui ? Je vais bien, merci ! Commençons.".to_string(),
+        "es" => "Hola, amigo. ¿Cómo estás hoy? Estoy bien, gracias. ¡Empecemos!".to_string(),
+        "it" => "Ciao, amico. Come stai oggi? Sto bene, grazie. Iniziamo!".to_string(),
+        "pt" => "Olá, amigo. Como vai você hoje? Estou bem, obrigado. Vamos começar!".to_string(),
+        "nl" => "Hallo, vriend. Hoe gaat het vandaag? Goed, bedankt! Laten we beginnen.".to_string(),
+        "tr" => "Merhaba, dostum. Bugün nasılsın? İyiyim, teşekkürler. Başlayalım!".to_string(),
+        // english дефолт для anchor
+        _ => "Hello, friend. How are you today? I'm fine, thanks. Let's begin.".to_string(),
+    }
+}
+
+// язык -> iso; en по умолчанию нельзя, русский тогда в кашу
 fn normalize_whisper_language(language: &Option<String>) -> Result<String, String> {
     let raw = language
         .as_ref()
@@ -541,6 +510,109 @@ prompt (опционально):\n{}",
     parse_whisper_response(response)
 }
 
+fn shift_segment_times(segments: &mut [SubtitleSegment], offset_seconds: f64) {
+    for seg in segments.iter_mut() {
+        seg.start += offset_seconds;
+        seg.end += offset_seconds;
+        seg.duration = (seg.end - seg.start).max(0.05);
+    }
+}
+
+// retranscribe: весь файл в whisper, vad выкл
+async fn transcribe_whisper_direct(
+    client: &reqwest::Client,
+    api_key: &str,
+    file_path: &Path,
+    language_code: &str,
+    whisper_prompt: Option<&str>,
+    progress_tx: &mpsc::Sender<ProgressEvent>,
+) -> Result<Vec<SubtitleSegment>, String> {
+    let file_size = std::fs::metadata(file_path)
+        .map_err(|e| format!("metadata: {}", e))?
+        .len();
+
+    if file_size <= WHISPER_MAX_FILE_BYTES {
+        let data = std::fs::read(file_path).map_err(|e| e.to_string())?;
+        return whisper_call(
+            client,
+            api_key,
+            data,
+            language_code,
+            whisper_prompt,
+            "direct",
+        )
+        .await;
+    }
+
+    let duration = crate::commands::audio::media_duration_seconds(file_path)
+        .await
+        .map_err(|e| format!("длительность аудио: {}", e))?;
+    if duration <= 0.0 {
+        return Err("нулевая длительность аудио".into());
+    }
+
+    let chunk_count =
+        ((file_size + WHISPER_CHUNK_TARGET_BYTES - 1) / WHISPER_CHUNK_TARGET_BYTES) as usize;
+    let chunk_count = chunk_count.max(2);
+    let chunk_seconds = (duration / chunk_count as f64).max(1.0);
+
+    println!(
+        "[whisper] direct: {:.1} MB, {} кусков по ~{:.1}s",
+        file_size as f64 / (1024.0 * 1024.0),
+        chunk_count,
+        chunk_seconds
+    );
+
+    let temp_dir = std::env::temp_dir().join(format!("whisper_chunks_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+
+    let mut all_segments: Vec<SubtitleSegment> = Vec::new();
+
+    for i in 0..chunk_count {
+        let chunk_start = (i as f64) * chunk_seconds;
+        let chunk_path = temp_dir.join(format!("chunk_{:03}.mp3", i));
+
+        let progress = 0.35 + (i as f64 / chunk_count as f64) * 0.45;
+        let _ = progress_tx
+            .send(ProgressEvent::InProgress {
+                step: 2,
+                progress,
+                description: format!("Whisper: {} / {}", i + 1, chunk_count),
+            })
+            .await;
+
+        extract_audio_chunk(file_path, &chunk_path, chunk_start, chunk_seconds).await?;
+
+        let chunk_data = std::fs::read(&chunk_path)
+            .map_err(|e| format!("чтение куска {}: {}", i + 1, e))?;
+
+        let chunk_segments = whisper_call(
+            client,
+            api_key,
+            chunk_data,
+            language_code,
+            whisper_prompt,
+            &format!("direct {}/{}", i + 1, chunk_count),
+        )
+        .await?;
+
+        for mut seg in chunk_segments {
+            seg.start += chunk_start;
+            seg.end += chunk_start;
+            seg.duration = (seg.end - seg.start).max(0.05);
+            all_segments.push(seg);
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    for (i, seg) in all_segments.iter_mut().enumerate() {
+        seg.id = (i + 1) as u32;
+    }
+
+    Ok(all_segments)
+}
+
 async fn extract_audio_chunk(
     input_path: &Path,
     output_path: &Path,
@@ -567,16 +639,148 @@ async fn extract_audio_chunk(
         .stderr(Stdio::null())
         .status()
         .await
-        .map_err(|e| format!("Ошибка запуска ffmpeg: {}", e))?;
+        .map_err(|e| format!("ffmpeg: {}", e))?;
 
     if status.success() {
         Ok(())
     } else {
         Err(format!(
-            "ffmpeg не смог вырезать фрагмент {:.3}+{:.3}",
+            "ffmpeg: не вырезал {:.3}+{:.3}",
             start_seconds, duration_seconds
         ))
     }
+}
+
+// vad кусок -> whisper, таймкоды + speech.start
+async fn transcribe_vad_speech_segments(
+    client: &reqwest::Client,
+    api_key: &str,
+    original_path: &Path,
+    speech_segments: &[vad::SpeechSegment],
+    language_code: &str,
+    whisper_prompt: Option<&str>,
+    progress_tx: &mpsc::Sender<ProgressEvent>,
+) -> Result<Vec<SubtitleSegment>, String> {
+    let total = speech_segments.len();
+    let temp_dir = std::env::temp_dir().join(format!("vad_whisper_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("temp dir: {}", e))?;
+
+    let mut all_segments: Vec<SubtitleSegment> = Vec::new();
+
+    println!(
+        "[whisper] режим VAD: {} кусков речи → {} запросов API (без склейки)",
+        total, total
+    );
+
+    for (i, speech) in speech_segments.iter().enumerate() {
+        let chunk_index = i + 1;
+        let timeline_start = speech.start;
+        let duration = (speech.end - speech.start).max(0.05);
+
+        let progress = 0.30 + (i as f64 / total as f64) * 0.55;
+        let _ = progress_tx
+            .send(ProgressEvent::InProgress {
+                step: 2,
+                progress,
+                description: format!("Whisper: кусок {} из {}", chunk_index, total),
+            })
+            .await;
+
+        println!(
+            "[whisper] VAD-кусок {} из {} [{} - {}] ({:.1}s)",
+            chunk_index,
+            total,
+            vad::format_timestamp_hms(timeline_start),
+            vad::format_timestamp_hms(speech.end),
+            duration,
+        );
+
+        let chunk_path = temp_dir.join(format!("vad_{:04}.mp3", i));
+        vad::extract_segment_audio(original_path, &chunk_path, timeline_start, duration).await?;
+
+        let file_data = std::fs::read(&chunk_path)
+            .map_err(|e| format!("чтение VAD-куска {}: {}", chunk_index, e))?;
+        let file_size = file_data.len() as u64;
+
+        if file_size <= WHISPER_MAX_FILE_BYTES {
+            let label = format!("vad {}/{}", chunk_index, total);
+            let mut segs = whisper_call(
+                client,
+                api_key,
+                file_data,
+                language_code,
+                whisper_prompt,
+                &label,
+            )
+            .await?;
+            shift_segment_times(&mut segs, timeline_start);
+            println!(
+                "[whisper] VAD-кусок {}: {} субтитр(ов)",
+                chunk_index,
+                segs.len()
+            );
+            all_segments.extend(segs);
+        } else {
+            let sub_count = ((file_size + WHISPER_CHUNK_TARGET_BYTES - 1)
+                / WHISPER_CHUNK_TARGET_BYTES) as usize;
+            let sub_count = sub_count.max(2);
+            let sub_seconds = duration / sub_count as f64;
+            println!(
+                "[whisper] VAD-кусок {} большой ({:.1} MB) — {} подкусков",
+                chunk_index,
+                file_size as f64 / (1024.0 * 1024.0),
+                sub_count
+            );
+            for j in 0..sub_count {
+                let local_start = j as f64 * sub_seconds;
+                let sub_path = temp_dir.join(format!("vad_{:04}_sub{:03}.mp3", i, j));
+                vad::extract_segment_audio(
+                    original_path,
+                    &sub_path,
+                    timeline_start + local_start,
+                    sub_seconds,
+                )
+                .await?;
+                let sub_data = std::fs::read(&sub_path)
+                    .map_err(|e| format!("чтение подкуска {}: {}", j + 1, e))?;
+                let label = format!(
+                    "vad {}/{} sub {}/{}",
+                    chunk_index,
+                    total,
+                    j + 1,
+                    sub_count
+                );
+                let mut segs = whisper_call(
+                    client,
+                    api_key,
+                    sub_data,
+                    language_code,
+                    whisper_prompt,
+                    &label,
+                )
+                .await?;
+                shift_segment_times(&mut segs, timeline_start + local_start);
+                all_segments.extend(segs);
+                let _ = std::fs::remove_file(&sub_path);
+            }
+        }
+
+        let _ = std::fs::remove_file(&chunk_path);
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    for (idx, seg) in all_segments.iter_mut().enumerate() {
+        seg.id = (idx + 1) as u32;
+    }
+
+    println!(
+        "[whisper] итого {} субтитр(ов) из {} VAD-кусков",
+        all_segments.len(),
+        total
+    );
+
+    Ok(all_segments)
 }
 
 fn whisper_segment_dedup_key(text: &str) -> String {
@@ -643,7 +847,7 @@ async fn auto_generate_glossary_from_segments(
     
     let selected_words: Vec<String> = frequent_words
         .into_iter()
-        .take(20) // Максимум 20 терминов
+        .take(20) // макс 20 слов
         .map(|(word, _)| word)
         .collect();
     
@@ -651,7 +855,7 @@ async fn auto_generate_glossary_from_segments(
         return Ok(Vec::new());
     }
     
-    // промпт для GPT
+    // промпт глоссария
     let terms_list = selected_words.join(", ");
     let prompt = format!(
         "Ты эксперт по переводу. Ниже список терминов, которые встречаются в субтитрах.
@@ -688,7 +892,7 @@ async fn auto_generate_glossary_from_segments(
     parse_glossary_response(response)
 }
 
-/// Сегментов за один запрос: иначе JSON обрезается (EOF while parsing)
+// не слишком много сегментов за раз, json режется
 const TRANSLATION_CHUNK_SIZE: usize = 40;
 const TRANSLATION_MAX_TOKENS: u32 = 16384;
 
@@ -817,7 +1021,7 @@ pub async fn translate_batch(
         description: "Подготовка перевода".to_string() 
     }).await;
 
-    // Формируем промпт
+    // собираем промпт
     let _ = progress_tx.send(ProgressEvent::InProgress { 
         step: 1, 
         progress: 0.33, 
@@ -999,7 +1203,7 @@ pub async fn translate_batch(
         }
     }
 
-    // Обрабатываем результат
+    // в ответ
     let _ = progress_tx.send(ProgressEvent::InProgress { 
         step: 3, 
         progress: 0.9, 
@@ -1018,15 +1222,14 @@ pub async fn translate_batch(
         });
     }
 
-    // Применяем глоссарий
+    // глоссарий поверх перевода
     if !glossary.is_empty() {
     for translation in &mut translations {
         if let Some(segment) = segments.iter().find(|s| s.id == translation.id) {
-            // Применяем глоссарий к оригиналу и переводу
             let original_with_glossary = apply_glossary(&segment.text, &glossary);
             translation.translated_text = apply_glossary(&translation.translated_text, &glossary);
             
-            // Логируем изменения для отладки
+            // дебаг если что поменялось
             if original_with_glossary != segment.text {
                 println!(
                     "[translate] глоссарий сегмент #{}: \"{}\" -> \"{}\"",
@@ -1044,7 +1247,7 @@ pub async fn translate_batch(
     Ok(translations)
 }
 
-// Вспомогательные структуры для прогресса
+// прогресс в ui
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProgressPayload {
     pub operation_id: String,
@@ -1104,62 +1307,117 @@ fn parse_segment_words(seg: &serde_json::Value) -> Vec<WhisperWord> {
         .unwrap_or_default()
 }
 
-/// Сокращения, после которых точка НЕ должна считаться концом предложения.
+// mr. dr. и тп - точка не конец фразы
 const SENTENCE_END_EXCEPTIONS: &[&str] = &[
     "mr", "mrs", "ms", "dr", "sr", "jr", "st", "prof", "capt", "lt",
     "vs", "etc", "vol", "no", "fig",
 ];
 
-fn word_ends_sentence(word: &str) -> bool {
-    let trimmed = word.trim_end_matches(|c: char| {
-        matches!(c, '"' | '\'' | '»' | '”' | '’' | ')' | ']' | '}')
-    });
-    let last = trimmed.chars().last();
-    if !matches!(last, Some('.') | Some('!') | Some('?') | Some('…')) {
-        return false;
+// режем сегмент whisper по . ! ? (тайминги из words)
+fn split_segment_into_sentences(
+    seg_text: &str,
+    words: &[WhisperWord],
+) -> Option<Vec<(String, f64, f64)>> {
+    if words.is_empty() || seg_text.is_empty() {
+        return None;
     }
-    let lower = trimmed.to_lowercase();
-    let stem = lower.trim_end_matches(|c: char| matches!(c, '.' | '!' | '?' | '…'));
-    if SENTENCE_END_EXCEPTIONS.contains(&stem) {
-        return false;
-    }
-    true
-}
 
-fn push_sentence<'a>(
-    buf: &mut Vec<&'a WhisperWord>,
-    out: &mut Vec<(String, f64, f64)>,
-) {
-    if buf.is_empty() {
-        return;
+    let lower_text = seg_text.to_lowercase();
+    // lower_text другой длины (ß и тп) - не трогать, уйдет в fallback
+    if lower_text.len() != seg_text.len() {
+        return None;
     }
-    let start = buf.first().unwrap().start;
-    let end = buf.last().unwrap().end;
-    let text = buf
-        .iter()
-        .map(|w| w.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if text.chars().any(|c| c.is_alphanumeric()) {
-        out.push((text, start, end));
-    }
-    buf.clear();
-}
 
-/// Делит поток слов на предложения по терминальным знакам (`.`, `!`, `?`, `…`).
-/// Возвращает кортежи `(text, start, end)`; если знаков нет — один кортеж со всеми словами.
-fn split_words_into_sentences(words: &[WhisperWord]) -> Vec<(String, f64, f64)> {
-    let mut out: Vec<(String, f64, f64)> = Vec::new();
-    let mut buf: Vec<&WhisperWord> = Vec::new();
-
-    for w in words {
-        buf.push(w);
-        if word_ends_sentence(&w.text) {
-            push_sentence(&mut buf, &mut out);
+    let mut positions: Vec<(usize, usize)> = Vec::with_capacity(words.len());
+    let mut cursor = 0usize;
+    for word in words {
+        let needle = word.text.to_lowercase();
+        if needle.is_empty() {
+            continue;
+        }
+        let area = &lower_text[cursor..];
+        match area.find(&needle) {
+            Some(rel) => {
+                let start = cursor + rel;
+                let end = start + needle.len();
+                positions.push((start, end));
+                cursor = end;
+            }
+            None => return None,
         }
     }
-    push_sentence(&mut buf, &mut out);
-    out
+    if positions.is_empty() {
+        return None;
+    }
+
+    let is_terminal = |c: char| matches!(c, '.' | '!' | '?' | '…');
+    let is_closer = |c: char| matches!(c, '»' | '”' | '’' | ')' | ']' | '}');
+
+    let mut out: Vec<(String, f64, f64)> = Vec::new();
+    let mut sent_start_text = 0usize;
+    let mut sent_start_word = 0usize;
+
+    for i in 0..positions.len() {
+        let (_word_start, word_end) = positions[i];
+        let next_start = if i + 1 < positions.len() {
+            positions[i + 1].0
+        } else {
+            seg_text.len()
+        };
+        let between = &seg_text[word_end..next_start];
+
+        let Some(terminal_rel) = between.find(is_terminal) else {
+            continue;
+        };
+
+        // mr dr vs - точку не считаем концом
+        let lw = words[i].text.to_lowercase();
+        let stem: String = lw.chars().filter(|c| c.is_alphabetic()).collect();
+        if SENTENCE_END_EXCEPTIONS.contains(&stem.as_str()) {
+            continue;
+        }
+
+        // после точки еще ) ] » ок, кавычки не трогаем
+        let mut sentence_end = word_end + terminal_rel;
+        let first = seg_text[sentence_end..].chars().next().unwrap();
+        sentence_end += first.len_utf8();
+        while sentence_end < seg_text.len() {
+            let next = seg_text[sentence_end..].chars().next().unwrap();
+            if is_terminal(next) || is_closer(next) {
+                sentence_end += next.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        let sentence_text = seg_text[sent_start_text..sentence_end].trim().to_string();
+        if !sentence_text.is_empty()
+            && sentence_text.chars().any(|c| c.is_alphanumeric())
+        {
+            let start = words[sent_start_word].start;
+            let end = words[i].end;
+            out.push((sentence_text, start, end));
+        }
+        sent_start_text = sentence_end;
+        sent_start_word = i + 1;
+    }
+
+    if sent_start_word < positions.len() {
+        let sentence_text = seg_text[sent_start_text..].trim().to_string();
+        if !sentence_text.is_empty()
+            && sentence_text.chars().any(|c| c.is_alphanumeric())
+        {
+            let start = words[sent_start_word].start;
+            let end = words.last().unwrap().end;
+            out.push((sentence_text, start, end));
+        }
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 const MIN_SUBTITLE_DURATION: f64 = 0.05;
@@ -1178,9 +1436,6 @@ fn make_subtitle_segment(text: String, start: f64, end: f64) -> SubtitleSegment 
     }
 }
 
-/// Один сегмент Whisper → одно или несколько предложений.
-/// При наличии `words[]` разрезаем по терминальной пунктуации и берём
-/// `start`/`end` каждого предложения из таймстампов первого/последнего слова.
 fn parse_whisper_response(response: serde_json::Value) -> Result<Vec<SubtitleSegment>, String> {
     let segments = response["segments"]
         .as_array()
@@ -1213,27 +1468,36 @@ fn parse_whisper_response(response: serde_json::Value) -> Result<Vec<SubtitleSeg
             continue;
         }
 
-        let sentences = split_words_into_sentences(&words);
-        match sentences.len() {
-            0 => {
-                result.push(make_subtitle_segment(seg_text, seg_start, seg_end));
-            }
-            1 => {
-                // Одно предложение в сегменте — сохраняем оригинальный текст
-                // Whisper (с лучшей пунктуацией), уточняя только границы.
-                let (_text, start, end) = &sentences[0];
-                result.push(make_subtitle_segment(seg_text, *start, *end));
-            }
-            _ => {
+        match split_segment_into_sentences(&seg_text, &words) {
+            Some(sentences) if sentences.len() > 1 => {
                 println!(
-                    "[whisper] сегмент [{:.3}..{:.3}] разрезан на {} предложений",
+                    "[whisper] сегмент [{:.3}..{:.3}] разрезан на {} предложений ({} слов)",
                     seg_start,
                     seg_end,
-                    sentences.len()
+                    sentences.len(),
+                    words.len(),
                 );
                 for (text, start, end) in sentences {
                     result.push(make_subtitle_segment(text, start, end));
                 }
+            }
+            Some(_sentences) => {
+                // одно предложение - текст как есть, тайминги по словам
+                let start = words.first().map(|w| w.start).unwrap_or(seg_start);
+                let end = words.last().map(|w| w.end).unwrap_or(seg_end);
+                result.push(make_subtitle_segment(seg_text, start, end));
+            }
+            None => {
+                // words не сматчились с текстом - целиком, не ломать
+                println!(
+                    "[whisper] alignment fallback: words={} не сматчились с текстом (сегмент [{:.3}..{:.3}])",
+                    words.len(),
+                    seg_start,
+                    seg_end,
+                );
+                let start = words.first().map(|w| w.start).unwrap_or(seg_start);
+                let end = words.last().map(|w| w.end).unwrap_or(seg_end);
+                result.push(make_subtitle_segment(seg_text, start, end));
             }
         }
     }
@@ -1256,10 +1520,7 @@ fn parse_translation_response(
     let parsed: serde_json::Value = serde_json::from_str(&normalized_content)
         .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
 
-    // Если структура ответа правильная (массив переводов либо id->text карта),
-    // отдаём то, что распарсилось, даже если внутри попались пустые
-    // Пустой translated_text допустим; подставим оригинал в translate_batch
-    // Пустоты будут заменены оригиналом в translate_batch
+    // json норм - отдаем; пустые строки потом в translate_batch
     if let Some(candidate_array) = find_translation_array(&parsed) {
         let mut results = parse_translation_items(candidate_array);
         results.sort_by_key(|item| item.id);
@@ -1645,12 +1906,12 @@ fn should_drop_glossary_candidate(source: &str, target: &str) -> bool {
     let source_lower = source.to_lowercase();
     let target_lower = target.to_lowercase();
     
-    // Слишком короткие термины
+    // слишком короткие слова
     if source.len() < 3 {
         return true;
     }
     
-    // Общие слова, которые не должны быть в глоссарии
+    // стоп-слова в глоссарий не надо
     let common_words = [
         "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
         "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do",

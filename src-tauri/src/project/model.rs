@@ -32,14 +32,14 @@ pub struct ProjectFile {
     pub path: String,
     pub duration: Option<f64>,
     pub subtitle_segments: Option<Vec<SubtitleSegment>>,
-    /// Связанный файл эпизода: у Video id субтитров, у Subtitle id видео
+    // linked: video <-> subtitle
     #[serde(default)]
     pub linked_file_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
-/// Пол говорящего в реплике (для автоперевода)
+// пол (gender sidecar)
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SpeakerGender {

@@ -2,12 +2,12 @@ import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useR
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ask, open, message } from '@tauri-apps/plugin-dialog';
-import { 
-  ChevronRight, 
-  ChevronDown 
+import {
+	ChevronRight,
+	ChevronDown
 } from 'lucide-react';
 
-// компоненты модальных окон
+// модалки
 import { WelcomeModal } from './components/modals/WelcomeModal';
 import { NewProjectModal } from './components/modals/NewProjectModal';
 import { WizardModal } from './components/modals/WizardModal';
@@ -63,13 +63,14 @@ import iconMore from './assets/icons/more.svg';
 import iconArrowUp from './assets/icons/arrow-up.svg';
 import iconArrowDown from './assets/icons/arrow-down.svg';
 import iconSend from './assets/icons/send.svg';
+import iconZoomIn from './assets/icons/zoom-in.svg';
+import iconZoomOut from './assets/icons/zoom-out.svg';
 import iconPlay from './assets/icons/play.svg';
 import iconPause from './assets/icons/pause.svg';
 import iconStop from './assets/icons/stop.svg';
 import iconVolume from './assets/icons/volume.svg';
 import iconVolumeMute from './assets/icons/volume-mute.svg';
-import iconZoomIn from './assets/icons/zoom-in.svg';
-import iconZoomOut from './assets/icons/zoom-out.svg';
+import appLogo from './assets/app-logo.svg';
 
 function sidebarIconMaskStyle(src: string): React.CSSProperties {
 	return {
@@ -85,9 +86,6 @@ const SIDEBAR_ICON_CLASS =
 	'pointer-events-none inline-block h-7 w-7 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
 
 
-const PANEL_HEADER_ICON_CLASS =
-	'pointer-events-none inline-block h-4 w-4 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
-
 const VIDEO_CTRL_BTN_CLASS =
 	'flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-40';
 
@@ -100,6 +98,9 @@ const VIDEO_CTRL_ICON_STOP =
 const VIDEO_CTRL_ICON_VOL =
 	'pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/vvol:scale-110 group-active/vvol:scale-[0.92]';
 
+const PANEL_HEADER_ICON_CLASS =
+	'pointer-events-none inline-block h-4 w-4 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
+
 const TIMELINE_ZOOM_BTN_CLASS =
 	'flex h-[22px] w-[22px] shrink-0 items-center justify-center border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40';
 
@@ -108,6 +109,15 @@ const TIMELINE_ZOOM_OUT_ICON_CLASS =
 
 const TIMELINE_ZOOM_IN_ICON_CLASS =
 	'pointer-events-none inline-block h-[22px] w-[22px] shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/tzoomin:scale-110 group-active/tzoomin:scale-[0.92]';
+
+function formatPlaybackClock(seconds: number): string {
+	if (!Number.isFinite(seconds) || seconds < 0) return '00:00:00';
+	const h = Math.floor(seconds / 3600);
+	const m = Math.floor((seconds % 3600) / 60);
+	const sec = Math.floor(seconds % 60);
+	const ms = Math.floor((seconds % 1) * 1000);
+	return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+}
 
 function formatSrtTime(seconds: number): string {
 	if (!Number.isFinite(seconds)) return '00:00:00,000';
@@ -261,15 +271,6 @@ function mergeProjectFilesWithDisk(
 	return [...projectFiles, ...extra];
 }
 
-function formatPlaybackClock(seconds: number): string {
-	if (!Number.isFinite(seconds) || seconds < 0) return '00:00:00';
-	const h = Math.floor(seconds / 3600);
-	const m = Math.floor((seconds % 3600) / 60);
-	const s = Math.floor(seconds % 60);
-	const ms = Math.floor((seconds % 1) * 1000);
-	return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
-}
-
 const MIN_SEGMENT_DURATION = 0.05;
 const RETRANSCRIBE_LANGUAGE_OPTIONS: ReadonlyArray<string> = [
 	'English',
@@ -310,7 +311,6 @@ const TIMELINE_EDGE_SCROLL_MARGIN = 48;
 const TIMELINE_EDGE_SCROLL_BASE = 14;
 const ACTIVATION_COMPLETED_STORAGE_KEY = 'subtitle-studio-activation-completed';
 const SHOW_ORIGINAL_VIDEO_SUBTITLES_KEY = 'subtitle-studio-show-original-video-subtitles';
-
 type MenuSubItem =
 	| { kind?: 'item'; label: string; action?: () => void; disabled?: boolean }
 	| { kind: 'toggle'; label: string; checked: boolean; onChange: (checked: boolean) => void }
@@ -327,21 +327,24 @@ function readShowOriginalVideoSubtitles(): boolean {
 	return true;
 }
 
-function subtitleLineAtPlaybackTime(
+function findActiveSegmentAtTime(
+	segments: SubtitleSegment[],
+	currentTime: number
+): SubtitleSegment | undefined {
+	let active: SubtitleSegment | undefined;
+	for (const s of segments) {
+		if (currentTime >= s.start && currentTime < s.end) active = s;
+	}
+	return active;
+}
+
+/** Строка субтитра по времени воспроизведения (без привязки к выделенному сегменту). */
+function subtitleLineAtActiveTime(
 	segments: SubtitleSegment[],
 	currentTime: number,
-	selectedIndex: number,
 	field: 'text' | 'translation'
 ): string {
-	const sel = selectedIndex >= 0 ? segments[selectedIndex] : null;
-	const tolerance = 0.6;
-	if (sel && currentTime >= sel.start - tolerance && currentTime < sel.end) {
-		if (field === 'translation') {
-			return sel.translation?.trim() ?? '';
-		}
-		return sel.text?.trim() ?? '';
-	}
-	const seg = segments.find((s) => currentTime >= s.start && currentTime < s.end);
+	const seg = findActiveSegmentAtTime(segments, currentTime);
 	if (!seg) return '';
 	if (field === 'translation') {
 		return seg.translation?.trim() ?? '';
@@ -353,7 +356,7 @@ function cloneSubtitleSegments(segs: SubtitleSegment[]): SubtitleSegment[] {
 	return segs.map((s) => ({ ...s }));
 }
 
-/** Симметричная аудиоволна генерация */
+// волна на canvas (симметрия)
 function TimelineSymmetricWaveform({
 	peaks,
 	className
@@ -417,7 +420,7 @@ function TimelineSymmetricWaveform({
 			ctx.fillStyle = '#ADFF2F';
 			for (let col = 0; col < w; col++) {
 				const t = w <= 1 ? 0 : col / (w - 1);
-				// nearest-neighbor, чтобы волна не размывалась при зуме
+				// без сглаживания, иначе на зуме мыло
 				const idx = Math.round(t * (n - 1));
 				const v = Math.abs(peaks[Math.max(0, Math.min(n - 1, idx))]) * norm;
 				const amp = Math.min(maxHalf, v * maxHalf * ampGain);
@@ -448,7 +451,7 @@ function TimelineSymmetricWaveform({
 	);
 }
 
-/** Пробел не должен запускать видео, когда фокус в поле ввода, слайдере */
+// пробел в инпуте не play/pause
 function shouldIgnoreSpacebarForVideo(target: EventTarget | null): boolean {
 	if (!target || !(target instanceof Element)) return false;
 	const el = target as HTMLElement;
@@ -456,27 +459,22 @@ function shouldIgnoreSpacebarForVideo(target: EventTarget | null): boolean {
 	const tag = el.tagName;
 	if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
 	if (el.closest('[contenteditable="true"]')) return true;
-	/* range / number inputs часто используют пробел */
+	/* слайдеры тоже */
 	if (el.closest('input[type="range"], [role="slider"]')) return true;
 	return false;
 }
 
-// константы ограничений интерфейса
+// лимиты ui
 const LIMITS = {
   SIDEBAR: 60,
   PROJECT_TREE: { MIN: 150, MAX: 250 },
   AI_AGENT: { MIN: 280, MAX: 400 },
   TABLE: 300,
-  /** Минимальная ширина колонки видео (контролы переносятся — можно уже прежних ~400px) */
-  VIDEO: 220,
+  VIDEO: 220, // мин ширина видео
 };
 
-/** Верхняя строка меню */
 const APP_HEADER_BAR_PX = 32;
-/**
- * Минимальная высота области таймлайна
- */
-const MIN_TIMELINE_PANE_PX = 200;
+const MIN_TIMELINE_PANE_PX = 200; // таймлайн не сжимать сильно
 
 const TIMELINE_ZOOM_MIN = 100;
 const TIMELINE_ZOOM_MAX = 10000;
@@ -522,13 +520,13 @@ export default function App() {
 	const { t, locale } = useI18n();
 	const timelineBtnPx = locale === 'ru' ? 'px-[16px]' : 'px-[12px]';
 
-	// СОСТОЯНИЕ ОКНА И РАЗМЕРОВ ЭКРАНА 
+	// размер окна
 	const [windowSize, setWindowSize] = useState({
 		width: window.innerWidth,
 		height: window.innerHeight
 	});
 
-	// отслеживание изменения размера окна браузера
+	// resize в браузере
 	useEffect(() => {
 		const handleResize = () => {
 			setWindowSize({
@@ -540,7 +538,7 @@ export default function App() {
 		return () => window.removeEventListener('resize', handleResize);
 	}, []);
 
-	// отслеживание изменения размера окна через tauri
+	// resize tauri
 	useEffect(() => {
 		const unlisten = appWindow.listen('tauri://resize', () => {
 			setWindowSize({
@@ -553,18 +551,18 @@ export default function App() {
 		};
 	}, []);
 
-	// СОСТОЯНИЕ ПАНЕЛЕЙ И ИНТЕРФЕЙСА
-	const [projectTreeWidth, setProjectTreeWidth] = useState(240); // ширина иерархии файлов
-	const [aiAgentWidth, setAiAgentWidth] = useState(320); // ширина панели с агентом
-	const [tablePanelWidth, setTablePanelWidth] = useState(800); // ширина таблицы
-	const [upperSectionHeight, setUpperSectionHeight] = useState(450); // высота верхней части (таблица + плеер)
-	const [colWidths, setColWidths] = useState([50, 120, 120, 100]); // ширины колонок таблицы
+	// панели
+	const [projectTreeWidth, setProjectTreeWidth] = useState(240);
+	const [aiAgentWidth, setAiAgentWidth] = useState(320);
+	const [tablePanelWidth, setTablePanelWidth] = useState(800);
+	const [upperSectionHeight, setUpperSectionHeight] = useState(450);
+	const [colWidths, setColWidths] = useState([50, 120, 120, 100]);
 
-	const [isResizing, setIsResizing] = useState(false); // состояние ресайза дерева проекта
-	const [isAiAgentResizing, setIsAiAgentResizing] = useState(false); // состояние ресайза агента
-	const [isVideoFolderOpen, setIsVideoFolderOpen] = useState(true); // открыта ли папка в дереве
+	const [isResizing, setIsResizing] = useState(false);
+	const [isAiAgentResizing, setIsAiAgentResizing] = useState(false);
+	const [isVideoFolderOpen, setIsVideoFolderOpen] = useState(true);
 
-	// --- ЧАТ С AI-АГЕНТОМ ---
+	// чат агента
 	type ChatAttachedSegment = {
 		id: number;
 		start: number;
@@ -607,7 +605,7 @@ export default function App() {
 	const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 	const agentSessionIdRef = useRef<string>(agentSessionIdForProject(undefined));
 
-	// --- ТЕМА И МЕНЮ ---
+	// тема + меню
 	const [isDarkTheme, setIsDarkTheme] = useState(() => {
 		const saved = localStorage.getItem('theme');
 		return saved === 'dark';
@@ -615,13 +613,13 @@ export default function App() {
 
 	const [activeMenu, setActiveMenu] = useState<string | null>(null);
 
-	// применение темы
+	// dark/light
 	useEffect(() => {
 		document.documentElement.classList.toggle('dark', isDarkTheme);
 		localStorage.setItem('theme', isDarkTheme ? 'dark' : 'light');
 	}, [isDarkTheme]);
 
-	// закрытие меню при клике вне его
+	// клик мимо - закрыть меню
 	useEffect(() => {
 		const handleClickOutside = () => setActiveMenu(null);
 		if (activeMenu) {
@@ -630,7 +628,7 @@ export default function App() {
 		return () => window.removeEventListener('click', handleClickOutside);
 	}, [activeMenu]);
 
-	// --- МОДАЛЬНЫЕ ОКНА ---
+	// модалки
 	const [activeModal, setActiveModal] = useState<
 		| 'activation'
 		| 'welcome'
@@ -654,7 +652,7 @@ export default function App() {
 	const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<number>>(() => new Set());
 	const [isConfigFolderOpen, setIsConfigFolderOpen] = useState(false);
 	const [isSubtitlesFolderOpen, setIsSubtitlesFolderOpen] = useState(false);
-	/** Подсветка мастера один раз на проект (сброс при смене path) */
+	// подсветка мастера 1 раз на проект
 	const [wizardSpotlightDismissed, setWizardSpotlightDismissed] = useState(false);
 
 	const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -665,6 +663,8 @@ export default function App() {
 	const segmentEditorPanelRef = useRef<HTMLDivElement | null>(null);
 	const subtitleTableScrollRef = useRef<HTMLDivElement | null>(null);
 	const currentPlaybackTimeRef = useRef(0);
+	const selectedSegmentIndexRef = useRef(-1);
+	const showOriginalVideoSubtitlesRef = useRef(readShowOriginalVideoSubtitles());
 	const zoomAnchorRef = useRef<{ ratio: number; scrollLeft: number; innerW: number } | null>(null);
 	const isPlayingRef = useRef(false);
 	const volumeBeforeMuteRef = useRef(1);
@@ -711,21 +711,20 @@ export default function App() {
 	const [waveformImageSrc, setWaveformImageSrc] = useState<string | null>(null);
 	const [projectDiskFiles, setProjectDiskFiles] = useState<{ relative_path: string; name: string }[]>([]);
 	const [probedMediaDuration, setProbedMediaDuration] = useState<number | null>(null);
-	/** Поля панели субтитра контролируемые, иначе onBlur после Delete пишет не туда */
+	// controlled - иначе delete + blur пишет мусор
 	const [segEditorTranslation, setSegEditorTranslation] = useState('');
 	const [segEditorOriginal, setSegEditorOriginal] = useState('');
 	const [segEditorStart, setSegEditorStart] = useState('');
 	const [segEditorDuration, setSegEditorDuration] = useState('');
-	/** Выделение ЛКМ на треке: превью при перетаскивании */
+	// превью выделения на треке
 	const [timelineRangePreview, setTimelineRangePreview] = useState<{ a: number; b: number } | null>(
 		null
 	);
-	/** Зафиксированный интервал для Insert (пустой субтитр на [start, end]) */
+	// insert: пустой субтитр на выделенном интервале
 	const [timelineInsertRange, setTimelineInsertRange] = useState<{
 		start: number;
 		end: number;
 	} | null>(null);
-	/** Границы последнего выделения на таймлайне */
 	const [timelineRubberRange, setTimelineRubberRange] = useState<{ start: number; end: number } | null>(null);
 	const [timelineContextMenu, setTimelineContextMenu] = useState<{
 		x: number;
@@ -907,6 +906,40 @@ export default function App() {
 		}
 	}, []);
 
+	const seekVideo = useCallback((time: number, opts?: { updateState?: boolean }) => {
+		const nextTime = Math.max(0, time);
+		if (opts?.updateState !== false) setCurrentPlaybackTime(nextTime);
+		currentPlaybackTimeRef.current = nextTime;
+		const v = videoRef.current;
+		if (!v) return;
+		try {
+			v.currentTime = nextTime;
+		} catch {
+			/* noop */
+		}
+	}, []);
+
+	const resetVideo = useCallback(() => {
+		const v = videoRef.current;
+		if (v) {
+			try {
+				v.pause();
+				v.currentTime = 0;
+			} catch {
+				/* noop */
+			}
+		}
+		setIsVideoPlaying(false);
+		setCurrentPlaybackTime(0);
+	}, []);
+
+	const toggleVideoPlay = useCallback(() => {
+		const v = videoRef.current;
+		if (!v) return;
+		if (v.paused) void v.play();
+		else v.pause();
+	}, []);
+
 	const selectSegmentAndSeek = useCallback((idxOrUpdater: number | ((prev: number) => number)) => {
 		setSelectedSegmentIndex((prev) => {
 			const next = typeof idxOrUpdater === 'function' ? idxOrUpdater(prev) : idxOrUpdater;
@@ -914,51 +947,26 @@ export default function App() {
 			const seg = segmentsRef.current[next];
 			if (seg) {
 				const t = Math.max(0, seg.start);
-				setCurrentPlaybackTime(t);
-				const v = videoRef.current;
-				if (v) {
-					try { v.currentTime = t; } catch { /* noop */ }
-				}
+				seekVideo(t);
 				ensureTimelineCenteredAtTime(t);
 			}
 			return next;
 		});
-	}, [ensureTimelineCenteredAtTime]);
+	}, [ensureTimelineCenteredAtTime, seekVideo]);
 	timelineTotalDurationRef.current = timelineTotalDuration;
 	currentPlaybackTimeRef.current = currentPlaybackTime;
+	selectedSegmentIndexRef.current = selectedSegmentIndex;
+	showOriginalVideoSubtitlesRef.current = showOriginalVideoSubtitles;
 
 	const currentVideoTranslationLine = useMemo(
-		() =>
-			subtitleLineAtPlaybackTime(
-				generatedSegments,
-				currentPlaybackTime,
-				selectedSegmentIndex,
-				'translation'
-			),
-		[generatedSegments, currentPlaybackTime, selectedSegmentIndex]
+		() => subtitleLineAtActiveTime(generatedSegments, currentPlaybackTime, 'translation'),
+		[generatedSegments, currentPlaybackTime]
 	);
 
 	const currentVideoOriginalLine = useMemo(
-		() =>
-			subtitleLineAtPlaybackTime(
-				generatedSegments,
-				currentPlaybackTime,
-				selectedSegmentIndex,
-				'text'
-			),
-		[generatedSegments, currentPlaybackTime, selectedSegmentIndex]
+		() => subtitleLineAtActiveTime(generatedSegments, currentPlaybackTime, 'text'),
+		[generatedSegments, currentPlaybackTime]
 	);
-
-	useEffect(() => {
-		try {
-			localStorage.setItem(
-				SHOW_ORIGINAL_VIDEO_SUBTITLES_KEY,
-				showOriginalVideoSubtitles ? '1' : '0'
-			);
-		} catch {
-			/* noop */
-		}
-	}, [showOriginalVideoSubtitles]);
 
 	const timelineSegmentsSorted = useMemo(
 		() =>
@@ -1016,7 +1024,7 @@ export default function App() {
 		setSegEditorDuration(seg.duration.toFixed(3));
 	}, [editorSegmentSig, selectedSegmentIndex]);
 
-	/** Перед save/exit сбрасываем поля панели в проект */
+	// перед save - сбросить редактор в проект
 	const flushSubtitleEditorToProject = useCallback(() => {
 		if (!activeSubtitleFileId || selectedSegmentIndex < 0) return;
 		const cp = currentProjectRef.current;
@@ -1822,17 +1830,7 @@ export default function App() {
 				setTimelineInsertRange(null);
 				undoSegmentsStackRef.current = [];
 				redoSegmentsStackRef.current = [];
-				const v = videoRef.current;
-				if (v) {
-					try {
-						v.pause();
-						v.currentTime = 0;
-					} catch (err) {
-						console.warn('reset video after episode delete', err);
-					}
-				}
-				setIsVideoPlaying(false);
-				setCurrentPlaybackTime(0);
+				resetVideo();
 			}
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
@@ -2188,7 +2186,7 @@ export default function App() {
 	const replaceCaseInsensitive = useCallback((text: string, from: string, to: string): string => {
 		if (!from) return text;
 		const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-		// граница слова (unicode), чтобы не матчить подстроку
+		// целое слово, не подстрока
 		try {
 			const pattern = new RegExp(
 				`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`,
@@ -2237,7 +2235,7 @@ export default function App() {
 		[replaceCaseInsensitive]
 	);
 
-	/** merge сегментов по id, пары для undo */
+	// правки сегментов + undo пары
 	const applySegmentEdits = useCallback(
 		(updated: SubtitleSegment[]): { applied: SubtitleSegment[]; originals: SubtitleSegment[] } => {
 			const cp = currentProjectRef.current;
@@ -3105,7 +3103,8 @@ ${changesText}
 					audioOut,
 					isoLang,
 					userPromptTrimmed.length > 0 ? userPromptTrimmed : undefined,
-					cp.glossary ?? []
+					cp.glossary ?? [],
+					true
 				);
 
 				if (rawSegments.length === 0) {
@@ -3331,23 +3330,19 @@ ${changesText}
 					}
 					setSelectedSegmentIds(new Set());
 					setTimelineInsertRange({ start: lo, end: hi });
-					setCurrentPlaybackTime(lo);
-					const v = videoRef.current;
-					if (v) v.currentTime = lo;
+					seekVideo(lo);
 				} else {
 					setSelectedSegmentIds(new Set());
 					setTimelineInsertRange(null);
 					setTimelineRubberRange(null);
 					const seekT = Math.max(0, Math.min(td, t1));
-					setCurrentPlaybackTime(seekT);
-					const v = videoRef.current;
-					if (v) v.currentTime = seekT;
+					seekVideo(seekT);
 				}
 			};
 			window.addEventListener('pointermove', onMove);
 			window.addEventListener('pointerup', onUp);
 		},
-		[clientXToTimelineTime, timelineScrollFromPointerNearEdge]
+		[clientXToTimelineTime, timelineScrollFromPointerNearEdge, seekVideo]
 	);
 
 	const canSplitAtPlayhead = useMemo(() => {
@@ -3575,22 +3570,19 @@ ${changesText}
 			if (activeModal !== null) return;
 			if (shouldIgnoreSpacebarForVideo(e.target)) return;
 			if (!videoSrc) return;
-			const v = videoRef.current;
-			if (!v) return;
 			e.preventDefault();
-			if (v.paused) void v.play();
-			else v.pause();
+			toggleVideoPlay();
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
-	}, [activeModal, videoSrc]);
+	}, [activeModal, videoSrc, toggleVideoPlay]);
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			if (!e.ctrlKey && !e.metaKey) return;
 			if (activeModal !== null) return;
 			if (shouldIgnoreSpacebarForVideo(e.target)) return;
-			/* e.code — физическая клавиша (KeyZ и т.д.), работает в любой раскладке */
+			/* e.code - раскладка не важна */
 			if (e.code === 'KeyZ' && !e.shiftKey) {
 				e.preventDefault();
 				if (lastUndoDomainRef.current === 'project') {
@@ -3711,9 +3703,13 @@ ${changesText}
 				setActiveModal('welcome');
 			} catch (error) {
 				console.error('Failed to resolve startup modal', error);
-				if (!disposed) {
-					setActiveModal('activation');
+				if (disposed) return;
+				const activationCompleted = localStorage.getItem(ACTIVATION_COMPLETED_STORAGE_KEY) === '1';
+				if (activationCompleted) {
+					setActiveModal('welcome');
+					return;
 				}
+				setActiveModal('activation');
 			}
 		};
 		void resolveStartupModal();
@@ -3769,9 +3765,7 @@ ${changesText}
 		redoSegmentsStackRef.current = [];
 	}, [activeSubtitleFileId]);
 
-	/**
-	 * Длительность через ffprobe совпадает с тем, что ffmpeg кладёт в пнг вейвформы
-	 */
+	// ffprobe duration (как у волны)
 	useEffect(() => {
 		setProbedMediaDuration(null);
 		if (!activeVideoAbsolutePath) return;
@@ -3832,6 +3826,37 @@ ${changesText}
 	}, [activeVideoAbsolutePath, currentProject?.path, activeVideoFile?.id]);
 
 	useEffect(() => {
+		if (!videoSrc) return;
+
+		const apply = () => {
+			const v = videoRef.current;
+			if (!v) return;
+			v.volume = volume;
+			v.muted = videoMuted;
+			const t = currentPlaybackTimeRef.current;
+			try {
+				v.currentTime = t;
+			} catch {
+				/* noop */
+			}
+			setCurrentPlaybackTime(t);
+			if (isPlayingRef.current) void v.play().catch(() => undefined);
+			else v.pause();
+		};
+
+		const raf = requestAnimationFrame(() => {
+			const v = videoRef.current;
+			if (!v) {
+				requestAnimationFrame(apply);
+				return;
+			}
+			if (v.readyState >= 1) apply();
+			else v.addEventListener('loadedmetadata', apply, { once: true });
+		});
+		return () => cancelAnimationFrame(raf);
+	}, [videoSrc, volume, videoMuted]);
+
+	useEffect(() => {
 		const v = videoRef.current;
 		if (v) v.volume = volume;
 	}, [volume]);
@@ -3845,51 +3870,7 @@ ${changesText}
 		if (!videoSrc) setIsVideoPlaying(false);
 	}, [videoSrc]);
 
-	/** Плавная полоска таймлайна */
-	useEffect(() => {
-		if (!videoSrc) return;
-		const v = videoRef.current;
-		if (!v) return;
-
-		let rafId = 0;
-
-		const tick = () => {
-			rafId = 0;
-			if (v.paused || v.ended) return;
-			setCurrentPlaybackTime(v.currentTime);
-			rafId = requestAnimationFrame(tick);
-		};
-
-		const startLoop = () => {
-			if (rafId) cancelAnimationFrame(rafId);
-			rafId = requestAnimationFrame(tick);
-		};
-
-		const onPause = () => {
-			if (rafId) {
-				cancelAnimationFrame(rafId);
-				rafId = 0;
-			}
-			setCurrentPlaybackTime(v.currentTime);
-		};
-
-		const onSeeked = () => setCurrentPlaybackTime(v.currentTime);
-
-		v.addEventListener('play', startLoop);
-		v.addEventListener('pause', onPause);
-		v.addEventListener('seeked', onSeeked);
-
-		if (!v.paused) startLoop();
-
-		return () => {
-			v.removeEventListener('play', startLoop);
-			v.removeEventListener('pause', onPause);
-			v.removeEventListener('seeked', onSeeked);
-			if (rafId) cancelAnimationFrame(rafId);
-		};
-	}, [videoSrc]);
-
-	/** Ползунок нижнего скроллбара */
+	// скроллбар таймлайна
 	const syncTimelineScrollbarThumb = useCallback(() => {
 		const el = timelineScrollRef.current;
 		const thumb = timelineScrollbarThumbRef.current;
@@ -3908,6 +3889,57 @@ ${changesText}
 		thumb.style.width = `${thumbW}%`;
 		thumb.style.left = `${(sl / maxScroll) * travel}%`;
 	}, []);
+
+	/** Плавная полоска таймлайна */
+	useEffect(() => {
+		if (!videoSrc) return;
+		const v = videoRef.current;
+		if (!v) return;
+
+		let rafId = 0;
+
+		const tick = () => {
+			rafId = 0;
+			if (v.paused || v.ended) return;
+			const t = v.currentTime;
+			currentPlaybackTimeRef.current = t;
+			setCurrentPlaybackTime(t);
+			rafId = requestAnimationFrame(tick);
+		};
+
+		const startLoop = () => {
+			if (rafId) cancelAnimationFrame(rafId);
+			rafId = requestAnimationFrame(tick);
+		};
+
+		const onPause = () => {
+			if (rafId) {
+				cancelAnimationFrame(rafId);
+				rafId = 0;
+			}
+			const t = v.currentTime;
+			currentPlaybackTimeRef.current = t;
+			setCurrentPlaybackTime(t);
+		};
+
+		const onSeeked = () => {
+			const t = v.currentTime;
+			currentPlaybackTimeRef.current = t;
+			setCurrentPlaybackTime(t);
+		};
+
+		v.addEventListener('play', startLoop);
+		v.addEventListener('pause', onPause);
+		v.addEventListener('seeked', onSeeked);
+		if (!v.paused) startLoop();
+
+		return () => {
+			v.removeEventListener('play', startLoop);
+			v.removeEventListener('pause', onPause);
+			v.removeEventListener('seeked', onSeeked);
+			if (rafId) cancelAnimationFrame(rafId);
+		};
+	}, [videoSrc]);
 
 	useLayoutEffect(() => {
 		const el = timelineScrollRef.current;
@@ -3983,13 +4015,13 @@ ${changesText}
 
 	const seekVideoFromClientX = useCallback(
 		(clientX: number, barEl: HTMLElement) => {
-			const v = videoRef.current;
-			if (!v) return;
 			const dur = timelineTotalDuration;
 			if (!dur) return;
 			const rect = barEl.getBoundingClientRect();
 			const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
 			const t = ratio * dur;
+			const v = videoRef.current;
+			if (!v) return;
 			v.currentTime = Math.min(t, Number.isFinite(v.duration) && v.duration > 0 ? v.duration : t);
 			setCurrentPlaybackTime(v.currentTime);
 		},
@@ -4088,14 +4120,14 @@ ${changesText}
 		requestAnimationFrame(() => syncTimelineScrollbarThumb());
 	}, [currentPlaybackTime, timelineTotalDuration, syncTimelineScrollbarThumb]);
 
-	// --- ЛОГИКА РЕШАЙЗА пАНЕЛЕЙ ---
+	// ресайз панелей
 
-	// остановка любого ресайза
+	// стоп drag
 	const stopResizing = useCallback(() => {
 		setIsResizing(false);
 	}, []);
 
-	// ресайз дерева проекта
+	// дерево
 	const startResizing = useCallback(() => {
 		setIsResizing(true);
 	}, []);
@@ -4103,7 +4135,8 @@ ${changesText}
 	const resize = useCallback((mouseMoveEvent: MouseEvent) => {
 		if (isResizing) {
 			const newWidth = mouseMoveEvent.clientX - 60;
-			const maxDynamic = windowSize.width - (aiAgentWidth + LIMITS.TABLE + LIMITS.VIDEO + LIMITS.SIDEBAR);
+			const videoReserve = LIMITS.VIDEO;
+			const maxDynamic = windowSize.width - (aiAgentWidth + LIMITS.TABLE + videoReserve + LIMITS.SIDEBAR);
 			const max = Math.min(LIMITS.PROJECT_TREE.MAX, maxDynamic);
 			if (newWidth > LIMITS.PROJECT_TREE.MIN && newWidth < max) {
 				setProjectTreeWidth(newWidth);
@@ -4111,7 +4144,7 @@ ${changesText}
 		}
 	}, [isResizing, windowSize, aiAgentWidth]);
 
-	// слушатели для ресайза дерева
+	// mousemove дерево
 	useEffect(() => {
 		window.addEventListener("mousemove", resize);
 		window.addEventListener("mouseup", stopResizing);
@@ -4121,10 +4154,11 @@ ${changesText}
 		};
 	}, [resize, stopResizing]);
 
-	// контроль ограничений при изменении окна
+	// лимиты при resize окна
 	useEffect(() => {
+		const videoReserve = LIMITS.VIDEO;
 		const totalFixed = 60 + projectTreeWidth + aiAgentWidth;
-		const maxTable = windowSize.width - totalFixed - LIMITS.VIDEO;
+		const maxTable = windowSize.width - totalFixed - videoReserve;
 
 		if (tablePanelWidth > maxTable) {
 			setTablePanelWidth(Math.max(300, maxTable));
@@ -4140,9 +4174,9 @@ ${changesText}
 		if (upperSectionHeight > maxUpper) {
 			setUpperSectionHeight(maxUpper);
 		}
-	}, [windowSize, tablePanelWidth, projectTreeWidth, aiAgentWidth]);
+	}, [windowSize, tablePanelWidth, projectTreeWidth, aiAgentWidth, upperSectionHeight]);
 
-	// ресайз панели аи агента
+	// агент
 	const startAiAgentResizing = useCallback((mouseDownEvent: React.MouseEvent) => {
 		setIsAiAgentResizing(true);
 		const startWidth = aiAgentWidth;
@@ -4150,7 +4184,8 @@ ${changesText}
 		
 		const doDrag = (mouseMoveEvent: MouseEvent) => {
 			const newWidth = startWidth + (mouseMoveEvent.clientX - startX);
-			const maxDynamic = windowSize.width - (LIMITS.SIDEBAR + projectTreeWidth + LIMITS.TABLE + LIMITS.VIDEO);
+			const videoReserve = LIMITS.VIDEO;
+			const maxDynamic = windowSize.width - (LIMITS.SIDEBAR + projectTreeWidth + LIMITS.TABLE + videoReserve);
 			const max = Math.min(LIMITS.AI_AGENT.MAX, maxDynamic);
 			if (newWidth > LIMITS.AI_AGENT.MIN && newWidth < max) {
 				setAiAgentWidth(newWidth);
@@ -4167,7 +4202,7 @@ ${changesText}
 		window.addEventListener('mouseup', stopDrag);
 	}, [aiAgentWidth, windowSize.width, projectTreeWidth]);
 
-	// ресайз таблицы (ширина и высота верхней части)
+	// таблица
 	const startTablePanelResizing = useCallback((direction: 'right' | 'bottom', mouseDownEvent: React.MouseEvent) => {
 		const startWidth = tablePanelWidth;
 		const startHeight = upperSectionHeight;
@@ -4177,8 +4212,9 @@ ${changesText}
 		const doDrag = (e: MouseEvent) => {
 			if (direction === 'right') {
 				const newWidth = startWidth + (e.clientX - startX);
-				const minTableWidth = 400; 
-				const maxAllowedWidth = windowSize.width - (60 + projectTreeWidth + aiAgentWidth) - LIMITS.VIDEO;
+				const minTableWidth = 400;
+				const videoReserve = LIMITS.VIDEO;
+				const maxAllowedWidth = windowSize.width - (60 + projectTreeWidth + aiAgentWidth) - videoReserve;
 
 				if (newWidth >= minTableWidth && newWidth <= maxAllowedWidth) {
 					setTablePanelWidth(newWidth);
@@ -4198,7 +4234,7 @@ ${changesText}
 		window.addEventListener('mouseup', stopDrag);
 	}, [tablePanelWidth, upperSectionHeight, windowSize, projectTreeWidth, aiAgentWidth]);
 
-	// ресайз отдельных колонок таблицы
+	// колонки таблицы
 	const startColResize = useCallback((index: number, mouseDownEvent: React.MouseEvent) => {
 		const startWidth = colWidths[index];
 		const startX = mouseDownEvent.clientX;
@@ -4238,10 +4274,15 @@ ${changesText}
 				
 				{/* ЛЕВАЯ ЧАСТЬ Лого и Меню */}
 				<div className="flex items-center px-2 gap-1" style={{ ['WebkitAppRegion' as any]: 'no-drag' }}>
-					{/* Логотип */}
-					<div className="w-4 h-4 bg-[#C42B1C] rounded-sm flex items-center justify-center text-[10px] text-white font-bold shrink-0 mr-1">
-						SE
-					</div>
+					{/* лого 24x24, файл app-logo.svg */}
+					<img
+						src={appLogo}
+						alt=""
+						width={24}
+						height={24}
+						draggable={false}
+						className="w-6 h-6 shrink-0 mr-1 rounded-[5px] object-cover border border-border-default"
+					/>
 
 					{/* Пункты меню */}
 					<div className="flex items-center gap-0.5">
@@ -4392,7 +4433,7 @@ ${changesText}
 							</div>
 						</div>
 
-						{/* Кнопка мастера в круге — вне overflow-y, свечение не обрезается */}
+						{/* мастер - свечение снаружи overflow */}
 						<div
 							className={`relative flex h-[76px] w-[76px] shrink-0 items-center justify-center overflow-visible py-[14px] ${
 								shouldHighlightWizardCta ? 'z-[60]' : ''
@@ -5014,7 +5055,7 @@ ${changesText}
 						{/* ЛЕВАЯ КОЛОНКА Таблица + Панель редактирования одного субтитра */}
 						<div 
 							style={{ width: `${tablePanelWidth}px` }}
-							className="flex flex-col bg-surface-secondary relative shrink-0 min-w-[300px] border-r border-border-default overflow-hidden"
+							className="flex flex-col bg-surface-secondary relative min-w-[300px] border-r border-border-default overflow-hidden shrink-0"
 						>
 							{/* СЕКЦИЯ С ТАБЛИЦЕЙ */}
 							<div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -5228,7 +5269,7 @@ ${changesText}
 												const d = parseFloat(segEditorDuration.replace(',', '.'));
 												return Number.isFinite(d) && d > 0
 													? (segEditorTranslation.length / d).toFixed(1)
-													: '—';
+													: '–';
 											})()}
 										</span>
 									</div>
@@ -5260,7 +5301,7 @@ ${changesText}
 												const d = parseFloat(segEditorDuration.replace(',', '.'));
 												return Number.isFinite(d) && d > 0
 													? (segEditorOriginal.length / d).toFixed(1)
-													: '—';
+													: '–';
 											})()}
 										</span>
 									</div>
@@ -5270,8 +5311,7 @@ ${changesText}
 							
 						</div>
 						
-						{/* ПАНЕЛЬ ВИДЕОПЛЕЕР */}
-						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[220px] overflow-hidden select-none">
+												<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[220px] overflow-hidden select-none">
 								
 								{/* Область видео */}
 								<div className="flex-1 relative flex flex-col items-center justify-center group bg-[#000000]">
@@ -5322,14 +5362,14 @@ ${changesText}
 										)}
 										{showOriginalVideoSubtitles && (
 											<div className="absolute top-12 z-10 w-full text-center px-10 pointer-events-none">
-												<span className="text-white text-[20px] font-bold leading-[20px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]">
+												<span className="text-white text-[17px] font-bold leading-[17px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]">
 													{currentVideoOriginalLine || '\u00A0'}
 												</span>
 											</div>
 										)}
 										<div className="absolute bottom-12 z-10 w-full text-center px-10 pointer-events-none">
 												<span
-													className="text-white text-[20px] font-bold leading-[20px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]"
+													className="text-white text-[17px] font-bold leading-[17px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]"
 												>
 														{currentVideoTranslationLine || '\u00A0'}
 												</span>
@@ -5477,6 +5517,8 @@ ${changesText}
 
 					</div>
 					
+
+	
 
 					{/*ТАЙМЛАЙН */}
 					<div 
@@ -5779,11 +5821,12 @@ ${changesText}
 				</div>
 			</div>
 
+
 			{shouldHighlightWizardCta && activeModal === null && (
 				<div className="fixed inset-0 z-[50] bg-black/55 pointer-events-none" />
 			)}
 
-			{/* POPUPS LAYER — каждая модалка сама задаёт z-index и pointer-events */}
+			{/* модалки, z-index сами */}
 			{activeModal && (
 				<>
 						{activeModal === 'welcome' && (
@@ -5839,17 +5882,7 @@ ${changesText}
 										null;
 									setActiveSubtitleFileId(withSeg?.id ?? null);
 									setSelectedSegmentIndex(segments.length > 0 ? 0 : -1);
-									const v = videoRef.current;
-									if (v) {
-										try {
-											v.pause();
-											v.currentTime = 0;
-										} catch (err) {
-											console.warn('reset video after wizard', err);
-										}
-									}
-									setIsVideoPlaying(false);
-									setCurrentPlaybackTime(0);
+									resetVideo();
 									if (withSeg?.id) {
 										const stem = getSourceVideoStem(project, withSeg.id);
 										void projectService

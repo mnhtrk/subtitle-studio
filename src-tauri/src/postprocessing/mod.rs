@@ -19,7 +19,7 @@ pub struct PostProcessingResult {
     pub processing_time_ms: u64,
 }
 
-/// Сегментов в одном GPT-вызове. Больше - меньше походов к API, но риск переполнить контекст/ответ
+// сколько сегментов в одном gpt запросе (не раздувать)
 const POSTPROCESS_CHUNK_SIZE: usize = 60;
 
 pub async fn postprocess_transcription(

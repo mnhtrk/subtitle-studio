@@ -860,7 +860,7 @@ pub struct ProjectDiskFile {
     pub name: String,
 }
 
-/// Файлы на диске в `config/`, `video/`, `subtitles/` для дерева проекта
+// список файлов проекта на диске
 #[tauri::command]
 pub async fn list_project_directory_files(project_path: String) -> Result<Vec<ProjectDiskFile>, String> {
     let base = Path::new(&project_path);

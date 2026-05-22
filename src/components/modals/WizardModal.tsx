@@ -21,7 +21,7 @@ function joinProjectPath(base: string, ...parts: string[]): string {
   return `${a}/${rest}`;
 }
 
-/* * После транскрипции: сегменты на дорожке субтитров, видео только медиа, пара связана + .srt на диске */
+// после транскрипции: сегменты, srt на диск, видео+саб связаны
 async function finalizeEpisodePairInProject(
   projectPath: string,
   videoId: string,

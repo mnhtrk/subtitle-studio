@@ -127,7 +127,7 @@ export function mergeAutoGlossary(
 
 export type TranslationHint = { source: string; target: string };
 
-/** «Fonterossa as Red fountain», «перевести X как Y» и т.п. из промпта мастера */
+// вытащить "X as Y" из текста мастера
 export function parseTranslationHintsFromPrompt(prompt: string): TranslationHint[] {
 	const hints: TranslationHint[] = [];
 	const seen = new Set<string>();
@@ -184,7 +184,7 @@ export function mergePromptHintsIntoGlossary(
 	return next;
 }
 
-/** @deprecated Промпт для Whisper собирается на бэкенде (инструкции + user + глоссарий). */
+/** @deprecated whisper prompt теперь на rust */
 export function buildTranscriptionPrompt(
 	userPrompt: string,
 	_glossary: GlossaryEntry[]

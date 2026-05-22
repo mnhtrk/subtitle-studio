@@ -23,7 +23,7 @@ pub async fn generate_waveform(
         return Err(format!("Аудиофайл не найден: {}", audio_path));
     }
     
-    // Проверяем доступность FFmpeg
+    // ffmpeg?
     let ffmpeg_available = is_ffmpeg_available().await;
     if !ffmpeg_available {
         return Err("FFmpeg не установлен в системе".to_string());
@@ -31,10 +31,10 @@ pub async fn generate_waveform(
     
     let resolution = resolution.unwrap_or(50);
     
-    //извлечение аудио данных и генерации вейвформы
+    // волна
     let waveform_data = generate_waveform_with_ffmpeg(audio_path_buf, resolution).await?;
     
-    // Сохраняем данные в JSON файл для фронтенда
+    // json для ui
     let json_data = serde_json::to_string(&waveform_data).map_err(|e| e.to_string())?;
     fs::write(&output_path, json_data).map_err(|e| e.to_string())?;
     
@@ -49,7 +49,7 @@ async fn generate_waveform_with_ffmpeg(
     use std::process::Stdio;
     use tokio::process::Command;
     
-    // Получаем длительность аудио через ffprobe
+    // duration ffprobe
     let duration = get_audio_duration(audio_path).await?;
     
     // Рассчитываем общее количество точек
@@ -114,11 +114,11 @@ async fn generate_waveform_with_ffmpeg(
         
         let slice = &samples[start_idx..end_idx];
         let max_abs = slice.iter()
-            .map(|&sample| sample.abs() as f32)
+            .map(|&sample| sample.unsigned_abs() as f32)
             .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap_or(0.0);
         
-        // Нормализуем значение от 0.0 до 1.0
+        // 0..1
         let normalized = max_abs / 32767.0;
         peaks.push(normalized);
     }
@@ -130,7 +130,7 @@ async fn generate_waveform_with_ffmpeg(
     })
 }
 
-/// Полноширинная картинка вейвформы зеленая
+// png волны (ffmpeg showwavespic)
 #[tauri::command]
 pub async fn generate_waveform_png(
     media_path: String,
@@ -152,7 +152,7 @@ pub async fn generate_waveform_png(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    /* Усиление перед showwavespic, тихие участки не плоские */
+    /* boost перед showwavespic */
     let filter = format!(
         "[0:a]volume=10dB,showwavespic=s={}x{}:colors=0xADFF2F|0x121212",
         w, h
@@ -180,7 +180,7 @@ pub async fn generate_waveform_png(
     Ok(())
 }
 
-/// Длительность медиа через ffprobe для таймкода плеера и импорта
+// ffprobe duration
 #[tauri::command]
 pub async fn probe_media_duration(media_path: String) -> Result<f64, String> {
     let p = Path::new(&media_path);

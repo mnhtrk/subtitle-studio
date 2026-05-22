@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python (Silero VAD / gender sidecar)
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc

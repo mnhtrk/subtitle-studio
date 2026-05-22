@@ -1,0 +1,11 @@
+# Python venv и кеши не должны триггерить hot-reload Tauri dev.
+
+sidecar/**/.venv/
+sidecar/**/__pycache__/
+sidecar/**/*.pyc
+sidecar/**/*.pyo
+
+sidecar/ml/vad.py
+sidecar/ml/classify.py
+sidecar/ml/requirements.txt
+sidecar/ml/README.md

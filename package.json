@@ -6,7 +6,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "icons:taskbar": "tauri icon branding/icon.svg -o src-tauri/icons && node scripts/prune-taskbar-icons.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

@@ -1,0 +1,210 @@
+﻿						{/* ╨Я╨Р╨Э╨Х╨Ы╨м ╨Т╨Ш╨Ф╨Х╨Ю╨Я╨Ы╨Х╨Х╨а */}
+						<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[220px] overflow-hidden select-none">
+								
+								{/* ╨Ю╨▒╨╗╨░╤Б╤В╤М ╨▓╨╕╨┤╨╡╨╛ */}
+								<div className="flex-1 relative flex flex-col items-center justify-center group bg-[#000000]">
+										{videoSrc ? (
+											<video
+												key={activeVideoAbsolutePath ?? 'v'}
+												ref={videoRef}
+												src={videoSrc}
+												className="absolute inset-0 z-0 w-full h-full object-contain"
+												playsInline
+												muted={videoMuted}
+												preload="metadata"
+												onLoadedMetadata={(e) => {
+													const d = e.currentTarget.duration;
+													setVideoDuration(Number.isFinite(d) ? d : 0);
+													e.currentTarget.volume = volume;
+													e.currentTarget.muted = videoMuted;
+												}}
+												onDurationChange={(e) => {
+													const d = e.currentTarget.duration;
+													if (Number.isFinite(d) && d > 0) setVideoDuration(d);
+												}}
+												onPlay={() => {
+													isPlayingRef.current = true;
+													setIsVideoPlaying(true);
+												}}
+												onPause={() => {
+													isPlayingRef.current = false;
+													setIsVideoPlaying(false);
+												}}
+												onEnded={() => {
+													isPlayingRef.current = false;
+													setIsVideoPlaying(false);
+												}}
+												onVolumeChange={(e) => {
+													const vol = e.currentTarget.volume;
+													setVolume(vol);
+													if (vol < 1e-4) setVideoMuted(true);
+												}}
+												onError={() => {
+													console.error('Video load/playback error', activeVideoAbsolutePath, videoSrc);
+												}}
+											/>
+										) : (
+											<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
+												{t('video.preview')}
+											</div>
+										)}
+										{showOriginalVideoSubtitles && (
+											<div className="absolute top-12 z-10 w-full text-center px-10 pointer-events-none">
+												<span className="text-white text-[20px] font-bold leading-[20px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]">
+													{currentVideoOriginalLine || '\u00A0'}
+												</span>
+											</div>
+										)}
+										<div className="absolute bottom-12 z-10 w-full text-center px-10 pointer-events-none">
+												<span
+													className="text-white text-[20px] font-bold leading-[20px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]"
+												>
+														{currentVideoTranslationLine || '\u00A0'}
+												</span>
+										</div>
+								</div>
+
+								{/* ╨Я╨░╨╜╨╡╨╗╤М ╤Г╨┐╤А╨░╨▓╨╗╨╡╨╜╨╕╤П */}
+								<div className="bg-surface-panel border-t border-border-default flex flex-col shrink-0 p-3 m-0 gap-[24px]">
+										<div className="w-full">
+												<div
+													className="relative w-full h-[4px] rounded-[2px] bg-border-default cursor-pointer overflow-hidden"
+													onMouseDown={handleVideoProgressPointerDown}
+												>
+														<div
+															className="absolute left-0 top-0 h-full rounded-[2px] bg-[#9FA3B0]"
+															style={{
+																width: `${timelineTotalDuration ? Math.min(100, (currentPlaybackTime / timelineTotalDuration) * 100) : 0}%`
+															}}
+														/>
+												</div>
+										</div>
+
+										{/* ╨Ъ╨╛╨╜╤В╤А╨╛╨╗╤Л: ╨┐╤А╨╕ ╤Г╨╖╨║╨╛╨╣ ╨┐╨░╨╜╨╡╨╗╨╕ ╤В╨░╨╣╨╝╨║╨╛╨┤ ╨┐╨╡╤А╨╡╨╜╨╛╤Б╨╕╤В╤Б╤П ╨▓╨╜╨╕╨╖ ╨╕ ╨▓╤Л╤А╨░╨▓╨╜╨╕╨▓╨░╨╡╤В╤Б╤П ╤Б╨╗╨╡╨▓╨░ */}
+										<div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 w-full min-w-0">
+												<div className="flex items-center gap-[12px] shrink-0 min-w-0">
+														<button
+															type="button"
+															title={isVideoPlaying ? t('video.pause') : t('video.play')}
+															aria-label={isVideoPlaying ? t('video.pause') : t('video.play')}
+															disabled={!videoSrc}
+															className={`group/vplay ${VIDEO_CTRL_BTN_CLASS}`}
+															onClick={() => {
+																const v = videoRef.current;
+																if (!v) return;
+																if (v.paused) void v.play();
+																else v.pause();
+															}}
+														>
+															<span
+																className={VIDEO_CTRL_ICON_PLAY}
+																style={sidebarIconMaskStyle(
+																	isVideoPlaying ? iconPause : iconPlay
+																)}
+																aria-hidden
+															/>
+														</button>
+														<button
+															type="button"
+															title={t('video.stop')}
+															aria-label={t('video.stop')}
+															disabled={!videoSrc}
+															className={`group/vstop ${VIDEO_CTRL_BTN_CLASS}`}
+															onClick={() => {
+																const v = videoRef.current;
+																if (!v) return;
+																v.pause();
+																v.currentTime = 0;
+																setCurrentPlaybackTime(0);
+															}}
+														>
+															<span
+																className={VIDEO_CTRL_ICON_STOP}
+																style={sidebarIconMaskStyle(iconStop)}
+																aria-hidden
+															/>
+														</button>
+														<button
+															type="button"
+															title={
+																videoMuted || volume < 1e-4
+																	? t('video.unmute')
+																	: t('video.mute')
+															}
+															aria-label={
+																videoMuted || volume < 1e-4
+																	? t('video.unmute')
+																	: t('video.mute')
+															}
+															disabled={!videoSrc}
+															className={`group/vvol ${VIDEO_CTRL_BTN_CLASS}`}
+															onClick={() => {
+																const v = videoRef.current;
+																if (!v) return;
+																const next = !videoMuted;
+																if (next) {
+																	volumeBeforeMuteRef.current = v.volume;
+																	v.volume = 0;
+																	setVolume(0);
+																	v.muted = true;
+																	setVideoMuted(true);
+																} else {
+																	const restore = Math.max(
+																		1e-3,
+																		volumeBeforeMuteRef.current
+																	);
+																	v.volume = restore;
+																	setVolume(restore);
+																	v.muted = false;
+																	setVideoMuted(false);
+																}
+															}}
+														>
+															<span
+																className={VIDEO_CTRL_ICON_VOL}
+																style={sidebarIconMaskStyle(
+																	videoMuted || volume < 1e-4
+																		? iconVolumeMute
+																		: iconVolume
+																)}
+																aria-hidden
+															/>
+														</button>
+														
+														{/* ╨б╨╗╨░╨╣╨┤╨╡╤А ╨│╤А╨╛╨╝╨║╨╛╤Б╤В╨╕ */}
+														<div
+															className="w-16 h-[4px] rounded-[2px] bg-border-default relative shrink-0 cursor-pointer overflow-hidden"
+															onMouseDown={handleVolumePointerDown}
+														>
+																<div
+																	className="absolute left-0 top-0 h-full rounded-[2px] bg-primary-disabled"
+																	style={{
+																		width: `${volume * 100}%`
+																	}}
+																/>
+														</div>
+												</div>
+
+												{/* ╨в╨░╨╣╨╝╨║╨╛╨┤╤Л */}
+												<div
+													className="flex items-center gap-1 text-[12px] text-body-med text-text-primary shrink-0 tabular-nums whitespace-nowrap"
+													style={{ fontVariantNumeric: 'tabular-nums' }}
+												>
+														<span className="inline-block text-right">
+															{formatPlaybackClock(currentPlaybackTime)}
+														</span>
+														<span className="text-text-secondary/40">/</span>
+														<span className="inline-block text-text-secondary">
+															{formatPlaybackClock(timelineTotalDuration)}
+														</span>
+												</div>
+										</div>
+								</div>
+								
+						</div>
+
+					</div>
+					
+
+					{/*╨в╨Р╨Щ╨Ь╨Ы╨Р╨Щ╨Э */}
+					<div 
