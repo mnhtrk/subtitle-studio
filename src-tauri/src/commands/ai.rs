@@ -80,7 +80,7 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
                     .map(|s| s.to_string())
                     .collect();
                 
-                let required_models = ["whisper-1", "gpt-5.4-mini"];
+                let required_models = ["whisper-1", "gpt-5.4"];
                 let has_required = required_models.iter().all(|model| {
                     available_models.iter().any(|m| m.contains(model))
                 });
@@ -94,7 +94,10 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
                 } else {
                     Ok(ApiKeyValidation {
                         is_valid: false,
-                        error_message: Some("Ключ действителен, но недоступны необходимые модели (whisper-1, gpt-5.4-mini)".to_string()),
+                        error_message: Some(
+                            "Ключ действителен, но недоступны необходимые модели (whisper-1, gpt-5.4)"
+                                .to_string(),
+                        ),
                         model_access: available_models,
                     })
                 }
@@ -125,9 +128,67 @@ fn log_debug_block(title: &str, body: &str) {
     println!("{shown}");
     if count > DEBUG_LOG_MAX_CHARS {
         println!(
-            "[… усечено вывода: показано ~{DEBUG_LOG_MAX_CHARS} символов из {count}]"
+            "[усечено: показано ~{DEBUG_LOG_MAX_CHARS} символов из {count}]"
         );
     }
+}
+
+fn format_subtitle_time(seconds: f64) -> String {
+    let total = seconds.max(0.0);
+    let m = (total as u64) / 60;
+    let s = total % 60.0;
+    format!("{m:02}:{s:05.2}")
+}
+
+fn format_segments_for_debug(segments: &[SubtitleSegment]) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(segments.len() + 1);
+    lines.push(format!(
+        "  {:>3}  {:>11}  {:>7}  {}",
+        "id", "time", "gender", "text"
+    ));
+    lines.push("  ---  -----------  -------  ----".to_string());
+    for s in segments {
+        let gender = s
+            .speaker_gender
+            .as_ref()
+            .map(|g| g.as_str())
+            .unwrap_or("unknown");
+        lines.push(format!(
+            "  {:>3}  {}-{}  {:>7}  {}",
+            s.id,
+            format_subtitle_time(s.start),
+            format_subtitle_time(s.end),
+            gender,
+            s.text
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_translation_response_for_debug(response: &serde_json::Value) -> String {
+    let content = response["choices"][0]["message"]["content"].as_str();
+    let Some(raw) = content else {
+        return "(нет content в ответе)".to_string();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return format!("(не JSON)\n{raw}");
+    };
+    let Some(arr) = find_translation_array(&parsed) else {
+        return serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| raw.to_string());
+    };
+    let mut lines = vec!["  id  translation".to_string(), "  ---  -----------".to_string()];
+    for item in arr {
+        let id = item.get("id").map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+        let text = item
+            .get("translated_text")
+            .or_else(|| item.get("translation"))
+            .or_else(|| item.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let one_line: String = text.lines().collect::<Vec<_>>().join(" ");
+        lines.push(format!("  {id:>3}  {one_line}"));
+    }
+    lines.join("\n")
 }
 
 #[tauri::command]
@@ -295,8 +356,26 @@ pub async fn transcribe_audio(
             })
             .await;
 
-        let speech_segments =
+        let raw_vad =
             vad::detect_speech_segments(audio_path, vad::VadParams::default()).await?;
+        const VAD_MARGIN_PRE_SEC: f64 = 0.15;
+        const VAD_MARGIN_POST_SEC: f64 = 2.0;
+        const VAD_CHUNK_GAP_SEC: f64 = 0.08;
+        let merged = vad::merge_nearby_speech_segments(&raw_vad, 0.45);
+        let speech_segments = vad::expand_speech_margins(
+            &merged,
+            VAD_MARGIN_PRE_SEC,
+            VAD_MARGIN_POST_SEC,
+            VAD_CHUNK_GAP_SEC,
+        );
+        vad::log_vad_whisper_overlap(&speech_segments);
+        if raw_vad.len() != speech_segments.len() {
+            println!(
+                "[vad] после merge+margin: {} → {} кусков речи",
+                raw_vad.len(),
+                speech_segments.len()
+            );
+        }
 
         if speech_segments.is_empty() {
             return Err(
@@ -324,7 +403,7 @@ pub async fn transcribe_audio(
         })
         .await;
 
-    let segments = sanitize_whisper_segments(raw_segments);
+    let segments = apply_subtitle_timing_postprocess(sanitize_whisper_segments(raw_segments));
 
     let postprocessed_result = postprocessing::postprocess_transcription(
         segments,
@@ -354,11 +433,11 @@ pub async fn transcribe_audio(
     let _auto_glossary = if final_segments.len() > 5 {
         match auto_generate_glossary_from_segments(&final_segments, "ru", &api_key).await {
             Ok(glossary) => {
-                println!("✅ Автоматический глоссарий создан: {} терминов", glossary.len());
+                println!("[glossary] автоглоссарий: {} терминов", glossary.len());
                 Some(glossary)
             }
             Err(e) => {
-                println!("⚠️ Ошибка генерации глоссария: {}", e);
+                println!("[glossary] ошибка генерации: {}", e);
                 None
             }
         }
@@ -372,7 +451,7 @@ pub async fn transcribe_audio(
         })
         .await;
 
-    println!("✅ Транскрибация завершена: {} сегментов", final_segments.len());
+    println!("[transcribe] завершено: {} сегментов", final_segments.len());
     Ok(final_segments)
 }
 
@@ -869,7 +948,7 @@ async fn auto_generate_glossary_from_segments(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
+            "model": CHAT_COMPLETION_MODEL,
             "messages": [
                 { "role": "system", "content": prompt },
                 { "role": "user", "content": terms_list }
@@ -895,9 +974,38 @@ async fn auto_generate_glossary_from_segments(
 // не слишком много сегментов за раз, json режется
 const TRANSLATION_CHUNK_SIZE: usize = 40;
 const TRANSLATION_MAX_TOKENS: u32 = 16384;
+const CHAT_COMPLETION_MODEL: &str = "gpt-5.4";
 
-fn language_needs_speaker_gender(lang: &str) -> bool {
-    let l = lang.trim().to_lowercase();
+/// Язык перевода из UI («Russian», «ru», «Русский») → ISO для правил рода.
+fn normalize_target_language_iso(raw: &str) -> Option<String> {
+    let lower = raw.trim().to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    let iso = match lower.as_str() {
+        "en" | "english" | "английский" => "en",
+        "ru" | "russian" | "русский" => "ru",
+        "uk" | "ukrainian" | "украинский" => "uk",
+        "pl" | "polish" | "польский" => "pl",
+        "cs" | "czech" | "чешский" => "cs",
+        "sk" | "slovak" | "словацкий" => "sk",
+        "be" | "belarusian" | "белорусский" => "be",
+        "sr" | "serbian" | "сербский" => "sr",
+        "hr" | "croatian" | "хорватский" => "hr",
+        "bg" | "bulgarian" | "болгарский" => "bg",
+        "es" | "spanish" | "испанский" => "es",
+        "fr" | "french" | "французский" => "fr",
+        "de" | "german" | "немецкий" => "de",
+        "it" | "italian" | "итальянский" => "it",
+        "pt" | "portuguese" | "португальский" => "pt",
+        code if code.len() == 2 && code.chars().all(|c| c.is_ascii_lowercase()) => code,
+        _ => return None,
+    };
+    Some(iso.to_string())
+}
+
+fn language_needs_speaker_gender(lang_iso: &str) -> bool {
+    let l = lang_iso.trim().to_lowercase();
     matches!(
         l.as_str(),
         "ru" | "uk" | "pl" | "cs" | "sk" | "be" | "sr" | "hr" | "bg"
@@ -906,16 +1014,42 @@ fn language_needs_speaker_gender(lang: &str) -> bool {
         || l.starts_with("pl-")
 }
 
+fn dialogue_context_translation_rules(target_language: &str) -> String {
+    let iso = match normalize_target_language_iso(target_language) {
+        Some(code) => code,
+        None => return String::new(),
+    };
+    if !language_needs_speaker_gender(&iso) {
+        return "- В user JSON все segments[] — одна сцена; переводи согласованно с соседними репликами.\n"
+            .to_string();
+    }
+    "Диалог (обязательно):\n\
+     - В user JSON весь пакет segments[] — одна сцена; сначала прочитай ВСЕ реплики по порядку id/времени\n\
+     - Определи, кто говорит в каждой строке (speaker_gender) и кому адресована реплика (часто другой голос в соседних id)\n\
+     - Переводи каждый id отдельно, но грамматику и смысл согласуй с предыдущими и следующими репликами — не изолированно\n\
+     - Чередование male/female по id обычно = двое собеседников (вопрос/ответ)\n\n"
+        .to_string()
+}
+
 fn speaker_gender_translation_rules(target_language: &str) -> String {
-    if !language_needs_speaker_gender(target_language) {
+    let iso = match normalize_target_language_iso(target_language) {
+        Some(code) => code,
+        None => return String::new(),
+    };
+    if !language_needs_speaker_gender(&iso) {
         return String::new();
     }
-    "Пол говорящего (поле speaker_gender в JSON каждого сегмента):\n\
-     - male/female/unknown по тональности голоса в этой реплике\n\
-     - Для форм от первого лица говорящего (я ...) согласуй род с speaker_gender: female - женский, male - мужской\n\
-     - При unknown не угадывай род говорящего\n\
-     - Пол персонажей в тексте или в глоссарии (о ком говорят) учитывай отдельно, не подменяй speaker_gender\n\n"
-        .to_string()
+    format!(
+        "Согласование по полу на языке перевода ({target_language}):\n\
+         - speaker_gender = кто произносит ЭТУ строку (не путать с собеседником)\n\
+         - Первая лица (я/мы, глаголы и местоимения говорящего): строго по speaker_gender этого id\n\
+         - Вторая лица (ты/вы к собеседнику): по полу АДРЕСАТА, не по speaker_gender говорящей реплики\n\
+         - Описание «о себе» (меня, мой, один/одна и т.п. рядом с «мной»): по speaker_gender говорящего\n\
+         - В одной фразе могут сочетаться формы к адресату и к говорящему — это нормально\n\
+         - Грамматика исходного текста (окончания, согласования) подсказывает пол говорящего и адресата — сверяй с соседними репликами\n\
+         - При speaker_gender unknown — выводи из контекста всего пакета segments[] и глоссария\n",
+        target_language = target_language.trim(),
+    )
 }
 
 async fn translate_segments_chunk(
@@ -935,6 +1069,8 @@ async fn translate_segments_chunk(
             });
             if let Some(g) = &s.speaker_gender {
                 obj["speaker_gender"] = serde_json::json!(g.as_str());
+            } else {
+                obj["speaker_gender"] = serde_json::json!("unknown");
             }
             obj
         }).collect::<Vec<_>>()
@@ -942,20 +1078,22 @@ async fn translate_segments_chunk(
 
     let user_content = serde_json::to_string(&segments_text).map_err(|e| e.to_string())?;
 
+    let segments_debug = format_segments_for_debug(chunk);
     log_debug_block(
         &format!("перевод [{log_label}]: запрос"),
         &format!(
-            "model: gpt-5.4-mini\n\
-            temperature: 0.3\n\
-            max_completion_tokens: {TRANSLATION_MAX_TOKENS}\n\
-            response_format: json_object\n\
-            \n\
-            --- system ---\n\
-            {prompt}\n\
-            \n\
-            --- user (JSON, {} симв.) ---\n\
-            {user_content}",
-            user_content.len()
+            "model: {CHAT_COMPLETION_MODEL}\n\
+temperature: 0.3\n\
+max_completion_tokens: {TRANSLATION_MAX_TOKENS}\n\
+response_format: json_object\n\
+сегментов в пакете: {}\n\
+\n\
+--- system ---\n\
+{prompt}\n\
+\n\
+--- user: сегменты (в API уходит JSON) ---\n\
+{segments_debug}",
+            chunk.len(),
         ),
     );
 
@@ -963,7 +1101,7 @@ async fn translate_segments_chunk(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
+            "model": CHAT_COMPLETION_MODEL,
             "messages": [
                 { "role": "system", "content": prompt },
                 { "role": "user", "content": user_content }
@@ -983,10 +1121,9 @@ async fn translate_segments_chunk(
     }
 
     let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let pretty = serde_json::to_string_pretty(&response).unwrap_or_else(|e| e.to_string());
     log_debug_block(
-        &format!("перевод [{log_label}]: ответ OpenAI"),
-        &pretty,
+        &format!("перевод [{log_label}]: ответ"),
+        &format_translation_response_for_debug(&response),
     );
     parse_translation_response(response)
 }
@@ -1057,7 +1194,21 @@ pub async fn translate_batch(
         )
     };
     
+    let target_iso = normalize_target_language_iso(&target_language);
+    let dialogue_hint = dialogue_context_translation_rules(&target_language);
     let gender_hint = speaker_gender_translation_rules(&target_language);
+    if gender_hint.is_empty() {
+        println!(
+            "[translate] диалог+род: только базовый контекст (target={:?}, iso={:?})",
+            target_language, target_iso
+        );
+    } else {
+        println!(
+            "[translate] диалог+род: полный блок (target={}, iso={})",
+            target_language,
+            target_iso.as_deref().unwrap_or("?")
+        );
+    }
 
     let mandatory_lines: Vec<String> = glossary
         .iter()
@@ -1084,21 +1235,25 @@ pub async fn translate_batch(
         {mandatory_block}\
         {glossary_text}\
         СТИЛЬ ПЕРЕВОДА: {style_prompt}\n\n\
-        {gender_hint}\
+        {dialogue_hint}\
         Требования к переводу:\n\
+        {gender_hint}\
         - Сохраняй естественность речи на целевом языке\n\
-        - Учитывай контекст диалога\n\
+        - Субтитры обычно для дубляжа: перевод произносят вслух за время реплики — не удлиняй без нужды\n\
+        - Ориентир длины: поле text в JSON (исходник); перевод не длиннее оригинала, если смысл сохраняется\n\
+        - Не добавляй лишние вступления и не дроби одну короткую фразу на два вопроса; одна мысль в источнике → одна компактная фраза\n\
+        - Предпочитай короткие синонимы; лишние слова убирай, но не жертвуй смыслом и грамматикой\n\
         - Соблюдай глоссарий терминов (если указан); в глоссарии может быть пол персонажей, о которых идет речь в третьем лице\n\
         - Имена персонажей, прозвища, названия мест и другие имена собственные локализуй на целевой язык, если это уместно\n\
-        - Если в глоссарии есть конкретная форма имени/термина, используй строго её\n\
-        - Длина перевода должна быть сопоставима с оригиналом для синхронизации с видео\n\n\
-        Пример: \"My name is Dipper.\" -> \"Меня зовут Диппер.\"\n\n\
+        - Если в глоссарии есть конкретная форма имени/термина, используй строго её\n\n\
+        Пример локализации имени: \"My name is Alex.\" -> \"Меня зовут Алекс.\"\n\n\
         Верни JSON-объект с ключом \"translations\": массив объектов \
         {{\"id\": число, \"translated_text\": \"текст\"}} по одному на каждый сегмент из запроса.",
         target_language = target_language,
         mandatory_block = mandatory_block,
         glossary_text = glossary_text,
         style_prompt = style_prompt,
+        dialogue_hint = dialogue_hint,
         gender_hint = gender_hint,
     );
 
@@ -1421,6 +1576,83 @@ fn split_segment_into_sentences(
 }
 
 const MIN_SUBTITLE_DURATION: f64 = 0.05;
+/// Минимальное время на экране (короткие реплики из одного слова).
+const MIN_SUBTITLE_DISPLAY_SEC: f64 = 1.25;
+/// Небольшой хвост после последнего слова Whisper.
+const SUBTITLE_END_PAD_SEC: f64 = 0.30;
+/// Ориентир скорости чтения (символов/с) для длинных строк.
+const SUBTITLE_CHARS_PER_SEC: f64 = 17.0;
+const SUBTITLE_MIN_GAP_SEC: f64 = 0.05;
+
+fn subtitle_min_display_duration(text: &str) -> f64 {
+    let chars = text.chars().filter(|c| !c.is_whitespace()).count();
+    let by_reading = if chars == 0 {
+        MIN_SUBTITLE_DISPLAY_SEC
+    } else {
+        (chars as f64 / SUBTITLE_CHARS_PER_SEC).max(MIN_SUBTITLE_DISPLAY_SEC)
+    };
+    by_reading
+}
+
+/// Удлиняет короткие субтитры и убирает пересечения таймингов после Whisper.
+fn apply_subtitle_timing_postprocess(mut segments: Vec<SubtitleSegment>) -> Vec<SubtitleSegment> {
+    if segments.is_empty() {
+        return segments;
+    }
+    segments.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let n = segments.len();
+    for i in 0..n {
+        let min_dur = subtitle_min_display_duration(&segments[i].text);
+        let mut desired_end = segments[i].start + min_dur + SUBTITLE_END_PAD_SEC;
+        desired_end = desired_end.max(segments[i].end);
+        let cap = if i + 1 < n {
+            segments[i + 1].start - SUBTITLE_MIN_GAP_SEC
+        } else {
+            f64::INFINITY
+        };
+        if desired_end > cap {
+            desired_end = cap.max(segments[i].start + MIN_SUBTITLE_DURATION);
+        }
+        segments[i].end = desired_end.max(segments[i].start + MIN_SUBTITLE_DURATION);
+        segments[i].duration = segments[i].end - segments[i].start;
+    }
+
+    fix_overlapping_subtitles(&mut segments);
+
+    for (idx, seg) in segments.iter_mut().enumerate() {
+        seg.id = (idx + 1) as u32;
+    }
+    segments
+}
+
+fn fix_overlapping_subtitles(segments: &mut [SubtitleSegment]) {
+    if segments.len() < 2 {
+        return;
+    }
+    for i in 0..segments.len() - 1 {
+        let next_start = segments[i + 1].start;
+        let min_end = segments[i].start + MIN_SUBTITLE_DURATION;
+        if segments[i].end > next_start - SUBTITLE_MIN_GAP_SEC {
+            let new_end = (next_start - SUBTITLE_MIN_GAP_SEC).max(min_end);
+            if (segments[i].end - new_end).abs() > 0.001 {
+                println!(
+                    "[timing] overlap: сегмент #{} end {:.3} → {:.3} (след. start {:.3})",
+                    segments[i].id,
+                    segments[i].end,
+                    new_end,
+                    next_start
+                );
+            }
+            segments[i].end = new_end;
+            segments[i].duration = segments[i].end - segments[i].start;
+        }
+    }
+}
 
 fn make_subtitle_segment(text: String, start: f64, end: f64) -> SubtitleSegment {
     let end = end.max(start + MIN_SUBTITLE_DURATION);
@@ -1731,7 +1963,7 @@ pub async fn auto_generate_glossary(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(&api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
+            "model": CHAT_COMPLETION_MODEL,
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": user_content }
@@ -1875,7 +2107,7 @@ async fn localize_untranslated_glossary_terms(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
+            "model": CHAT_COMPLETION_MODEL,
             "messages": [
                 { "role": "system", "content": prompt },
                 { "role": "user", "content": terms_list }

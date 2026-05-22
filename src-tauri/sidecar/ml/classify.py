@@ -1,4 +1,4 @@
-"""gender sidecar, json построчно stdin/stdout"""
+"""gender sidecar (norwood male/female), json построчно stdin/stdout"""
 
 from __future__ import annotations
 
@@ -8,12 +8,11 @@ import time
 import traceback
 from typing import Any
 
-
-MODEL_NAME = "prithivMLmods/Common-Voice-Gender-Detection"
+# https://huggingface.co/norwoodsystems/norwood-maleVSfemale (~95M params, wav2vec2-base)
+MODEL_NAME = "norwoodsystems/norwood-maleVSfemale"
 SAMPLE_RATE = 16_000
-MIN_CLIP_SEC = 0.30
-CONFIDENCE_THRESHOLD = 0.60
-ID2LABEL = {0: "female", 1: "male"}
+MIN_CLIP_SEC = 0.05
+CONFIDENCE_THRESHOLD = 0.55
 
 
 def emit(obj: dict[str, Any]) -> None:
@@ -25,25 +24,55 @@ def log(msg: str) -> None:
     emit({"type": "log", "msg": msg})
 
 
+def normalize_label(label: str) -> str:
+    lower = label.strip().lower()
+    if lower in ("male", "m", "man"):
+        return "male"
+    if lower in ("female", "f", "woman"):
+        return "female"
+    return lower
+
+
+def resolve_gender(scores: dict[str, float]) -> tuple[str, str | None]:
+    male = scores.get("male", 0.0)
+    female = scores.get("female", 0.0)
+    if male >= female:
+        label, top = "male", male
+    else:
+        label, top = "female", female
+    if top < CONFIDENCE_THRESHOLD:
+        return "unknown", f"top {label}={top:.2f} < {CONFIDENCE_THRESHOLD}"
+    return label, None
+
+
+def predictions_to_scores(preds: list[dict[str, Any]]) -> dict[str, float]:
+    scores = {"male": 0.0, "female": 0.0}
+    for item in preds:
+        key = normalize_label(str(item.get("label", "")))
+        if key in scores:
+            scores[key] = float(item.get("score", 0.0))
+    return scores
+
+
 def main() -> None:
     t_import = time.time()
     import numpy as np
     import torch
     import librosa
-    from transformers import (
-        Wav2Vec2ForSequenceClassification,
-        Wav2Vec2FeatureExtractor,
-    )
+    from transformers import pipeline
 
     log(f"imports ready in {time.time() - t_import:.2f}s")
 
     torch.set_num_threads(max(1, (torch.get_num_threads() or 4) // 2))
 
     t0 = time.time()
-    log(f"loading model {MODEL_NAME}")
-    model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_NAME)
-    processor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
-    model.eval()
+    log(f"loading model {MODEL_NAME} (первый раз: скачивание с Hugging Face в кэш)")
+    classifier = pipeline(
+        "audio-classification",
+        model=MODEL_NAME,
+        device="cpu",
+        top_k=2,
+    )
     log(f"model loaded in {time.time() - t0:.2f}s")
 
     audio: np.ndarray | None = None
@@ -80,6 +109,7 @@ def main() -> None:
                     "type": "ready",
                     "duration": audio_duration,
                     "device": "cpu",
+                    "model": MODEL_NAME,
                 })
             except Exception as exc:
                 emit({"type": "error", "error": f"load failed: {exc}"})
@@ -105,8 +135,8 @@ def main() -> None:
                     })
                     continue
 
-                i0 = max(0, int(start * SAMPLE_RATE))
-                i1 = min(len(audio), int(end * SAMPLE_RATE))
+                i0 = max(0, int(round(start * SAMPLE_RATE)))
+                i1 = min(len(audio), int(round(end * SAMPLE_RATE)))
                 if i1 <= i0:
                     emit({
                         "type": "result",
@@ -120,42 +150,36 @@ def main() -> None:
 
                 clip = audio[i0:i1]
                 t_inf = time.time()
-                inputs = processor(
-                    clip,
-                    sampling_rate=SAMPLE_RATE,
-                    return_tensors="pt",
-                    padding=True,
+
+                preds = classifier(
+                    {"array": clip, "sampling_rate": SAMPLE_RATE},
+                    top_k=2,
                 )
-                with torch.no_grad():
-                    logits = model(**inputs).logits
-                    probs = torch.softmax(logits, dim=1).squeeze().tolist()
-                if not isinstance(probs, list):
-                    probs = [probs]
                 duration_ms = (time.time() - t_inf) * 1000.0
 
-                scores = {
-                    ID2LABEL[i]: round(float(probs[i]), 4)
-                    for i in range(len(probs))
-                }
-                top_idx = max(range(len(probs)), key=lambda i: probs[i])
-                top_label = ID2LABEL[top_idx]
-                top_prob = float(probs[top_idx])
-                gender = top_label if top_prob >= CONFIDENCE_THRESHOLD else "unknown"
+                scores = predictions_to_scores(preds)
+                rounded = {k: round(v, 4) for k, v in scores.items()}
+                gender, reason = resolve_gender(scores)
 
                 result: dict[str, Any] = {
                     "type": "result",
                     "id": seg_id,
                     "gender": gender,
-                    "scores": scores,
+                    "scores": rounded,
                     "duration_ms": round(duration_ms, 2),
+                    "clip_start": round(start, 3),
+                    "clip_end": round(end, 3),
+                    "clip_sec": round(clip_sec, 3),
                 }
-                if gender == "unknown" and top_prob < CONFIDENCE_THRESHOLD:
-                    result["reason"] = (
-                        f"top {top_label}={top_prob:.2f} < threshold {CONFIDENCE_THRESHOLD}"
-                    )
+                if reason:
+                    result["reason"] = reason
                 emit(result)
             except Exception as exc:
-                emit({"type": "error", "error": f"classify failed: {exc}"})
+                emit({
+                    "type": "error",
+                    "error": f"classify failed: {exc}",
+                    "trace": traceback.format_exc(),
+                })
 
         elif cmd == "quit":
             log("quit received")

@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use lazy_static::lazy_static;
 use regex::Regex;
 
-const AGENT_MODEL: &str = "gpt-5.4-mini";
+const AGENT_MODEL: &str = "gpt-5.4";
 const MAX_SEGMENTS_IN_PROMPT: usize = 200;
 const MAX_HISTORY_TURNS: usize = 30;
 

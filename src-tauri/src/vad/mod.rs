@@ -21,13 +21,83 @@ pub struct VadParams {
 }
 
 impl Default for VadParams {
-    // threshold пониже = ловит тихую речь
+    // threshold ниже = раньше старт речи; speech_pad и min_silence — запас по краям и меньше ранних обрывов
     fn default() -> Self {
         Self {
-            speech_pad_ms: 200,
-            min_silence_duration_ms: 900,
-            min_speech_duration_ms: 300,
-            threshold: 0.40,
+            speech_pad_ms: 400,
+            min_silence_duration_ms: 1200,
+            min_speech_duration_ms: 250,
+            threshold: 0.25,
+        }
+    }
+}
+
+/// Склеивает соседние VAD-куски, если пауза между ними короче max_gap_sec (речь в паузе не теряется).
+pub fn merge_nearby_speech_segments(
+    segments: &[SpeechSegment],
+    max_gap_sec: f64,
+) -> Vec<SpeechSegment> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted: Vec<SpeechSegment> = segments.to_vec();
+    sorted.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out: Vec<SpeechSegment> = Vec::with_capacity(sorted.len());
+    out.push(sorted[0]);
+    for seg in sorted.into_iter().skip(1) {
+        let last = out.last_mut().expect("out non-empty");
+        if seg.start - last.end <= max_gap_sec {
+            last.end = last.end.max(seg.end);
+        } else {
+            out.push(seg);
+        }
+    }
+    out
+}
+
+/// Запас до/после Silero без пересечения соседних кусков (иначе Whisper дублирует начало реплики).
+pub fn expand_speech_margins(
+    segments: &[SpeechSegment],
+    pre_sec: f64,
+    post_sec: f64,
+    min_gap_sec: f64,
+) -> Vec<SpeechSegment> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let n = segments.len();
+    let mut out: Vec<SpeechSegment> = Vec::with_capacity(n);
+    for i in 0..n {
+        let s = segments[i];
+        let mut start = (s.start - pre_sec).max(0.0);
+        if i > 0 {
+            start = start.max(out[i - 1].end + min_gap_sec);
+        }
+        let mut end = s.end + post_sec;
+        if i + 1 < n {
+            let cap = segments[i + 1].start - min_gap_sec;
+            if cap > s.end {
+                end = end.min(cap);
+            } else {
+                end = s.end.max(start + 0.05);
+            }
+        }
+        end = end.max(start + 0.05);
+        out.push(SpeechSegment { start, end });
+    }
+    out
+}
+
+/// Логирует пересечения диапазонов, уходящих в Whisper (должно быть пусто после expand_speech_margins).
+pub fn log_vad_whisper_overlap(segments: &[SpeechSegment]) {
+    for w in segments.windows(2) {
+        let overlap = w[0].end - w[1].start;
+        if overlap > 0.001 {
+            eprintln!(
+                "[vad] ПЕРЕСЕЧЕНИЕ кусков Whisper: [{:.3}..{:.3}] и [{:.3}..{:.3}] overlap {:.3}s",
+                w[0].start, w[0].end, w[1].start, w[1].end, overlap
+            );
         }
     }
 }

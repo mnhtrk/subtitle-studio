@@ -248,7 +248,7 @@ async fn fix_with_gpt(
             .post("https://api.openai.com/v1/chat/completions")
             .bearer_auth(api_key)
             .json(&serde_json::json!({
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.4",
                 "messages": [
                     { "role": "system", "content": system_prompt },
                     { "role": "user", "content": user_content }

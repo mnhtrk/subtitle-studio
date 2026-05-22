@@ -7,7 +7,18 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 
 use crate::project::{SpeakerGender, SubtitleSegment};
 
-// пол по репликам через python sidecar
+/// Точные границы субтитра (без расширения — иначе в клип попадает соседняя реплика).
+fn exact_clip_range(seg_start: f64, seg_end: f64, audio_duration: f64) -> (f64, f64) {
+    let start = seg_start.max(0.0);
+    let end = if audio_duration > 0.0 {
+        seg_end.min(audio_duration)
+    } else {
+        seg_end
+    };
+    (start, end.max(start + 0.001))
+}
+
+// пол по репликам через python sidecar (один запрос = один субтитр, его start/end)
 pub async fn assign_speaker_genders(
     audio_path: &Path,
     segments: &mut [SubtitleSegment],
@@ -21,6 +32,7 @@ pub async fn assign_speaker_genders(
         "[gender] sidecar python={:?} script={:?}",
         paths.python_exe, paths.script_path
     );
+    println!("[gender] режим: ровно тайминги субтитра на реплику, без расширения клипа");
 
     let mut child = Command::new(&paths.python_exe)
         .arg(&paths.script_path)
@@ -54,6 +66,7 @@ pub async fn assign_speaker_genders(
     });
     send_cmd(&mut stdin, init_cmd).await?;
 
+    let mut audio_duration = 0.0_f64;
     let t_init = std::time::Instant::now();
     loop {
         let line = read_line(&mut reader).await?;
@@ -68,7 +81,7 @@ pub async fn assign_speaker_genders(
                 }
             }
             Some("ready") => {
-                let duration = event
+                audio_duration = event
                     .get("duration")
                     .and_then(|x| x.as_f64())
                     .unwrap_or(0.0);
@@ -77,9 +90,9 @@ pub async fn assign_speaker_genders(
                     .and_then(|x| x.as_str())
                     .unwrap_or("?");
                 println!(
-                    "[gender] sidecar готов за {:.2}s, audio_duration={:.2}s, device={}",
+                    "[gender] sidecar готов за {:.2}s, audio_duration={:.3}s, device={}",
                     t_init.elapsed().as_secs_f32(),
-                    duration,
+                    audio_duration,
                     device,
                 );
                 break;
@@ -96,6 +109,10 @@ pub async fn assign_speaker_genders(
         }
     }
 
+    if audio_duration <= 0.0 {
+        audio_duration = segments.iter().map(|s| s.end).fold(0.0_f64, f64::max);
+    }
+
     let total = segments.len();
     let t_classify = std::time::Instant::now();
     let mut male = 0usize;
@@ -104,11 +121,12 @@ pub async fn assign_speaker_genders(
     let mut total_inf_ms = 0.0f64;
 
     for seg in segments.iter_mut() {
+        let (clip_start, clip_end) = exact_clip_range(seg.start, seg.end, audio_duration);
         let req = json!({
             "cmd": "classify",
             "id": seg.id,
-            "start": seg.start,
-            "end": seg.end,
+            "start": clip_start,
+            "end": clip_end,
         });
         send_cmd(&mut stdin, req).await?;
 
@@ -155,8 +173,8 @@ pub async fn assign_speaker_genders(
                         format!(" ({})", reason)
                     };
                     println!(
-                        "[gender] #{} [{:.2}..{:.2}] -> {} scores={} inf={:.1}ms{}",
-                        seg.id, seg.start, seg.end, gender_str, scores, duration_ms, reason_part,
+                        "[gender] #{} clip {:.3}-{:.3} -> {} scores={} inf={:.1}ms{}",
+                        seg.id, clip_start, clip_end, gender_str, scores, duration_ms, reason_part,
                     );
                     break;
                 }
@@ -231,4 +249,3 @@ async fn read_line(reader: &mut Lines<BufReader<ChildStdout>>) -> Result<String,
         .map_err(|e| format!("Ошибка чтения sidecar: {}", e))?
         .ok_or_else(|| "sidecar закрылся неожиданно".to_string())
 }
-
