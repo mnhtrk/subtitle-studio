@@ -65,6 +65,8 @@ fn main() {
             commands::audio::generate_waveform,
             commands::audio::generate_waveform_png,
             commands::audio::probe_media_duration,
+            commands::audio::extract_video_preview_frame,
+            commands::audio::ensure_faststart_playback_proxy,
             commands::files::list_project_directory_files,
             commands::files::import_existing_subtitles,
             commands::files::parse_subtitle_file,

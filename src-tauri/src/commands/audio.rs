@@ -1,5 +1,8 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::fs;
+use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -178,6 +181,136 @@ pub async fn generate_waveform_png(
 
     println!("✅ waveform PNG: {}", output_png_path);
     Ok(())
+}
+
+/// Быстрый кадр для превью при перемотке (ffmpeg -ss перед -i).
+#[tauri::command]
+pub async fn extract_video_preview_frame(
+    app: tauri::AppHandle,
+    video_path: String,
+    time_secs: f64,
+) -> Result<String, String> {
+    use tauri::Manager;
+    use tokio::process::Command;
+
+    if !is_ffmpeg_available().await {
+        return Err("ffmpeg не найден".to_string());
+    }
+
+    let media = Path::new(&video_path);
+    if !media.exists() {
+        return Err(format!("Файл не найден: {}", video_path));
+    }
+
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("cache dir: {}", e))?;
+    fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    let out = cache.join("video_preview_scratch.jpg");
+    let t = time_secs.max(0.0);
+
+    let status = Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-ss")
+        .arg(format!("{:.3}", t))
+        .arg("-i")
+        .arg(&video_path)
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-q:v")
+        .arg("4")
+        .arg("-vf")
+        .arg("scale=-2:480")
+        .arg("-an")
+        .arg(&out)
+        .output()
+        .await
+        .map_err(|e| format!("ffmpeg preview: {}", e))?;
+
+    if !status.status.success() {
+        let err = String::from_utf8_lossy(&status.stderr);
+        return Err(format!("ffmpeg preview: {}", err.trim()));
+    }
+
+    Ok(out.to_string_lossy().to_string())
+}
+
+fn playback_proxy_cache_key(source: &Path) -> Result<(u64, u64), String> {
+    let meta = fs::metadata(source).map_err(|e| e.to_string())?;
+    let modified = meta
+        .modified()
+        .map_err(|e| e.to_string())?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let mut hasher = DefaultHasher::new();
+    source.to_string_lossy().hash(&mut hasher);
+    modified.hash(&mut hasher);
+    Ok((hasher.finish(), modified))
+}
+
+/// MP4 с moov в начале — WebView быстрее перематывает длинные файлы.
+#[tauri::command]
+pub async fn ensure_faststart_playback_proxy(
+    app: tauri::AppHandle,
+    video_path: String,
+) -> Result<String, String> {
+    use tauri::Manager;
+    use tokio::process::Command;
+
+    let source = Path::new(&video_path);
+    if !source.exists() {
+        return Err(format!("Файл не найден: {}", video_path));
+    }
+
+    let (hash, _modified) = playback_proxy_cache_key(source)?;
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("cache dir: {}", e))?
+        .join("playback_proxy");
+    fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    let proxy = cache.join(format!("{:016x}.mp4", hash));
+
+    if proxy.exists() {
+        if let (Ok(src_m), Ok(proxy_m)) = (fs::metadata(source), fs::metadata(&proxy)) {
+            if let (Ok(sm), Ok(pm)) = (src_m.modified(), proxy_m.modified()) {
+                if pm >= sm {
+                    return Ok(proxy.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    if !is_ffmpeg_available().await {
+        return Ok(video_path);
+    }
+
+    let status = Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-i")
+        .arg(&video_path)
+        .arg("-c")
+        .arg("copy")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg(&proxy)
+        .output()
+        .await
+        .map_err(|e| format!("ffmpeg faststart: {}", e))?;
+
+    if status.status.success() && proxy.exists() {
+        return Ok(proxy.to_string_lossy().to_string());
+    }
+
+    Ok(video_path)
 }
 
 // ffprobe duration

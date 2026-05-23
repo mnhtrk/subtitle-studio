@@ -274,6 +274,14 @@ export const projectService = {
     return await invoke('probe_media_duration', { mediaPath });
   },
 
+  extractVideoPreviewFrame: async (videoPath: string, timeSecs: number): Promise<string> => {
+    return await invoke('extract_video_preview_frame', { videoPath, timeSecs });
+  },
+
+  ensureFaststartPlaybackProxy: async (videoPath: string): Promise<string> => {
+    return await invoke('ensure_faststart_playback_proxy', { videoPath });
+  },
+
   listProjectDirectoryFiles: async (
     projectPath: string
   ): Promise<{ relative_path: string; name: string }[]> => {

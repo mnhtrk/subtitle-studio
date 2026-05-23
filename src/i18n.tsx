@@ -123,6 +123,7 @@ const enMessages = {
 	},
 	video: {
 		preview: 'Video Preview',
+		preparing: 'Preparing smooth playback…',
 		play: 'Play',
 		pause: 'Pause',
 		stop: 'Stop',
@@ -447,6 +448,7 @@ const ruMessages: Messages = {
 	},
 	video: {
 		preview: 'Просмотр видео',
+		preparing: 'Подготовка плавного воспроизведения…',
 		play: 'Воспроизведение',
 		pause: 'Пауза',
 		stop: 'Стоп',

@@ -21,6 +21,7 @@ import { ActivationModal } from './components/modals/ActivationModal';
 import { SettingsModal } from './components/modals/SettingsModal';
 import { AboutModal } from './components/modals/AboutModal';
 import { useI18n } from './i18n';
+import { VideoPlayer } from './components/VideoPlayer';
 
 const appWindow = getCurrentWindow();
 
@@ -313,6 +314,29 @@ const TIMELINE_EDGE_SCROLL_MARGIN = 48;
 const TIMELINE_EDGE_SCROLL_BASE = 14;
 const ACTIVATION_COMPLETED_STORAGE_KEY = 'subtitle-studio-activation-completed';
 const SHOW_ORIGINAL_VIDEO_SUBTITLES_KEY = 'subtitle-studio-show-original-video-subtitles';
+/** Реже коммитим время в React во время play — UI идёт через DOM + requestVideoFrameCallback. */
+const PLAYBACK_UI_STATE_COMMIT_MS = 400;
+/** Прокрутка таймлайна за плейхедом — не каждый кадр. */
+const PLAYBACK_TIMELINE_FOLLOW_MS = 200;
+/** Порог (с), ниже которого повторный seek к видео не делаем. */
+const SEEK_TIME_EPSILON = 0.02;
+const TIMELINE_CLICK_MOVE_PX = 5;
+function setVideoCurrentTime(v: HTMLVideoElement, time: number, fast = true) {
+	const t = Math.max(0, time);
+	if (fast && typeof v.fastSeek === 'function') {
+		try {
+			v.fastSeek(t);
+			return;
+		} catch {
+			/* fallback */
+		}
+	}
+	try {
+		v.currentTime = t;
+	} catch {
+		/* noop */
+	}
+}
 type MenuSubItem =
 	| { kind?: 'item'; label: string; action?: () => void; disabled?: boolean }
 	| { kind: 'toggle'; label: string; checked: boolean; onChange: (checked: boolean) => void }
@@ -338,20 +362,6 @@ function findActiveSegmentAtTime(
 		if (currentTime >= s.start && currentTime < s.end) active = s;
 	}
 	return active;
-}
-
-/** Строка субтитра по времени воспроизведения (без привязки к выделенному сегменту). */
-function subtitleLineAtActiveTime(
-	segments: SubtitleSegment[],
-	currentTime: number,
-	field: 'text' | 'translation'
-): string {
-	const seg = findActiveSegmentAtTime(segments, currentTime);
-	if (!seg) return '';
-	if (field === 'translation') {
-		return seg.translation?.trim() ?? '';
-	}
-	return seg.text?.trim() ?? '';
 }
 
 function cloneSubtitleSegments(segs: SubtitleSegment[]): SubtitleSegment[] {
@@ -673,6 +683,35 @@ export default function App() {
 	const segmentEditorPanelRef = useRef<HTMLDivElement | null>(null);
 	const subtitleTableScrollRef = useRef<HTMLDivElement | null>(null);
 	const currentPlaybackTimeRef = useRef(0);
+	const videoProgressFillRef = useRef<HTMLDivElement | null>(null);
+	const timelinePlayheadRef = useRef<HTMLDivElement | null>(null);
+	const playbackClockRef = useRef<HTMLSpanElement | null>(null);
+	const videoTranslationOverlayRef = useRef<HTMLSpanElement | null>(null);
+	const videoOriginalOverlayRef = useRef<HTMLSpanElement | null>(null);
+	const lastPlaybackOverlaySigRef = useRef('');
+	const segEditorTranslationRef = useRef('');
+	const segEditorOriginalRef = useRef('');
+	const syncSubtitleOverlayRef = useRef<(t: number, force?: boolean) => void>(() => {});
+	const lastPlaybackStateCommitRef = useRef(0);
+	const lastTimelineFollowRef = useRef(0);
+	const applyPlaybackUiRef = useRef<
+		(t: number, opts?: { commitState?: boolean; followTimeline?: boolean }) => void
+	>(() => {});
+	const scrubSeekRafRef = useRef(0);
+	const scrubSeekPendingRef = useRef<number | null>(null);
+	const userScrubbingRef = useRef(false);
+	const wasPlayingBeforeTimelinePointerRef = useRef(false);
+	const pendingVideoSeekRef = useRef<number | null>(null);
+	const activeVideoAbsolutePathRef = useRef<string | null>(null);
+	const ffmpegPreviewOkRef = useRef<boolean | null>(null);
+	const previewFrameGenRef = useRef(0);
+	const previewFrameLastTimeRef = useRef(-1);
+	const previewFrameRafRef = useRef(0);
+	const previewFramePendingRef = useRef<number | null>(null);
+	const [previewFrameSrc, setPreviewFrameSrc] = useState<string | null>(null);
+	const [playbackVideoPath, setPlaybackVideoPath] = useState<string | null>(null);
+	const [playbackPreparing, setPlaybackPreparing] = useState(false);
+	const lastPlaybackCommitSegIdRef = useRef<number | null>(null);
 	const selectedSegmentIndexRef = useRef(-1);
 	const showOriginalVideoSubtitlesRef = useRef(readShowOriginalVideoSubtitles());
 	const zoomAnchorRef = useRef<{ ratio: number; scrollLeft: number; innerW: number } | null>(null);
@@ -850,15 +889,79 @@ export default function App() {
 		return currentProject.files.find((f) => f.file_type === 'Video') ?? null;
 	}, [currentProject, activeSubtitleFileId]);
 
+	const clearPreviewFrame = useCallback(() => {
+		previewFrameGenRef.current += 1;
+		setPreviewFrameSrc(null);
+	}, []);
+
+	const schedulePreviewFrame = useCallback((time: number) => {
+		if (isPlayingRef.current) return;
+		const path = activeVideoAbsolutePathRef.current;
+		if (!path || ffmpegPreviewOkRef.current === false) return;
+		if (
+			previewFrameLastTimeRef.current >= 0 &&
+			Math.abs(time - previewFrameLastTimeRef.current) < 0.08
+		) {
+			return;
+		}
+		previewFramePendingRef.current = time;
+		if (previewFrameRafRef.current) return;
+		previewFrameRafRef.current = requestAnimationFrame(() => {
+			previewFrameRafRef.current = 0;
+			const t = previewFramePendingRef.current;
+			if (t == null) return;
+			previewFramePendingRef.current = null;
+			previewFrameLastTimeRef.current = t;
+			const gen = ++previewFrameGenRef.current;
+			void projectService
+				.extractVideoPreviewFrame(path, t)
+				.then((outPath) => {
+					if (gen !== previewFrameGenRef.current) return;
+					ffmpegPreviewOkRef.current = true;
+					setPreviewFrameSrc(convertFileSrc(outPath.replace(/\\/g, '/')));
+				})
+				.catch(() => {
+					if (gen !== previewFrameGenRef.current) return;
+					ffmpegPreviewOkRef.current = false;
+				});
+		});
+	}, []);
+
 	const activeVideoAbsolutePath = useMemo(() => {
 		if (!currentProject || !activeVideoFile) return null;
 		return joinProjectPath(currentProject.path, activeVideoFile.path);
 	}, [currentProject, activeVideoFile]);
 
 	const videoSrc = useMemo(() => {
-		if (!activeVideoAbsolutePath) return null;
-		const normalized = activeVideoAbsolutePath.replace(/\\/g, '/');
-		return convertFileSrc(normalized);
+		const path = playbackVideoPath ?? activeVideoAbsolutePath;
+		if (!path) return null;
+		return convertFileSrc(path.replace(/\\/g, '/'));
+	}, [playbackVideoPath, activeVideoAbsolutePath]);
+	activeVideoAbsolutePathRef.current = activeVideoAbsolutePath ?? null;
+
+	useEffect(() => {
+		if (!activeVideoAbsolutePath) {
+			setPlaybackVideoPath(null);
+			setPlaybackPreparing(false);
+			return;
+		}
+		let cancelled = false;
+		setPlaybackPreparing(true);
+		setPlaybackVideoPath(null);
+		void projectService
+			.ensureFaststartPlaybackProxy(activeVideoAbsolutePath)
+			.then((p) => {
+				if (!cancelled) setPlaybackVideoPath(p.replace(/\\/g, '/'));
+			})
+			.catch(() => {
+				if (!cancelled) setPlaybackVideoPath(activeVideoAbsolutePath.replace(/\\/g, '/'));
+			})
+			.finally(() => {
+				if (!cancelled) setPlaybackPreparing(false);
+			});
+		return () => {
+			cancelled = true;
+		};
 	}, [activeVideoAbsolutePath]);
 
 	const maxSegmentEnd = useMemo(
@@ -916,18 +1019,52 @@ export default function App() {
 		}
 	}, []);
 
-	const seekVideo = useCallback((time: number, opts?: { updateState?: boolean }) => {
-		const nextTime = Math.max(0, time);
-		if (opts?.updateState !== false) setCurrentPlaybackTime(nextTime);
-		currentPlaybackTimeRef.current = nextTime;
-		const v = videoRef.current;
-		if (!v) return;
-		try {
-			v.currentTime = nextTime;
-		} catch {
-			/* noop */
-		}
-	}, []);
+	const seekVideo = useCallback(
+		(
+			time: number,
+			opts?: {
+				updateState?: boolean;
+				followTimeline?: boolean;
+				syncVideo?: boolean;
+				throttle?: boolean;
+				force?: boolean;
+				preview?: boolean;
+			}
+		) => {
+			const nextTime = Math.max(0, time);
+			const run = () => {
+				const v = videoRef.current;
+				const syncVideo = opts?.syncVideo !== false;
+				if (v && syncVideo) {
+					const cur = Number.isFinite(v.currentTime) ? v.currentTime : 0;
+					if (opts?.force || Math.abs(cur - nextTime) > SEEK_TIME_EPSILON) {
+						pendingVideoSeekRef.current = nextTime;
+						setVideoCurrentTime(v, nextTime, true);
+					}
+				}
+				if (opts?.preview !== false && !isPlayingRef.current) schedulePreviewFrame(nextTime);
+				applyPlaybackUiRef.current(nextTime, {
+					commitState: opts?.updateState !== false,
+					followTimeline: opts?.followTimeline !== false
+				});
+			};
+
+			if (opts?.throttle) {
+				scrubSeekPendingRef.current = nextTime;
+				if (scrubSeekRafRef.current) return;
+				scrubSeekRafRef.current = requestAnimationFrame(() => {
+					scrubSeekRafRef.current = 0;
+					const t = scrubSeekPendingRef.current;
+					if (t == null) return;
+					scrubSeekPendingRef.current = null;
+					run();
+				});
+				return;
+			}
+			run();
+		},
+		[schedulePreviewFrame]
+	);
 
 	const resetVideo = useCallback(() => {
 		const v = videoRef.current;
@@ -940,8 +1077,8 @@ export default function App() {
 			}
 		}
 		setIsVideoPlaying(false);
-		setCurrentPlaybackTime(0);
-	}, []);
+		seekVideo(0);
+	}, [seekVideo]);
 
 	const toggleVideoPlay = useCallback(() => {
 		const v = videoRef.current;
@@ -964,19 +1101,22 @@ export default function App() {
 		});
 	}, [ensureTimelineCenteredAtTime, seekVideo]);
 	timelineTotalDurationRef.current = timelineTotalDuration;
-	currentPlaybackTimeRef.current = currentPlaybackTime;
 	selectedSegmentIndexRef.current = selectedSegmentIndex;
 	showOriginalVideoSubtitlesRef.current = showOriginalVideoSubtitles;
+	segEditorTranslationRef.current = segEditorTranslation;
+	segEditorOriginalRef.current = segEditorOriginal;
 
-	const currentVideoTranslationLine = useMemo(
-		() => subtitleLineAtActiveTime(generatedSegments, currentPlaybackTime, 'translation'),
-		[generatedSegments, currentPlaybackTime]
-	);
+	useEffect(() => {
+		const v = videoRef.current;
+		const t =
+			v && Number.isFinite(v.currentTime) ? v.currentTime : currentPlaybackTimeRef.current;
+		syncSubtitleOverlayRef.current(t, true);
+		applyPlaybackUiRef.current(t, { commitState: !isPlayingRef.current });
+	}, [generatedSegments, showOriginalVideoSubtitles]);
 
-	const currentVideoOriginalLine = useMemo(
-		() => subtitleLineAtActiveTime(generatedSegments, currentPlaybackTime, 'text'),
-		[generatedSegments, currentPlaybackTime]
-	);
+	useEffect(() => {
+		syncSubtitleOverlayRef.current(currentPlaybackTimeRef.current, true);
+	}, [segEditorTranslation, segEditorOriginal, selectedSegmentIndex]);
 
 	const timelineSegmentsSorted = useMemo(
 		() =>
@@ -1288,6 +1428,7 @@ export default function App() {
 				)
 			};
 			currentProjectRef.current = nextProject;
+			segmentsRef.current = segments;
 			setGeneratedSegments(segments);
 			setCurrentProject(nextProject);
 			markProjectDirty();
@@ -1297,6 +1438,8 @@ export default function App() {
 			const newLen = segments.length;
 			if (newLen === 0) setSelectedSegmentIndex(-1);
 			else setSelectedSegmentIndex(Math.min(Math.max(0, firstDeletedIdx), newLen - 1));
+			lastPlaybackOverlaySigRef.current = '';
+			syncSubtitleOverlayRef.current(currentPlaybackTimeRef.current, true);
 			return;
 		}
 
@@ -1314,9 +1457,12 @@ export default function App() {
 				)
 			};
 			currentProjectRef.current = nextProject;
+			segmentsRef.current = segments;
 			setGeneratedSegments(segments);
 			setCurrentProject(nextProject);
 			markProjectDirty();
+			lastPlaybackOverlaySigRef.current = '';
+			syncSubtitleOverlayRef.current(currentPlaybackTimeRef.current, true);
 			const newLen = segments.length;
 			if (newLen === 0) {
 				setSelectedSegmentIndex(-1);
@@ -3345,28 +3491,47 @@ ${changesText}
 			if (el.closest('[data-tl-edge]')) return;
 			e.preventDefault();
 			setTimelineInsertRange(null);
+			const v = videoRef.current;
+			wasPlayingBeforeTimelinePointerRef.current = v ? !v.paused : false;
+			const pointerDownX = e.clientX;
+			let moved = false;
 			const t0 = clientXToTimelineTime(e.clientX);
 			timelineRangeSelectDragRef.current = { t0 };
 			setTimelineRangePreview({ a: t0, b: t0 });
+			seekVideo(t0, { updateState: true, followTimeline: false, force: true });
 
 			const onMove = (ev: PointerEvent) => {
 				if (!timelineRangeSelectDragRef.current) return;
+				if (!moved && Math.abs(ev.clientX - pointerDownX) >= TIMELINE_CLICK_MOVE_PX) {
+					moved = true;
+					userScrubbingRef.current = true;
+				}
 				timelineScrollFromPointerNearEdge(ev.clientX);
 				const t = clientXToTimelineTime(ev.clientX);
 				const d = timelineRangeSelectDragRef.current;
 				setTimelineRangePreview({ a: d.t0, b: t });
+				if (!moved) return;
+				seekVideo(t, { updateState: false, throttle: true, followTimeline: false, force: true });
 			};
 			const onUp = (ev: PointerEvent) => {
 				window.removeEventListener('pointermove', onMove);
 				window.removeEventListener('pointerup', onUp);
+				userScrubbingRef.current = false;
+				const resumeAfterSeek = wasPlayingBeforeTimelinePointerRef.current;
+				wasPlayingBeforeTimelinePointerRef.current = false;
+				if (scrubSeekRafRef.current) {
+					cancelAnimationFrame(scrubSeekRafRef.current);
+					scrubSeekRafRef.current = 0;
+				}
+				scrubSeekPendingRef.current = null;
 				const d = timelineRangeSelectDragRef.current;
 				timelineRangeSelectDragRef.current = null;
-				const t0 = d?.t0 ?? clientXToTimelineTime(ev.clientX);
+				const t0up = d?.t0 ?? clientXToTimelineTime(ev.clientX);
 				const t1 = clientXToTimelineTime(ev.clientX);
 				setTimelineRangePreview(null);
 				const td = timelineTotalDurationRef.current;
-				const lo = Math.min(t0, t1);
-				const hi = Math.max(t0, t1);
+				const lo = Math.min(t0up, t1);
+				const hi = Math.max(t0up, t1);
 				if (hi - lo >= MIN_SEGMENT_DURATION) {
 					const segs = segmentsRef.current;
 					const insideIds: number[] = [];
@@ -3392,8 +3557,14 @@ ${changesText}
 					setSelectedSegmentIds(new Set());
 					setTimelineInsertRange(null);
 					setTimelineRubberRange(null);
-					const seekT = Math.max(0, Math.min(td, t1));
-					seekVideo(seekT);
+					if (moved) {
+						const seekT = Math.max(0, Math.min(td, t1));
+						seekVideo(seekT, { force: true, updateState: true });
+					}
+					if (resumeAfterSeek) {
+						const vid = videoRef.current;
+						if (vid) void vid.play().catch(() => undefined);
+					}
 				}
 			};
 			window.addEventListener('pointermove', onMove);
@@ -3782,10 +3953,23 @@ ${changesText}
 	useEffect(() => {
 		setVideoDuration(0);
 		setCurrentPlaybackTime(0);
+		currentPlaybackTimeRef.current = 0;
+		lastPlaybackOverlaySigRef.current = '';
 		setWaveformPeaks(null);
 		setWaveformImageSrc(null);
 		setProbedMediaDuration(null);
-	}, [activeVideoAbsolutePath]);
+		ffmpegPreviewOkRef.current = null;
+		previewFrameLastTimeRef.current = -1;
+		clearPreviewFrame();
+		requestAnimationFrame(() => applyPlaybackUiRef.current(0, { commitState: true }));
+	}, [activeVideoAbsolutePath, clearPreviewFrame]);
+
+	useLayoutEffect(() => {
+		const v = videoRef.current;
+		const t =
+			v && Number.isFinite(v.currentTime) ? v.currentTime : currentPlaybackTimeRef.current;
+		applyPlaybackUiRef.current(t, { commitState: !isPlayingRef.current });
+	}, [timelineTotalDuration]);
 
 	useEffect(() => {
 		if (!currentProject?.path) {
@@ -3795,6 +3979,7 @@ ${changesText}
 		const projectPath = currentProject.path;
 		let cancelled = false;
 		const refreshDiskList = () => {
+			if (isPlayingRef.current) return;
 			void projectService.listProjectDirectoryFiles(projectPath).then((list) => {
 				if (!cancelled) setProjectDiskFiles(list);
 			}).catch(() => {
@@ -3891,12 +4076,8 @@ ${changesText}
 			v.volume = volume;
 			v.muted = videoMuted;
 			const t = currentPlaybackTimeRef.current;
-			try {
-				v.currentTime = t;
-			} catch {
-				/* noop */
-			}
-			setCurrentPlaybackTime(t);
+			setVideoCurrentTime(v, t);
+			applyPlaybackUiRef.current(t, { commitState: true });
 			if (isPlayingRef.current) void v.play().catch(() => undefined);
 			else v.pause();
 		};
@@ -3947,56 +4128,125 @@ ${changesText}
 		thumb.style.left = `${(sl / maxScroll) * travel}%`;
 	}, []);
 
-	/** Плавная полоска таймлайна */
-	useEffect(() => {
-		if (!videoSrc) return;
-		const v = videoRef.current;
-		if (!v) return;
-
-		let rafId = 0;
-
-		const tick = () => {
-			rafId = 0;
-			if (v.paused || v.ended) return;
-			const t = v.currentTime;
-			currentPlaybackTimeRef.current = t;
-			setCurrentPlaybackTime(t);
-			rafId = requestAnimationFrame(tick);
-		};
-
-		const startLoop = () => {
-			if (rafId) cancelAnimationFrame(rafId);
-			rafId = requestAnimationFrame(tick);
-		};
-
-		const onPause = () => {
-			if (rafId) {
-				cancelAnimationFrame(rafId);
-				rafId = 0;
+	const syncSubtitleOverlayAtTime = useCallback((t: number, force = false) => {
+		const active = findActiveSegmentAtTime(segmentsRef.current, t);
+		let translation = '';
+		let original = '';
+		const idx = selectedSegmentIndexRef.current;
+		if (active) {
+			if (idx >= 0 && segmentsRef.current[idx]?.id === active.id) {
+				translation = segEditorTranslationRef.current;
+				original = segEditorOriginalRef.current;
+			} else {
+				translation = active.translation ?? '';
+				original = active.text ?? '';
 			}
-			const t = v.currentTime;
+		}
+		const sig = `${active?.id ?? 'none'}|${translation}|${original}`;
+		if (!force && sig === lastPlaybackOverlaySigRef.current) return;
+		lastPlaybackOverlaySigRef.current = sig;
+		const trEl = videoTranslationOverlayRef.current;
+		if (trEl) trEl.textContent = translation.trim() || '\u00A0';
+		if (showOriginalVideoSubtitlesRef.current) {
+			const origEl = videoOriginalOverlayRef.current;
+			if (origEl) origEl.textContent = original.trim() || '\u00A0';
+		}
+	}, []);
+	syncSubtitleOverlayRef.current = syncSubtitleOverlayAtTime;
+
+	const applyPlaybackUi = useCallback(
+		(t: number, opts?: { commitState?: boolean; followTimeline?: boolean }) => {
 			currentPlaybackTimeRef.current = t;
-			setCurrentPlaybackTime(t);
-		};
+			const td = timelineTotalDurationRef.current;
+			const ratio = td > 0 ? Math.min(1, Math.max(0, t / td)) : 0;
+			const pct = `${ratio * 100}%`;
 
-		const onSeeked = () => {
-			const t = v.currentTime;
-			currentPlaybackTimeRef.current = t;
-			setCurrentPlaybackTime(t);
-		};
+			const fill = videoProgressFillRef.current;
+			if (fill) fill.style.width = pct;
 
-		v.addEventListener('play', startLoop);
-		v.addEventListener('pause', onPause);
-		v.addEventListener('seeked', onSeeked);
-		if (!v.paused) startLoop();
+			const head = timelinePlayheadRef.current;
+			if (head) head.style.left = pct;
 
-		return () => {
-			v.removeEventListener('play', startLoop);
-			v.removeEventListener('pause', onPause);
-			v.removeEventListener('seeked', onSeeked);
-			if (rafId) cancelAnimationFrame(rafId);
-		};
-	}, [videoSrc]);
+			const clock = playbackClockRef.current;
+			if (clock) clock.textContent = formatPlaybackClock(t);
+
+			syncSubtitleOverlayAtTime(t, false);
+
+			const active = findActiveSegmentAtTime(segmentsRef.current, t);
+			const segId = active?.id ?? null;
+
+			const now = performance.now();
+			const segChanged = segId !== lastPlaybackCommitSegIdRef.current;
+			const commitInterval =
+				!isPlayingRef.current ||
+				segChanged ||
+				now - lastPlaybackStateCommitRef.current >= PLAYBACK_UI_STATE_COMMIT_MS;
+			if (opts?.commitState || commitInterval) {
+				lastPlaybackStateCommitRef.current = now;
+				lastPlaybackCommitSegIdRef.current = segId;
+				setCurrentPlaybackTime(t);
+			}
+
+			if (
+				opts?.followTimeline ||
+				(isPlayingRef.current &&
+					now - lastTimelineFollowRef.current >= PLAYBACK_TIMELINE_FOLLOW_MS)
+			) {
+				lastTimelineFollowRef.current = now;
+				const scr = timelineScrollRef.current;
+				const inner = timelineInnerRef.current;
+				if (scr && inner && td > 0) {
+					const innerW = inner.offsetWidth;
+					if (innerW > 0) {
+						const x = (Math.max(0, t) / td) * innerW;
+						const viewLeft = scr.scrollLeft;
+						const viewRight = viewLeft + scr.clientWidth;
+						const margin = 24;
+						if (x < viewLeft + margin || x > viewRight - margin) {
+							const target = Math.max(
+								0,
+								Math.min(scr.scrollWidth - scr.clientWidth, x - scr.clientWidth / 2)
+							);
+							scr.scrollLeft = target;
+							syncTimelineScrollbarThumb();
+						}
+					}
+				}
+			}
+		},
+		[syncTimelineScrollbarThumb, syncSubtitleOverlayAtTime]
+	);
+	applyPlaybackUiRef.current = applyPlaybackUi;
+
+	const handleVideoFrameTime = useCallback((t: number) => {
+		applyPlaybackUiRef.current(t, { commitState: false });
+	}, []);
+
+	const handleVideoSeeked = useCallback(
+		(t: number) => {
+			pendingVideoSeekRef.current = null;
+			clearPreviewFrame();
+			applyPlaybackUiRef.current(t, {
+				commitState: !userScrubbingRef.current,
+				followTimeline: !userScrubbingRef.current
+			});
+		},
+		[clearPreviewFrame]
+	);
+
+	const handleVideoPlayingChange = useCallback(
+		(playing: boolean) => {
+			isPlayingRef.current = playing;
+			setIsVideoPlaying(playing);
+			if (playing) {
+				clearPreviewFrame();
+				return;
+			}
+			const v = videoRef.current;
+			if (v) applyPlaybackUiRef.current(v.currentTime, { commitState: true });
+		},
+		[clearPreviewFrame]
+	);
 
 	useLayoutEffect(() => {
 		const el = timelineScrollRef.current;
@@ -4071,34 +4321,55 @@ ${changesText}
 	}, [timelineZoomPercent, syncTimelineScrollbarThumb]);
 
 	const seekVideoFromClientX = useCallback(
-		(clientX: number, barEl: HTMLElement) => {
+		(
+			clientX: number,
+			barEl: HTMLElement,
+			opts?: { updateState?: boolean; throttle?: boolean }
+		) => {
 			const dur = timelineTotalDuration;
 			if (!dur) return;
 			const rect = barEl.getBoundingClientRect();
 			const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-			const t = ratio * dur;
 			const v = videoRef.current;
-			if (!v) return;
-			v.currentTime = Math.min(t, Number.isFinite(v.duration) && v.duration > 0 ? v.duration : t);
-			setCurrentPlaybackTime(v.currentTime);
+			const maxT =
+				v && Number.isFinite(v.duration) && v.duration > 0 ? v.duration : dur;
+			const t = Math.min(ratio * dur, maxT);
+			seekVideo(t, {
+				updateState: opts?.updateState,
+				throttle: opts?.throttle,
+				followTimeline: false,
+				force: true
+			});
 		},
-		[timelineTotalDuration]
+		[timelineTotalDuration, seekVideo]
 	);
 
 	const handleVideoProgressPointerDown = useCallback(
 		(e: React.MouseEvent<HTMLDivElement>) => {
 			e.preventDefault();
 			const bar = e.currentTarget;
-			seekVideoFromClientX(e.clientX, bar);
-			const onMove = (ev: MouseEvent) => seekVideoFromClientX(ev.clientX, bar);
+			const v = videoRef.current;
+			if (v && !v.paused) v.pause();
+			userScrubbingRef.current = true;
+			seekVideoFromClientX(e.clientX, bar, { updateState: false });
+			const onMove = (ev: MouseEvent) =>
+				seekVideoFromClientX(ev.clientX, bar, { updateState: false, throttle: true });
 			const onUp = () => {
+				userScrubbingRef.current = false;
+				if (scrubSeekRafRef.current) {
+					cancelAnimationFrame(scrubSeekRafRef.current);
+					scrubSeekRafRef.current = 0;
+				}
+				scrubSeekPendingRef.current = null;
+				const t = currentPlaybackTimeRef.current;
+				seekVideo(t, { updateState: true, followTimeline: false, force: true });
 				window.removeEventListener('mousemove', onMove);
 				window.removeEventListener('mouseup', onUp);
 			};
 			window.addEventListener('mousemove', onMove);
 			window.addEventListener('mouseup', onUp);
 		},
-		[seekVideoFromClientX]
+		[seekVideoFromClientX, seekVideo]
 	);
 
 	const handleTimelineScrubPointerDown = useCallback(
@@ -4165,17 +4436,6 @@ ${changesText}
 	useLayoutEffect(() => {
 		requestAnimationFrame(() => syncTimelineScrollbarThumb());
 	}, [timelineZoomPercent, generatedSegments.length, timelineTotalDuration, syncTimelineScrollbarThumb]);
-
-	useEffect(() => {
-		if (!isPlayingRef.current) return;
-		const el = timelineScrollRef.current;
-		const inner = timelineInnerRef.current;
-		if (!el || !inner || timelineTotalDuration <= 0) return;
-		const playheadX = (currentPlaybackTime / timelineTotalDuration) * inner.offsetWidth;
-		const target = playheadX - el.clientWidth * 0.35;
-		el.scrollLeft = Math.max(0, Math.min(target, el.scrollWidth - el.clientWidth));
-		requestAnimationFrame(() => syncTimelineScrollbarThumb());
-	}, [currentPlaybackTime, timelineTotalDuration, syncTimelineScrollbarThumb]);
 
 	// ресайз панелей
 
@@ -5306,7 +5566,15 @@ ${changesText}
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
 											placeholder={t('table.translationPlaceholder')}
 											value={segEditorTranslation}
-											onChange={(e) => setSegEditorTranslation(e.target.value)}
+											onChange={(e) => {
+												const v = e.target.value;
+												setSegEditorTranslation(v);
+												segEditorTranslationRef.current = v;
+												syncSubtitleOverlayRef.current(
+													currentPlaybackTimeRef.current,
+													true
+												);
+											}}
 											onBlur={() => {
 												if (selectedSegmentIndex < 0) return;
 												void updateSegmentAtIndex(selectedSegmentIndex, {
@@ -5340,7 +5608,15 @@ ${changesText}
 											className="text-h1-heading w-full h-full bg-surface-secondary border border-border-default rounded-[8px] p-2 text-text-primary resize-none outline-none focus:border-primary-main/50 subtitle-table-scroll font-semibold"
 											placeholder={t('table.originalPlaceholder')}
 											value={segEditorOriginal}
-											onChange={(e) => setSegEditorOriginal(e.target.value)}
+											onChange={(e) => {
+												const v = e.target.value;
+												setSegEditorOriginal(v);
+												segEditorOriginalRef.current = v;
+												syncSubtitleOverlayRef.current(
+													currentPlaybackTimeRef.current,
+													true
+												);
+											}}
 											onBlur={() => {
 												if (selectedSegmentIndex < 0) return;
 												void updateSegmentAtIndex(selectedSegmentIndex, { text: segEditorOriginal });
@@ -5372,65 +5648,53 @@ ${changesText}
 								
 								{/* Область видео */}
 								<div className="flex-1 relative flex flex-col items-center justify-center group bg-[#000000]">
-										{videoSrc ? (
-											<video
-												key={activeVideoAbsolutePath ?? 'v'}
-												ref={videoRef}
-												src={videoSrc}
-												className="absolute inset-0 z-0 w-full h-full object-contain"
-												playsInline
-												muted={videoMuted}
-												preload="metadata"
-												onLoadedMetadata={(e) => {
-													const d = e.currentTarget.duration;
-													setVideoDuration(Number.isFinite(d) ? d : 0);
-													e.currentTarget.volume = volume;
-													e.currentTarget.muted = videoMuted;
-												}}
-												onDurationChange={(e) => {
-													const d = e.currentTarget.duration;
-													if (Number.isFinite(d) && d > 0) setVideoDuration(d);
-												}}
-												onPlay={() => {
-													isPlayingRef.current = true;
-													setIsVideoPlaying(true);
-												}}
-												onPause={() => {
-													isPlayingRef.current = false;
-													setIsVideoPlaying(false);
-												}}
-												onEnded={() => {
-													isPlayingRef.current = false;
-													setIsVideoPlaying(false);
-												}}
-												onVolumeChange={(e) => {
-													const vol = e.currentTarget.volume;
-													setVolume(vol);
-													if (vol < 1e-4) setVideoMuted(true);
-												}}
-												onError={() => {
-													console.error('Video load/playback error', activeVideoAbsolutePath, videoSrc);
-												}}
-											/>
-										) : (
-											<div className="text-white/10 text-[10px] uppercase tracking-[0.2em] font-bold">
-												{t('video.preview')}
-											</div>
-										)}
+										<VideoPlayer
+											src={videoSrc}
+											sourceKey={playbackVideoPath ?? activeVideoAbsolutePath}
+											previewSrc={previewFrameSrc}
+											preparing={playbackPreparing}
+											volume={volume}
+											muted={videoMuted}
+											videoRef={videoRef}
+											emptyLabel={
+												playbackPreparing ? t('video.preparing') : t('video.preview')
+											}
+											onDuration={setVideoDuration}
+											onPlayingChange={handleVideoPlayingChange}
+											onVolumeFromElement={(vol) => {
+												setVolume(vol);
+												if (vol < 1e-4) setVideoMuted(true);
+											}}
+											onError={() => {
+												console.error(
+													'Video load/playback error',
+													activeVideoAbsolutePath,
+													videoSrc
+												);
+											}}
+											onFrameTime={handleVideoFrameTime}
+											onSeeked={handleVideoSeeked}
+											onPlayStart={clearPreviewFrame}
+										>
 										{showOriginalVideoSubtitles && (
 											<div className="absolute top-12 z-10 w-full text-center px-10 pointer-events-none">
-												<span className="text-white text-[17px] font-bold leading-[17px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]">
-													{currentVideoOriginalLine || '\u00A0'}
+												<span
+													ref={videoOriginalOverlayRef}
+													className="text-white text-[17px] font-bold leading-[17px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]"
+												>
+													{'\u00A0'}
 												</span>
 											</div>
 										)}
 										<div className="absolute bottom-12 z-10 w-full text-center px-10 pointer-events-none">
 												<span
+													ref={videoTranslationOverlayRef}
 													className="text-white text-[17px] font-bold leading-[17px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]"
 												>
-														{currentVideoTranslationLine || '\u00A0'}
+														{'\u00A0'}
 												</span>
 										</div>
+										</VideoPlayer>
 								</div>
 
 								{/* Панель управления */}
@@ -5441,10 +5705,9 @@ ${changesText}
 													onMouseDown={handleVideoProgressPointerDown}
 												>
 														<div
+															ref={videoProgressFillRef}
 															className="absolute left-0 top-0 h-full rounded-[2px] bg-[#9FA3B0]"
-															style={{
-																width: `${timelineTotalDuration ? Math.min(100, (currentPlaybackTime / timelineTotalDuration) * 100) : 0}%`
-															}}
+															style={{ width: '0%' }}
 														/>
 												</div>
 										</div>
@@ -5483,8 +5746,7 @@ ${changesText}
 																const v = videoRef.current;
 																if (!v) return;
 																v.pause();
-																v.currentTime = 0;
-																setCurrentPlaybackTime(0);
+																seekVideo(0);
 															}}
 														>
 															<span
@@ -5559,7 +5821,7 @@ ${changesText}
 													className="flex items-center gap-1 text-[12px] text-body-med text-text-primary shrink-0 tabular-nums whitespace-nowrap"
 													style={{ fontVariantNumeric: 'tabular-nums' }}
 												>
-														<span className="inline-block text-right">
+														<span ref={playbackClockRef} className="inline-block text-right">
 															{formatPlaybackClock(currentPlaybackTime)}
 														</span>
 														<span className="text-text-secondary/40">/</span>
@@ -5760,9 +6022,7 @@ ${changesText}
 															}
 															e.stopPropagation();
 															const t = clientXToTimelineTime(e.clientX);
-															const v = videoRef.current;
-															if (v) v.currentTime = t;
-															setCurrentPlaybackTime(t);
+															seekVideo(t);
 															setSelectedSegmentIndex(idx);
 															setSelectedSegmentIds(new Set());
 															setTimelineRubberRange(null);
@@ -5794,10 +6054,9 @@ ${changesText}
 												);
 											})}
 											<div
+												ref={timelinePlayheadRef}
 												className="absolute top-0 bottom-0 w-px bg-primary-main z-20 pointer-events-none"
-												style={{
-													left: `${Math.min(100, (currentPlaybackTime / timelineTotalDuration) * 100)}%`
-												}}
+												style={{ left: '0%' }}
 											/>
 										</div>
 									</div>
