@@ -10,6 +10,7 @@ mod subtitle_parser;
 mod postprocessing;
 mod agent;
 mod gender_detection;
+mod speaker_gender_rules;
 mod ml_sidecar;
 mod vad;
 

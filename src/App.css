@@ -199,6 +199,7 @@
 .timeline-pan-no-scrollbar {
   scrollbar-width: none;
   -ms-overflow-style: none;
+  touch-action: pan-x;
 }
 .timeline-pan-no-scrollbar::-webkit-scrollbar {
   display: none;

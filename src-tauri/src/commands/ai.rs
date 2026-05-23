@@ -7,6 +7,10 @@ use tauri::Emitter;
 use std::collections::{HashMap};
 use std::path::Path;
 use crate::gender_detection;
+use crate::speaker_gender_rules::{
+    dialogue_context_translation_rules, normalize_target_language_iso,
+    segment_speaker_gender_str, speaker_gender_translation_rules,
+};
 use crate::postprocessing;
 use crate::vad;
 
@@ -148,11 +152,7 @@ fn format_segments_for_debug(segments: &[SubtitleSegment]) -> String {
     ));
     lines.push("  ---  -----------  -------  ----".to_string());
     for s in segments {
-        let gender = s
-            .speaker_gender
-            .as_ref()
-            .map(|g| g.as_str())
-            .unwrap_or("unknown");
+        let gender = segment_speaker_gender_str(s);
         lines.push(format!(
             "  {:>3}  {}-{}  {:>7}  {}",
             s.id,
@@ -976,82 +976,6 @@ const TRANSLATION_CHUNK_SIZE: usize = 40;
 const TRANSLATION_MAX_TOKENS: u32 = 16384;
 const CHAT_COMPLETION_MODEL: &str = "gpt-5.4";
 
-/// Язык перевода из UI («Russian», «ru», «Русский») → ISO для правил рода.
-fn normalize_target_language_iso(raw: &str) -> Option<String> {
-    let lower = raw.trim().to_lowercase();
-    if lower.is_empty() {
-        return None;
-    }
-    let iso = match lower.as_str() {
-        "en" | "english" | "английский" => "en",
-        "ru" | "russian" | "русский" => "ru",
-        "uk" | "ukrainian" | "украинский" => "uk",
-        "pl" | "polish" | "польский" => "pl",
-        "cs" | "czech" | "чешский" => "cs",
-        "sk" | "slovak" | "словацкий" => "sk",
-        "be" | "belarusian" | "белорусский" => "be",
-        "sr" | "serbian" | "сербский" => "sr",
-        "hr" | "croatian" | "хорватский" => "hr",
-        "bg" | "bulgarian" | "болгарский" => "bg",
-        "es" | "spanish" | "испанский" => "es",
-        "fr" | "french" | "французский" => "fr",
-        "de" | "german" | "немецкий" => "de",
-        "it" | "italian" | "итальянский" => "it",
-        "pt" | "portuguese" | "португальский" => "pt",
-        code if code.len() == 2 && code.chars().all(|c| c.is_ascii_lowercase()) => code,
-        _ => return None,
-    };
-    Some(iso.to_string())
-}
-
-fn language_needs_speaker_gender(lang_iso: &str) -> bool {
-    let l = lang_iso.trim().to_lowercase();
-    matches!(
-        l.as_str(),
-        "ru" | "uk" | "pl" | "cs" | "sk" | "be" | "sr" | "hr" | "bg"
-    ) || l.starts_with("ru-")
-        || l.starts_with("uk-")
-        || l.starts_with("pl-")
-}
-
-fn dialogue_context_translation_rules(target_language: &str) -> String {
-    let iso = match normalize_target_language_iso(target_language) {
-        Some(code) => code,
-        None => return String::new(),
-    };
-    if !language_needs_speaker_gender(&iso) {
-        return "- В user JSON все segments[] — одна сцена; переводи согласованно с соседними репликами.\n"
-            .to_string();
-    }
-    "Диалог (обязательно):\n\
-     - В user JSON весь пакет segments[] — одна сцена; сначала прочитай ВСЕ реплики по порядку id/времени\n\
-     - Определи, кто говорит в каждой строке (speaker_gender) и кому адресована реплика (часто другой голос в соседних id)\n\
-     - Переводи каждый id отдельно, но грамматику и смысл согласуй с предыдущими и следующими репликами — не изолированно\n\
-     - Чередование male/female по id обычно = двое собеседников (вопрос/ответ)\n\n"
-        .to_string()
-}
-
-fn speaker_gender_translation_rules(target_language: &str) -> String {
-    let iso = match normalize_target_language_iso(target_language) {
-        Some(code) => code,
-        None => return String::new(),
-    };
-    if !language_needs_speaker_gender(&iso) {
-        return String::new();
-    }
-    format!(
-        "Согласование по полу на языке перевода ({target_language}):\n\
-         - speaker_gender = кто произносит ЭТУ строку (не путать с собеседником)\n\
-         - Первая лица (я/мы, глаголы и местоимения говорящего): строго по speaker_gender этого id\n\
-         - Вторая лица (ты/вы к собеседнику): по полу АДРЕСАТА, не по speaker_gender говорящей реплики\n\
-         - Описание «о себе» (меня, мой, один/одна и т.п. рядом с «мной»): по speaker_gender говорящего\n\
-         - В одной фразе могут сочетаться формы к адресату и к говорящему — это нормально\n\
-         - Грамматика исходного текста (окончания, согласования) подсказывает пол говорящего и адресата — сверяй с соседними репликами\n\
-         - При speaker_gender unknown — выводи из контекста всего пакета segments[] и глоссария\n",
-        target_language = target_language.trim(),
-    )
-}
-
 async fn translate_segments_chunk(
     client: &reqwest::Client,
     api_key: &str,
@@ -1067,11 +991,7 @@ async fn translate_segments_chunk(
                 "start": s.start,
                 "end": s.end
             });
-            if let Some(g) = &s.speaker_gender {
-                obj["speaker_gender"] = serde_json::json!(g.as_str());
-            } else {
-                obj["speaker_gender"] = serde_json::json!("unknown");
-            }
+            obj["speaker_gender"] = serde_json::json!(segment_speaker_gender_str(s));
             obj
         }).collect::<Vec<_>>()
     });

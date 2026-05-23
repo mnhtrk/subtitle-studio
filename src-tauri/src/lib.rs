@@ -5,5 +5,6 @@ pub mod subtitle_parser;
 pub mod postprocessing;
 pub mod agent;
 pub mod gender_detection;
+pub mod speaker_gender_rules;
 pub mod ml_sidecar;
 pub mod vad;

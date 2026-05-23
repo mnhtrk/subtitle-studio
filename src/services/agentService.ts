@@ -6,6 +6,14 @@ export interface AgentContext {
   current_segments?: SubtitleSegment[] | null;
   current_glossary?: GlossaryEntry[] | null;
   target_language?: string | null;
+  /** Реплика из Спросить агента в промпт попадёт окно соседей. */
+  focus_segment_id?: number | null;
+  /** Сколько сегментов до/после focus включить полным текстом (по умолчанию 5) */
+  neighbor_radius?: number;
+  /** Пакетная обработка всего файла только эти id в полном виде */
+  batch_segment_ids?: number[] | null;
+  batch_index?: number | null;
+  batch_total?: number | null;
 }
 
 export type AgentAction =

@@ -24,6 +24,16 @@ pub struct DialogueContext {
     pub current_segments: Option<Vec<SubtitleSegment>>,
     pub current_glossary: Option<Vec<GlossaryEntry>>,
     pub target_language: Option<String>,
+    #[serde(default)]
+    pub focus_segment_id: Option<u32>,
+    #[serde(default)]
+    pub neighbor_radius: usize,
+    #[serde(default)]
+    pub batch_segment_ids: Option<Vec<u32>>,
+    #[serde(default)]
+    pub batch_index: Option<u32>,
+    #[serde(default)]
+    pub batch_total: Option<u32>,
     pub conversation_history: Vec<AgentMessage>,
 }
 
@@ -45,6 +55,11 @@ impl DialogueHistory {
                 current_segments: None,
                 current_glossary: None,
                 target_language: None,
+                focus_segment_id: None,
+                neighbor_radius: 0,
+                batch_segment_ids: None,
+                batch_index: None,
+                batch_total: None,
                 conversation_history: Vec::new(),
             }
         })
@@ -61,6 +76,11 @@ impl DialogueHistory {
         segments: Option<Vec<SubtitleSegment>>,
         glossary: Option<Vec<GlossaryEntry>>,
         target_language: Option<String>,
+        focus_segment_id: Option<u32>,
+        neighbor_radius: usize,
+        batch_segment_ids: Option<Vec<u32>>,
+        batch_index: Option<u32>,
+        batch_total: Option<u32>,
         client_history: &[ConversationTurn],
     ) {
         let session = self.get_or_create_session(session_id);
@@ -68,6 +88,11 @@ impl DialogueHistory {
         session.current_segments = segments;
         session.current_glossary = glossary;
         session.target_language = target_language;
+        session.focus_segment_id = focus_segment_id;
+        session.neighbor_radius = neighbor_radius;
+        session.batch_segment_ids = batch_segment_ids;
+        session.batch_index = batch_index;
+        session.batch_total = batch_total;
 
         if client_history.is_empty() {
             return;

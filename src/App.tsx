@@ -21,7 +21,11 @@ import { ActivationModal } from './components/modals/ActivationModal';
 import { SettingsModal } from './components/modals/SettingsModal';
 import { AboutModal } from './components/modals/AboutModal';
 import { useI18n } from './i18n';
-import { VideoPlayer } from './components/VideoPlayer';
+import { TimelinePanel } from './components/timeline/TimelinePanel';
+import { SubtitleTable } from './components/subtitles/SubtitleTable';
+import { EditorVideoPane } from './components/video/EditorVideoPane';
+import { sidebarIconMaskStyle } from './utils/iconMask';
+import { formatPlaybackClock } from './utils/playbackClock';
 
 const appWindow = getCurrentWindow();
 
@@ -46,11 +50,19 @@ import {
 	sortAndRenumberSubtitleIds
 } from './utils/subtitleSegmentsLocal';
 import {
+	AGENT_BATCH_SIZE,
+	formatSpeakerGenderForAgent,
+	AGENT_NEIGHBOR_RADIUS,
+	chunkSubtitleSegments,
+	isWholeFileAgentRequest
+} from './utils/agentChat';
+import {
 	applyAutoGlossaryToProject,
 	mergePromptHintsIntoGlossary,
 	parseTranslationHintsFromPrompt,
 	resolveIsoLanguage
 } from './utils/glossary';
+import { installVideoEditorKeyboardHandlers, isEditableKeyboardTarget } from './utils/videoKeyboard';
 
 import iconNewProject from './assets/icons/new-project.svg';
 import iconNewFile from './assets/icons/new-file.svg';
@@ -75,52 +87,12 @@ import iconVolume from './assets/icons/volume.svg';
 import iconVolumeMute from './assets/icons/volume-mute.svg';
 import appLogo from './assets/app-logo.svg';
 
-function sidebarIconMaskStyle(src: string): React.CSSProperties {
-	return {
-		maskImage: `url(${src})`,
-		WebkitMaskImage: `url(${src})`,
-		maskSize: 'contain',
-		maskRepeat: 'no-repeat',
-		maskPosition: 'center'
-	};
-}
-
 const SIDEBAR_ICON_CLASS =
 	'pointer-events-none inline-block h-7 w-7 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
 
 
-const VIDEO_CTRL_BTN_CLASS =
-	'flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-40';
-
-const VIDEO_CTRL_ICON_PLAY =
-	'pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/vplay:scale-110 group-active/vplay:scale-[0.92]';
-
-const VIDEO_CTRL_ICON_STOP =
-	'pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/vstop:scale-110 group-active/vstop:scale-[0.92]';
-
-const VIDEO_CTRL_ICON_VOL =
-	'pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/vvol:scale-110 group-active/vvol:scale-[0.92]';
-
 const PANEL_HEADER_ICON_CLASS =
 	'pointer-events-none inline-block h-4 w-4 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
-
-const TIMELINE_ZOOM_BTN_CLASS =
-	'flex h-[22px] w-[22px] shrink-0 items-center justify-center border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40';
-
-const TIMELINE_ZOOM_OUT_ICON_CLASS =
-	'pointer-events-none inline-block h-[22px] w-[22px] shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/tzoomout:scale-110 group-active/tzoomout:scale-[0.92]';
-
-const TIMELINE_ZOOM_IN_ICON_CLASS =
-	'pointer-events-none inline-block h-[22px] w-[22px] shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/tzoomin:scale-110 group-active/tzoomin:scale-[0.92]';
-
-function formatPlaybackClock(seconds: number): string {
-	if (!Number.isFinite(seconds) || seconds < 0) return '00:00:00';
-	const h = Math.floor(seconds / 3600);
-	const m = Math.floor((seconds % 3600) / 60);
-	const sec = Math.floor(seconds % 60);
-	const ms = Math.floor((seconds % 1) * 1000);
-	return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
-}
 
 function formatSrtTime(seconds: number): string {
 	if (!Number.isFinite(seconds)) return '00:00:00,000';
@@ -368,112 +340,8 @@ function cloneSubtitleSegments(segs: SubtitleSegment[]): SubtitleSegment[] {
 	return segs.map((s) => ({ ...s }));
 }
 
-// волна на canvas (симметрия)
-function TimelineSymmetricWaveform({
-	peaks,
-	className
-}: {
-	peaks: number[] | null;
-	className?: string;
-}) {
-	const wrapRef = useRef<HTMLDivElement>(null);
-	const canvasRef = useRef<HTMLCanvasElement>(null);
-
-	useLayoutEffect(() => {
-		const wrap = wrapRef.current;
-		const canvas = canvasRef.current;
-		if (!wrap || !canvas) return;
-
-		let rafTries = 0;
-		const draw = () => {
-			const w = wrap.clientWidth;
-			const h = wrap.clientHeight;
-			if (w < 2 || h < 4) {
-				if (rafTries < 24) {
-					rafTries += 1;
-					requestAnimationFrame(draw);
-				}
-				return;
-			}
-
-			const dpr = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 2);
-			canvas.width = Math.floor(w * dpr);
-			canvas.height = Math.floor(h * dpr);
-			canvas.style.width = `${w}px`;
-			canvas.style.height = `${h}px`;
-
-			const ctx = canvas.getContext('2d');
-			if (!ctx) return;
-			ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-			ctx.clearRect(0, 0, w, h);
-
-			const mid = h / 2;
-			const maxHalf = Math.max(2, mid - 1);
-			const ampGain = 1.42;
-
-			if (!peaks || peaks.length === 0) {
-				ctx.strokeStyle = 'rgba(173, 255, 47, 0.35)';
-				ctx.lineWidth = 1;
-				ctx.beginPath();
-				ctx.moveTo(0, mid);
-				ctx.lineTo(w, mid);
-				ctx.stroke();
-				return;
-			}
-
-			let mx = 0;
-			for (let i = 0; i < peaks.length; i++) {
-				const a = Math.abs(peaks[i]);
-				if (a > mx) mx = a;
-			}
-			const norm = mx > 1e-9 ? 1 / mx : 1;
-
-			const n = peaks.length;
-			ctx.fillStyle = '#ADFF2F';
-			for (let col = 0; col < w; col++) {
-				const t = w <= 1 ? 0 : col / (w - 1);
-				// без сглаживания, иначе на зуме мыло
-				const idx = Math.round(t * (n - 1));
-				const v = Math.abs(peaks[Math.max(0, Math.min(n - 1, idx))]) * norm;
-				const amp = Math.min(maxHalf, v * maxHalf * ampGain);
-				const half = Math.max(1, amp);
-				ctx.fillRect(col, mid - half, 1, half * 2);
-			}
-		};
-
-		draw();
-		const ro = new ResizeObserver(() => {
-			rafTries = 0;
-			draw();
-		});
-		ro.observe(wrap);
-		return () => ro.disconnect();
-	}, [peaks]);
-
-	return (
-		<div
-			ref={wrapRef}
-			className={
-				className ??
-				'absolute inset-x-0 top-[5%] bottom-[5%] w-full pointer-events-none'
-			}
-		>
-			<canvas ref={canvasRef} className="block h-full w-full min-h-0" aria-hidden />
-		</div>
-	);
-}
-
-// пробел в инпуте не play/pause
 function shouldIgnoreSpacebarForVideo(target: EventTarget | null): boolean {
-	if (!target || !(target instanceof Element)) return false;
-	const el = target as HTMLElement;
-	if (el.isContentEditable) return true;
-	const tag = el.tagName;
-	if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-	if (el.closest('[contenteditable="true"]')) return true;
-	/* слайдеры тоже */
-	if (el.closest('input[type="range"], [role="slider"]')) return true;
-	return false;
+	return isEditableKeyboardTarget(target);
 }
 
 // лимиты ui
@@ -487,46 +355,6 @@ const LIMITS = {
 
 const APP_HEADER_BAR_PX = 32;
 const MIN_TIMELINE_PANE_PX = 200; // таймлайн не сжимать сильно
-
-const TIMELINE_ZOOM_MIN = 100;
-const TIMELINE_ZOOM_MAX = 10000;
-const TIMELINE_ZOOM_FACTOR = 1.08;
-const TIMELINE_ZOOM_SLIDER_MIN = 0;
-const TIMELINE_ZOOM_SLIDER_MAX = 1000;
-
-function clampTimelineZoom(value: number): number {
-	if (!Number.isFinite(value)) return TIMELINE_ZOOM_MIN;
-	return Math.max(TIMELINE_ZOOM_MIN, Math.min(TIMELINE_ZOOM_MAX, Math.round(value)));
-}
-
-function timelineZoomToSliderValue(zoom: number): number {
-	const clamped = clampTimelineZoom(zoom);
-	const minLog = Math.log(TIMELINE_ZOOM_MIN);
-	const maxLog = Math.log(TIMELINE_ZOOM_MAX);
-	const ratio = (Math.log(clamped) - minLog) / (maxLog - minLog);
-	return Math.round(TIMELINE_ZOOM_SLIDER_MIN + ratio * (TIMELINE_ZOOM_SLIDER_MAX - TIMELINE_ZOOM_SLIDER_MIN));
-}
-
-function sliderValueToTimelineZoom(slider: number): number {
-	const sliderClamped = Math.max(TIMELINE_ZOOM_SLIDER_MIN, Math.min(TIMELINE_ZOOM_SLIDER_MAX, slider));
-	const ratio = (sliderClamped - TIMELINE_ZOOM_SLIDER_MIN) / (TIMELINE_ZOOM_SLIDER_MAX - TIMELINE_ZOOM_SLIDER_MIN);
-	const minLog = Math.log(TIMELINE_ZOOM_MIN);
-	const maxLog = Math.log(TIMELINE_ZOOM_MAX);
-	return clampTimelineZoom(Math.exp(minLog + ratio * (maxLog - minLog)));
-}
-
-function timelineZoomToFillPercent(zoom: number): number {
-	const sliderValue = timelineZoomToSliderValue(zoom);
-	const ratio =
-		(sliderValue - TIMELINE_ZOOM_SLIDER_MIN) /
-		(TIMELINE_ZOOM_SLIDER_MAX - TIMELINE_ZOOM_SLIDER_MIN);
-	return Math.max(0, Math.min(100, ratio * 100));
-}
-
-function stepTimelineZoom(current: number, direction: 1 | -1): number {
-	if (direction > 0) return clampTimelineZoom(current * TIMELINE_ZOOM_FACTOR);
-	return clampTimelineZoom(current / TIMELINE_ZOOM_FACTOR);
-}
 
 export default function App() {
 	const { t, locale } = useI18n();
@@ -612,6 +440,9 @@ export default function App() {
 	const [chatInput, setChatInput] = useState('');
 	const [pendingAttachedSegment, setPendingAttachedSegment] = useState<ChatAttachedSegment | null>(null);
 	const [isAgentBusy, setIsAgentBusy] = useState(false);
+	const [agentBatchProgress, setAgentBatchProgress] = useState<{ current: number; total: number } | null>(
+		null
+	);
 	const [expandedDiffIds, setExpandedDiffIds] = useState<Set<string>>(new Set());
 	const chatScrollRef = useRef<HTMLDivElement | null>(null);
 	const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -714,7 +545,6 @@ export default function App() {
 	const lastPlaybackCommitSegIdRef = useRef<number | null>(null);
 	const selectedSegmentIndexRef = useRef(-1);
 	const showOriginalVideoSubtitlesRef = useRef(readShowOriginalVideoSubtitles());
-	const zoomAnchorRef = useRef<{ ratio: number; scrollLeft: number; innerW: number } | null>(null);
 	const isPlayingRef = useRef(false);
 	const volumeBeforeMuteRef = useRef(1);
 	const segmentsRef = useRef<SubtitleSegment[]>([]);
@@ -755,7 +585,6 @@ export default function App() {
 	);
 	const [dualMonitorMode, setDualMonitorMode] = useState(false);
 	const [isVideoPlaying, setIsVideoPlaying] = useState(false);
-	const [timelineZoomPercent, setTimelineZoomPercent] = useState(100);
 	const [waveformPeaks, setWaveformPeaks] = useState<number[] | null>(null);
 	const [waveformImageSrc, setWaveformImageSrc] = useState<string | null>(null);
 	const [projectDiskFiles, setProjectDiskFiles] = useState<{ relative_path: string; name: string }[]>([]);
@@ -816,12 +645,6 @@ export default function App() {
 		setPendingAttachedSegment(null);
 		setExpandedDiffIds(new Set());
 		setIsAgentBusy(false);
-	}, []);
-
-	const formatSpeakerGenderCell = useCallback((gender?: SpeakerGender | null): string => {
-		if (gender === 'male') return 'M';
-		if (gender === 'female') return 'F';
-		return '?';
 	}, []);
 
 	const formatChatTimecode = useCallback((sec: number): string => {
@@ -1125,6 +948,27 @@ export default function App() {
 				return a.id - b.id;
 			}),
 		[generatedSegments]
+	);
+
+	const segmentIndexById = useMemo(() => {
+		const m = new Map<number, number>();
+		generatedSegments.forEach((s, i) => m.set(s.id, i));
+		return m;
+	}, [generatedSegments]);
+
+	const segmentSortedOrderById = useMemo(() => {
+		const m = new Map<number, number>();
+		timelineSegmentsSorted.forEach((s, i) => m.set(s.id, i));
+		return m;
+	}, [timelineSegmentsSorted]);
+
+	const handleTimelineSegmentClick = useCallback(
+		(_e: React.MouseEvent, _seg: SubtitleSegment, idx: number) => {
+			setSelectedSegmentIndex(idx);
+			setSelectedSegmentIds(new Set());
+			setTimelineRubberRange(null);
+		},
+		[]
 	);
 
 	const treeFiles = useMemo(() => {
@@ -2696,13 +2540,9 @@ ${changesText}
 		[]
 	);
 
-	const applyAgentResponseActions = useCallback(
-		async (
-			actions: AgentAction[],
-			baseline: SubtitleSegment[]
-		): Promise<{ edits: ChatEditDiff[]; snapshot: SubtitleSegment[] } | null> => {
-			if (actions.length === 0 || baseline.length === 0) return null;
-
+	const mergeAgentActionsInMemory = useCallback(
+		async (actions: AgentAction[], baseline: SubtitleSegment[]): Promise<SubtitleSegment[]> => {
+			if (actions.length === 0) return baseline;
 			const cp = currentProjectRef.current;
 			let combinedList = baseline;
 			const glossaryChanges: GlossaryReplacementChange[] = [];
@@ -2723,7 +2563,7 @@ ${changesText}
 							try {
 								await projectService.updateGlossary(cp.path, glossary);
 							} catch {
-								// состояние проекта уже обновлено локально
+								/* локально уже обновлено */
 							}
 						}
 					}
@@ -2737,6 +2577,24 @@ ${changesText}
 				const patches = buildGlossaryReplacementEdits(glossaryChanges, combinedList);
 				combinedList = mergeSegmentPatches(combinedList, patches);
 			}
+			return combinedList;
+		},
+		[
+			buildGlossaryReplacementEdits,
+			mergeGlossaryAgentUpdates,
+			mergeSegmentPatches,
+			markProjectDirty
+		]
+	);
+
+	const applyAgentResponseActions = useCallback(
+		async (
+			actions: AgentAction[],
+			baseline: SubtitleSegment[]
+		): Promise<{ edits: ChatEditDiff[]; snapshot: SubtitleSegment[] } | null> => {
+			if (actions.length === 0 || baseline.length === 0) return null;
+
+			const combinedList = await mergeAgentActionsInMemory(actions, baseline);
 
 			const updated = combinedList.filter((next) => {
 				const prev = baseline.find((s) => s.id === next.id);
@@ -2756,48 +2614,119 @@ ${changesText}
 
 			return { edits, snapshot: originals };
 		},
-		[
-			applySegmentEdits,
-			buildChatEditDiffs,
-			buildGlossaryReplacementEdits,
-			mergeGlossaryAgentUpdates,
-			mergeSegmentPatches,
-			markProjectDirty
-		]
+		[applySegmentEdits, buildChatEditDiffs, mergeAgentActionsInMemory]
 	);
 
 	const handleSendChatMessage = useCallback(async () => {
 		const text = chatInput.trim();
 		if (!text || isAgentBusy) return;
 
+		const attached = pendingAttachedSegment;
 		const userMsg: ChatMessage = {
 			id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
 			role: 'user',
 			text,
-			attachedSegment: pendingAttachedSegment ?? undefined
+			attachedSegment: attached ?? undefined
 		};
 		setChatMessages((prev) => [...prev, userMsg]);
 		setChatInput('');
 		setPendingAttachedSegment(null);
 		setIsAgentBusy(true);
+		setAgentBatchProgress(null);
 
 		try {
 			const baseline = segmentsRef.current ?? [];
 			const project = currentProjectRef.current;
-			const messageForAgent = pendingAttachedSegment
-				? `${text}\n\nПрикрепленная реплика:\n#${pendingAttachedSegment.id} [${formatChatTimecode(pendingAttachedSegment.start)}]\nOriginal: ${pendingAttachedSegment.text}\nTranslation: ${pendingAttachedSegment.translation ?? ''}`
+			const messageForAgent = attached
+				? `${text}\n\nПрикрепленная реплика:\n#${attached.id} [${formatChatTimecode(attached.start)}] speaker_gender=${formatSpeakerGenderForAgent(attached.speaker_gender)}\nOriginal: ${attached.text}\nTranslation: ${attached.translation ?? ''}`
 				: text;
+
+			const agentContextBase = {
+				project_id: project?.id ?? null,
+				current_segments: baseline,
+				current_glossary: project?.glossary ?? null,
+				target_language: project?.target_language ?? null,
+				focus_segment_id: attached?.id ?? null,
+				neighbor_radius: attached ? AGENT_NEIGHBOR_RADIUS : 0
+			};
+
+			const history = buildAgentConversationHistory(chatMessages);
+			const useBatch =
+				!attached && baseline.length > AGENT_BATCH_SIZE && isWholeFileAgentRequest(text);
+
+			if (useBatch) {
+				const batches = chunkSubtitleSegments(baseline, AGENT_BATCH_SIZE);
+				let working = baseline;
+				const batchNotes: string[] = [];
+
+				for (let i = 0; i < batches.length; i++) {
+					const batch = batches[i];
+					const ids = batch.map((s) => s.id);
+					setAgentBatchProgress({ current: i + 1, total: batches.length });
+
+					const batchPrompt = `${messageForAgent}
+
+ПАКЕТНАЯ ОБРАБОТКА: часть ${i + 1} из ${batches.length}.
+Проверь и при необходимости исправь ТОЛЬКО сегменты этого пакета (id: ${ids.join(', ')}).
+В edit_segments верни только изменённые строки из этого пакета.`;
+
+					const response = await agentService.chat(batchPrompt, {
+						...agentContextBase,
+						current_segments: working,
+						batch_segment_ids: ids,
+						batch_index: i + 1,
+						batch_total: batches.length
+					}, {
+						sessionId: agentSessionIdRef.current,
+						conversationHistory: history
+					});
+
+					working = await mergeAgentActionsInMemory(response.actions ?? [], working);
+					if (response.message?.trim()) {
+						batchNotes.push(`Пакет ${i + 1}/${batches.length}: ${response.message.trim()}`);
+					}
+				}
+
+				setAgentBatchProgress(null);
+				const updated = working.filter((next) => {
+					const prev = baseline.find((s) => s.id === next.id);
+					if (!prev) return false;
+					return (
+						prev.text !== next.text ||
+						(prev.translation ?? '') !== (next.translation ?? '')
+					);
+				});
+				const applied =
+					updated.length > 0
+						? await applyAgentResponseActions(
+								[{ EditSegments: { segments: updated } }],
+								baseline
+							)
+						: null;
+
+				const summary =
+					batchNotes.length > 0
+						? batchNotes.join('\n\n')
+						: `Обработано ${batches.length} пакетов по ${AGENT_BATCH_SIZE} реплик.`;
+
+				const aiMsg: ChatMessage = {
+					id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+					role: 'assistant',
+					text: summary,
+					edits: applied?.edits,
+					editSnapshot: applied?.snapshot,
+					editStatus: applied?.snapshot && applied.snapshot.length > 0 ? 'pending' : undefined
+				};
+				setChatMessages((prev) => [...prev, aiMsg]);
+				return;
+			}
+
 			const response = await agentService.chat(
 				messageForAgent,
-				{
-					project_id: project?.id ?? null,
-					current_segments: baseline,
-					current_glossary: project?.glossary ?? null,
-					target_language: project?.target_language ?? null
-				},
+				agentContextBase,
 				{
 					sessionId: agentSessionIdRef.current,
-					conversationHistory: buildAgentConversationHistory(chatMessages)
+					conversationHistory: history
 				}
 			);
 
@@ -2825,6 +2754,7 @@ ${changesText}
 			]);
 		} finally {
 			setIsAgentBusy(false);
+			setAgentBatchProgress(null);
 		}
 	}, [
 		chatInput,
@@ -2833,7 +2763,8 @@ ${changesText}
 		chatMessages,
 		formatChatTimecode,
 		applyAgentResponseActions,
-		buildAgentConversationHistory
+		buildAgentConversationHistory,
+		mergeAgentActionsInMemory
 	]);
 
 	const handleChatInputKeyDown = useCallback(
@@ -3793,16 +3724,18 @@ ${changesText}
 	};
 
 	useEffect(() => {
-		const onKey = (e: KeyboardEvent) => {
-			if (e.code !== 'Space') return;
-			if (activeModal !== null) return;
-			if (shouldIgnoreSpacebarForVideo(e.target)) return;
-			if (!videoSrc) return;
-			e.preventDefault();
-			toggleVideoPlay();
-		};
-		window.addEventListener('keydown', onKey);
-		return () => window.removeEventListener('keydown', onKey);
+		return installVideoEditorKeyboardHandlers({
+			isModalOpen: () => activeModal !== null,
+			hasVideo: () => Boolean(videoSrc),
+			onTogglePlay: toggleVideoPlay,
+			onDismissAppMenu: () => {
+				setActiveMenu(null);
+				const ae = document.activeElement;
+				if (ae instanceof HTMLElement && ae.closest('[data-app-menubar]')) {
+					ae.blur();
+				}
+			}
+		});
 	}, [activeModal, videoSrc, toggleVideoPlay]);
 
 	useEffect(() => {
@@ -4248,78 +4181,6 @@ ${changesText}
 		[clearPreviewFrame]
 	);
 
-	useLayoutEffect(() => {
-		const el = timelineScrollRef.current;
-		if (!el) return;
-		let raf = 0;
-		const schedule = () => {
-			if (raf) return;
-			raf = requestAnimationFrame(() => {
-				raf = 0;
-				syncTimelineScrollbarThumb();
-			});
-		};
-		el.addEventListener('scroll', schedule, { passive: true });
-		schedule();
-		return () => {
-			el.removeEventListener('scroll', schedule);
-			if (raf) cancelAnimationFrame(raf);
-		};
-	}, [syncTimelineScrollbarThumb, timelineZoomPercent, generatedSegments.length, timelineTotalDuration]);
-
-	useEffect(() => {
-		const panel = timelineWheelRef.current;
-		if (!panel) return;
-
-		const onWheel = (e: WheelEvent) => {
-			if (e.altKey) {
-				e.preventDefault();
-				const dir: 1 | -1 = e.deltaY > 0 ? -1 : 1;
-				const scr = timelineScrollRef.current;
-				const inner = timelineInnerRef.current;
-				const td = timelineTotalDurationRef.current;
-				if (scr && inner && td > 0) {
-					const r = Math.max(0, Math.min(1, currentPlaybackTimeRef.current / td));
-					zoomAnchorRef.current = { ratio: r, scrollLeft: scr.scrollLeft, innerW: inner.offsetWidth };
-				} else {
-					zoomAnchorRef.current = null;
-				}
-				setTimelineZoomPercent((z) => {
-					const zNext = stepTimelineZoom(z, dir);
-					if (zNext === z) zoomAnchorRef.current = null;
-					return zNext;
-				});
-				requestAnimationFrame(() => syncTimelineScrollbarThumb());
-				return;
-			}
-			const scr = timelineScrollRef.current;
-			if (!scr) return;
-			const scrollDelta =
-				Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-			if (scrollDelta === 0) return;
-			e.preventDefault();
-			scr.scrollLeft += scrollDelta;
-			requestAnimationFrame(() => syncTimelineScrollbarThumb());
-		};
-
-		panel.addEventListener('wheel', onWheel, { passive: false });
-		return () => panel.removeEventListener('wheel', onWheel);
-	}, [syncTimelineScrollbarThumb]);
-
-	useLayoutEffect(() => {
-		const a = zoomAnchorRef.current;
-		if (!a) return;
-		zoomAnchorRef.current = null;
-		const scr = timelineScrollRef.current;
-		const inner = timelineInnerRef.current;
-		if (!scr || !inner) return;
-		const wAfter = inner.offsetWidth;
-		const sNew = a.ratio * wAfter - (a.ratio * a.innerW - a.scrollLeft);
-		const maxSl = Math.max(0, scr.scrollWidth - scr.clientWidth);
-		scr.scrollLeft = Math.max(0, Math.min(sNew, maxSl));
-		syncTimelineScrollbarThumb();
-	}, [timelineZoomPercent, syncTimelineScrollbarThumb]);
-
 	const seekVideoFromClientX = useCallback(
 		(
 			clientX: number,
@@ -4372,39 +4233,6 @@ ${changesText}
 		[seekVideoFromClientX, seekVideo]
 	);
 
-	const handleTimelineScrubPointerDown = useCallback(
-		(e: React.MouseEvent<HTMLDivElement>) => {
-			e.preventDefault();
-			const bar = e.currentTarget;
-			const el = timelineScrollRef.current;
-			if (!el) return;
-			let moveRaf = 0;
-			const apply = (clientX: number) => {
-				const maxScroll = el.scrollWidth - el.clientWidth;
-				if (maxScroll <= 0) return;
-				const rect = bar.getBoundingClientRect();
-				const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-				el.scrollLeft = ratio * maxScroll;
-				if (moveRaf) return;
-				moveRaf = requestAnimationFrame(() => {
-					moveRaf = 0;
-					syncTimelineScrollbarThumb();
-				});
-			};
-			apply(e.clientX);
-			const onMove = (ev: MouseEvent) => apply(ev.clientX);
-			const onUp = () => {
-				if (moveRaf) cancelAnimationFrame(moveRaf);
-				window.removeEventListener('mousemove', onMove);
-				window.removeEventListener('mouseup', onUp);
-				syncTimelineScrollbarThumb();
-			};
-			window.addEventListener('mousemove', onMove);
-			window.addEventListener('mouseup', onUp);
-		},
-		[syncTimelineScrollbarThumb]
-	);
-
 	const handleVolumePointerDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
 		e.preventDefault();
 		const bar = e.currentTarget;
@@ -4432,10 +4260,6 @@ ${changesText}
 		window.addEventListener('mousemove', onMove);
 		window.addEventListener('mouseup', onUp);
 	}, []);
-
-	useLayoutEffect(() => {
-		requestAnimationFrame(() => syncTimelineScrollbarThumb());
-	}, [timelineZoomPercent, generatedSegments.length, timelineTotalDuration, syncTimelineScrollbarThumb]);
 
 	// ресайз панелей
 
@@ -4579,7 +4403,67 @@ ${changesText}
 		}
 	};
 
+	const subtitleTableLabels = useMemo(
+		() => ({
+			startTime: t('table.startTime'),
+			endTime: t('table.endTime'),
+			duration: t('table.duration'),
+			speakerGender: t('table.speakerGender'),
+			translation: t('table.translation'),
+			originalText: t('table.originalText')
+		}),
+		[t]
+	);
 
+	const editorVideoLabels = useMemo(
+		() => ({
+			preparing: t('video.preparing'),
+			preview: t('video.preview'),
+			play: t('video.play'),
+			pause: t('video.pause'),
+			stop: t('video.stop'),
+			mute: t('video.mute'),
+			unmute: t('video.unmute')
+		}),
+		[t]
+	);
+
+	const handleVideoPlayPauseClick = useCallback(() => {
+		const v = videoRef.current;
+		if (!v) return;
+		if (v.paused) void v.play();
+		else v.pause();
+	}, []);
+
+	const handleVideoStopClick = useCallback(() => {
+		const v = videoRef.current;
+		if (!v) return;
+		v.pause();
+		seekVideo(0);
+	}, [seekVideo]);
+
+	const handleVideoMuteToggleClick = useCallback(() => {
+		const v = videoRef.current;
+		if (!v) return;
+		const next = !videoMuted;
+		if (next) {
+			volumeBeforeMuteRef.current = v.volume;
+			v.volume = 0;
+			setVolume(0);
+			v.muted = true;
+			setVideoMuted(true);
+		} else {
+			const restore = Math.max(1e-3, volumeBeforeMuteRef.current);
+			v.volume = restore;
+			setVolume(restore);
+			v.muted = false;
+			setVideoMuted(false);
+		}
+	}, [videoMuted]);
+
+	const handleVideoError = useCallback(() => {
+		console.error('Video load/playback error', activeVideoAbsolutePath, videoSrc);
+	}, [activeVideoAbsolutePath, videoSrc]);
 
   return (
     <div className="flex flex-col h-screen w-full overflow-hidden bg-surface-bg select-none">
@@ -4602,7 +4486,7 @@ ${changesText}
 					/>
 
 					{/* Пункты меню */}
-					<div className="flex items-center gap-0.5">
+					<div className="flex items-center gap-0.5" data-app-menubar>
 						{menuItems.map((menu) => (
 							<div key={menu.id} className="relative">
 								<button 
@@ -5280,7 +5164,12 @@ ${changesText}
 							<div className="self-start max-w-[95%]">
 								<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px]">
 									<p className="text-body-reg text-text-primary/60 font-inter leading-tight">
-										{t('aiAgent.thinking')}
+										{agentBatchProgress
+											? t('aiAgent.batchProgress', {
+													current: agentBatchProgress.current,
+													total: agentBatchProgress.total
+												})
+											: t('aiAgent.thinking')}
 									</p>
 								</div>
 							</div>
@@ -5374,98 +5263,16 @@ ${changesText}
 							style={{ width: `${tablePanelWidth}px` }}
 							className="flex flex-col bg-surface-secondary relative min-w-[300px] border-r border-border-default overflow-hidden shrink-0"
 						>
-							{/* СЕКЦИЯ С ТАБЛИЦЕЙ */}
-							<div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
-								<div
-									ref={subtitleTableScrollRef}
-									className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary"
-								>
-									<table className="w-full border-collapse table-fixed bg-surface-secondary">
-									<colgroup>
-										{colWidths.map((w, i) => (
-											<col key={i} style={{ width: w }} />
-										))}
-										<col style={{ width: 'auto', minWidth: 50 }} />
-										<col style={{ width: 'auto', minWidth: 50 }} />
-									</colgroup>
-										<thead className="sticky top-0 bg-surface-secondary z-20">
-											<tr className="h-[25px]">
-												{['#', t('table.startTime'), t('table.endTime'), t('table.duration')].map((label, idx) => (
-													<th 
-														key={idx} 
-														style={{ width: `${colWidths[idx]}px` }}
-														className="relative h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default select-none min-w-0"
-													>
-														<div className="truncate w-full">{label}</div>
-														<div 
-															onMouseDown={(e) => startColResize(idx, e)}
-															className="absolute right-0 top-0 w-1 h-full cursor-col-resize hover:bg-primary-main/30 z-10" 
-														/>
-													</th>
-												))}
-												<th className="hidden h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
-													<div className="truncate w-full">{t('table.speakerGender')}</div>
-												</th>
-												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
-													<div className="truncate w-full">{t('table.translation')}</div>
-												</th>
-												<th className="h-[25px] py-1 px-2 text-left text-[14px] font-bold text-text-primary border-b border-border-default min-w-0">
-													<div className="truncate w-full">{t('table.originalText')}</div>
-												</th>
-											</tr>
-										</thead>
-										
-										<tbody>
-											{generatedSegments.map((segment, idx) => (
-												<tr
-													key={`${segment.id}-${idx}`}
-													data-subtitle-row-index={idx}
-													onClick={() => selectSegmentAndSeek(idx)}
-													className={`h-[25px] hover:bg-black/5 transition-colors group text-table cursor-pointer scroll-mt-[25px] ${
-														selectedSegmentIndex === idx ? 'bg-black/10' : ''
-													} ${findHighlight?.segmentIndex === idx ? 'bg-primary-main/15 ring-1 ring-inset ring-primary-main' : ''}`}
-												>
-													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-														<div className="truncate">{segment.id}</div>
-													</td>
-													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-														<div className="truncate">{segment.start.toFixed(3)}</div>
-													</td>
-													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-														<div className="truncate">{segment.end.toFixed(3)}</div>
-													</td>
-													<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">
-														<div className="truncate">{segment.duration.toFixed(3)}</div>
-													</td>
-													<td className="hidden py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text text-[11px] text-text-secondary">
-														<div className="truncate" title={segment.speaker_gender ?? ''}>
-															{formatSpeakerGenderCell(segment.speaker_gender)}
-														</div>
-													</td>
-													<td
-														className={`py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text ${
-															findHighlight?.segmentIndex === idx && findHighlight.field === 'translation'
-																? 'bg-primary-main/25'
-																: ''
-														}`}
-													>
-														<div className="truncate">{segment.translation || '-'}</div>
-													</td>
-													<td
-														className={`py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 text-body-reg select-text ${
-															findHighlight?.segmentIndex === idx && findHighlight.field === 'text'
-																? 'bg-primary-main/25'
-																: ''
-														}`}
-													>
-														<div className="truncate">{segment.text}</div>
-													</td>
-												</tr>
-											))}
-										</tbody>
-									</table>
-								</div>
-							</div>
+							<SubtitleTable
+								scrollRef={subtitleTableScrollRef}
+								colWidths={colWidths}
+								segments={generatedSegments}
+								selectedSegmentIndex={selectedSegmentIndex}
+								findHighlight={findHighlight}
+								onSelectRow={selectSegmentAndSeek}
+								onColResizeStart={startColResize}
+								labels={subtitleTableLabels}
+							/>
 
 							{/* РЕСАЙЗЕРЫ */}
 							<div 
@@ -5644,195 +5451,45 @@ ${changesText}
 							
 						</div>
 						
-												<div className="flex-1 bg-black flex flex-col shadow-inner min-w-[220px] overflow-hidden select-none">
-								
-								{/* Область видео */}
-								<div className="flex-1 relative flex flex-col items-center justify-center group bg-[#000000]">
-										<VideoPlayer
-											src={videoSrc}
-											sourceKey={playbackVideoPath ?? activeVideoAbsolutePath}
-											previewSrc={previewFrameSrc}
-											preparing={playbackPreparing}
-											volume={volume}
-											muted={videoMuted}
-											videoRef={videoRef}
-											emptyLabel={
-												playbackPreparing ? t('video.preparing') : t('video.preview')
-											}
-											onDuration={setVideoDuration}
-											onPlayingChange={handleVideoPlayingChange}
-											onVolumeFromElement={(vol) => {
-												setVolume(vol);
-												if (vol < 1e-4) setVideoMuted(true);
-											}}
-											onError={() => {
-												console.error(
-													'Video load/playback error',
-													activeVideoAbsolutePath,
-													videoSrc
-												);
-											}}
-											onFrameTime={handleVideoFrameTime}
-											onSeeked={handleVideoSeeked}
-											onPlayStart={clearPreviewFrame}
-										>
-										{showOriginalVideoSubtitles && (
-											<div className="absolute top-12 z-10 w-full text-center px-10 pointer-events-none">
-												<span
-													ref={videoOriginalOverlayRef}
-													className="text-white text-[17px] font-bold leading-[17px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]"
-												>
-													{'\u00A0'}
-												</span>
-											</div>
-										)}
-										<div className="absolute bottom-12 z-10 w-full text-center px-10 pointer-events-none">
-												<span
-													ref={videoTranslationOverlayRef}
-													className="text-white text-[17px] font-bold leading-[17px] tracking-[-0.01em] font-inter [text-shadow:0_0_1px_rgba(0,0,0,0.95),0_1px_2px_rgba(0,0,0,0.9),0_2px_8px_rgba(0,0,0,0.75),0_4px_20px_rgba(0,0,0,0.45)]"
-												>
-														{'\u00A0'}
-												</span>
-										</div>
-										</VideoPlayer>
-								</div>
-
-								{/* Панель управления */}
-								<div className="bg-surface-panel border-t border-border-default flex flex-col shrink-0 p-3 m-0 gap-[24px]">
-										<div className="w-full">
-												<div
-													className="relative w-full h-[4px] rounded-[2px] bg-border-default cursor-pointer overflow-hidden"
-													onMouseDown={handleVideoProgressPointerDown}
-												>
-														<div
-															ref={videoProgressFillRef}
-															className="absolute left-0 top-0 h-full rounded-[2px] bg-[#9FA3B0]"
-															style={{ width: '0%' }}
-														/>
-												</div>
-										</div>
-
-										{/* Контролы: при узкой панели таймкод переносится вниз и выравнивается слева */}
-										<div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 w-full min-w-0">
-												<div className="flex items-center gap-[12px] shrink-0 min-w-0">
-														<button
-															type="button"
-															title={isVideoPlaying ? t('video.pause') : t('video.play')}
-															aria-label={isVideoPlaying ? t('video.pause') : t('video.play')}
-															disabled={!videoSrc}
-															className={`group/vplay ${VIDEO_CTRL_BTN_CLASS}`}
-															onClick={() => {
-																const v = videoRef.current;
-																if (!v) return;
-																if (v.paused) void v.play();
-																else v.pause();
-															}}
-														>
-															<span
-																className={VIDEO_CTRL_ICON_PLAY}
-																style={sidebarIconMaskStyle(
-																	isVideoPlaying ? iconPause : iconPlay
-																)}
-																aria-hidden
-															/>
-														</button>
-														<button
-															type="button"
-															title={t('video.stop')}
-															aria-label={t('video.stop')}
-															disabled={!videoSrc}
-															className={`group/vstop ${VIDEO_CTRL_BTN_CLASS}`}
-															onClick={() => {
-																const v = videoRef.current;
-																if (!v) return;
-																v.pause();
-																seekVideo(0);
-															}}
-														>
-															<span
-																className={VIDEO_CTRL_ICON_STOP}
-																style={sidebarIconMaskStyle(iconStop)}
-																aria-hidden
-															/>
-														</button>
-														<button
-															type="button"
-															title={
-																videoMuted || volume < 1e-4
-																	? t('video.unmute')
-																	: t('video.mute')
-															}
-															aria-label={
-																videoMuted || volume < 1e-4
-																	? t('video.unmute')
-																	: t('video.mute')
-															}
-															disabled={!videoSrc}
-															className={`group/vvol ${VIDEO_CTRL_BTN_CLASS}`}
-															onClick={() => {
-																const v = videoRef.current;
-																if (!v) return;
-																const next = !videoMuted;
-																if (next) {
-																	volumeBeforeMuteRef.current = v.volume;
-																	v.volume = 0;
-																	setVolume(0);
-																	v.muted = true;
-																	setVideoMuted(true);
-																} else {
-																	const restore = Math.max(
-																		1e-3,
-																		volumeBeforeMuteRef.current
-																	);
-																	v.volume = restore;
-																	setVolume(restore);
-																	v.muted = false;
-																	setVideoMuted(false);
-																}
-															}}
-														>
-															<span
-																className={VIDEO_CTRL_ICON_VOL}
-																style={sidebarIconMaskStyle(
-																	videoMuted || volume < 1e-4
-																		? iconVolumeMute
-																		: iconVolume
-																)}
-																aria-hidden
-															/>
-														</button>
-														
-														{/* Слайдер громкости */}
-														<div
-															className="w-16 h-[4px] rounded-[2px] bg-border-default relative shrink-0 cursor-pointer overflow-hidden"
-															onMouseDown={handleVolumePointerDown}
-														>
-																<div
-																	className="absolute left-0 top-0 h-full rounded-[2px] bg-primary-disabled"
-																	style={{
-																		width: `${volume * 100}%`
-																	}}
-																/>
-														</div>
-												</div>
-
-												{/* Таймкоды */}
-												<div
-													className="flex items-center gap-1 text-[12px] text-body-med text-text-primary shrink-0 tabular-nums whitespace-nowrap"
-													style={{ fontVariantNumeric: 'tabular-nums' }}
-												>
-														<span ref={playbackClockRef} className="inline-block text-right">
-															{formatPlaybackClock(currentPlaybackTime)}
-														</span>
-														<span className="text-text-secondary/40">/</span>
-														<span className="inline-block text-text-secondary">
-															{formatPlaybackClock(timelineTotalDuration)}
-														</span>
-												</div>
-										</div>
-								</div>
-								
-						</div>
+						<EditorVideoPane
+							videoSrc={videoSrc}
+							playbackVideoPath={playbackVideoPath}
+							activeVideoAbsolutePath={activeVideoAbsolutePath}
+							previewFrameSrc={previewFrameSrc}
+							playbackPreparing={playbackPreparing}
+							volume={volume}
+							videoMuted={videoMuted}
+							isVideoPlaying={isVideoPlaying}
+							currentPlaybackTime={currentPlaybackTime}
+							timelineTotalDuration={timelineTotalDuration}
+							showOriginalVideoSubtitles={showOriginalVideoSubtitles}
+							videoRef={videoRef}
+							videoProgressFillRef={videoProgressFillRef}
+							playbackClockRef={playbackClockRef}
+							videoTranslationOverlayRef={videoTranslationOverlayRef}
+							videoOriginalOverlayRef={videoOriginalOverlayRef}
+							iconPlay={iconPlay}
+							iconPause={iconPause}
+							iconStop={iconStop}
+							iconVolume={iconVolume}
+							iconVolumeMute={iconVolumeMute}
+							labels={editorVideoLabels}
+							onDuration={setVideoDuration}
+							onPlayingChange={handleVideoPlayingChange}
+							onVolumeFromElement={(vol) => {
+								setVolume(vol);
+								if (vol < 1e-4) setVideoMuted(true);
+							}}
+							onVideoError={handleVideoError}
+							onFrameTime={handleVideoFrameTime}
+							onSeeked={handleVideoSeeked}
+							onPlayStart={clearPreviewFrame}
+							onProgressPointerDown={handleVideoProgressPointerDown}
+							onVolumePointerDown={handleVolumePointerDown}
+							onPlayPauseClick={handleVideoPlayPauseClick}
+							onStopClick={handleVideoStopClick}
+							onMuteToggleClick={handleVideoMuteToggleClick}
+						/>
 
 					</div>
 					
@@ -5907,230 +5564,47 @@ ${changesText}
 								</button>
 							</div>
 
-							{/* основная зона таймлайна (wheel: горизонтальный скролл; Alt+wheel: зум) — общий паддинг 12px, между таймлайном и зум+скролл gap 12px без разделителя */}
-							<div
-								ref={timelineWheelRef}
-								className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden bg-surface-panel p-3"
-							>
-								{/* Контейнер с волной и субтитрами */}
-								<div
-									ref={timelineScrollRef}
-									className="timeline-pan-no-scrollbar relative min-h-0 flex-1 overflow-x-auto overflow-y-hidden rounded-md border border-black bg-[#121212] shadow-inner group [overflow-anchor:none]"
-								>
-									<div
-										ref={timelineInnerRef}
-										className="relative h-full min-h-0 select-none"
-										style={{ width: `${Math.max(100, timelineZoomPercent)}%` }}
-										onPointerDown={beginTimelineRangeSelect}
-										onContextMenu={(e) => {
-											e.preventDefault();
-											const ids = Array.from(selectedSegmentIdsRef.current);
-											setTimelineContextMenu({
-												x: e.clientX,
-												y: e.clientY,
-												ids,
-												range: timelineRubberRange
-											});
-										}}
-									>
-										{/* Сетка */}
-										<div
-											className="absolute inset-0 opacity-10"
-											style={{
-												backgroundImage: `linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)`,
-												backgroundSize: '20px 20px'
-											}}
-										/>
-										{(() => {
-											const td = timelineTotalDuration;
-											if (td <= 0) return null;
-											if (timelineRangePreview) {
-												const lo = Math.min(timelineRangePreview.a, timelineRangePreview.b);
-												const hi = Math.max(timelineRangePreview.a, timelineRangePreview.b);
-												const left = (lo / td) * 100;
-												const w = Math.max(((hi - lo) / td) * 100, 0.04);
-												return (
-													<div
-														className="absolute top-0 bottom-0 z-[8] rounded-sm bg-primary-main/30 pointer-events-none"
-														style={{ left: `${left}%`, width: `${w}%` }}
-													/>
-												);
-											}
-											if (
-												timelineInsertRange &&
-												timelineInsertRange.end - timelineInsertRange.start >= MIN_SEGMENT_DURATION
-											) {
-												const { start: rs, end: re } = timelineInsertRange;
-												const left = (rs / td) * 100;
-												const w = ((re - rs) / td) * 100;
-												return (
-													<div
-														className="absolute top-0 bottom-0 z-[8] rounded-sm bg-primary-main/25 pointer-events-none"
-														style={{ left: `${left}%`, width: `${w}%` }}
-													/>
-												);
-											}
-											return null;
-										})()}
-
-										{/* Волна: PNG (showwavespic) или canvas по пикам */}
-										{waveformImageSrc ? (
-											<div
-												key={waveformImageSrc}
-												className="absolute inset-x-0 top-2 bottom-2 z-[5] overflow-hidden pointer-events-none"
-											>
-												<img
-													src={waveformImageSrc}
-													alt=""
-													draggable={false}
-													className="h-full w-full min-h-0 select-none object-fill opacity-95 [image-rendering:pixelated]"
-													style={{ imageRendering: 'pixelated' }}
-												/>
-											</div>
-										) : (
-											<TimelineSymmetricWaveform
-												peaks={waveformPeaks}
-												className="absolute inset-x-0 top-2 bottom-2 z-[5] w-full min-w-0 opacity-95 pointer-events-none"
-											/>
-										)}
-
-										{/* Субтитры на таймлайне */}
-										<div className="absolute inset-0 flex items-stretch pointer-events-none">
-											{timelineSegmentsSorted.map((seg, orderIdx) => {
-												const idx = generatedSegments.findIndex((s) => s.id === seg.id);
-												if (idx < 0) return null;
-												const left = (seg.start / timelineTotalDuration) * 100;
-												const w = Math.max(0, ((seg.end - seg.start) / timelineTotalDuration) * 100);
-												const isSel = idx === selectedSegmentIndex;
-												const isMultiSel = selectedSegmentIds.has(seg.id);
-												const tr = seg.translation?.trim() ?? '';
-												return (
-													<div
-														key={seg.id}
-														data-tl-segment
-														className={`absolute top-0 z-[11] h-full flex flex-col justify-between pointer-events-auto cursor-pointer ${
-															isMultiSel
-																? 'border-x-2 border-primary-main bg-primary-main/20'
-																: `border-x border-[#A3E635] ${isSel ? 'bg-surface-secondary/10' : 'bg-surface-secondary/5'}`
-														}`}
-														style={{ left: `${left}%`, width: `${w}%` }}
-														onClick={(e) => {
-															if ((e.target as HTMLElement).closest('[data-tl-edge]')) return;
-															if (segmentBodyDragMovedRef.current) {
-																segmentBodyDragMovedRef.current = false;
-																return;
-															}
-															e.stopPropagation();
-															const t = clientXToTimelineTime(e.clientX);
-															seekVideo(t);
-															setSelectedSegmentIndex(idx);
-															setSelectedSegmentIds(new Set());
-															setTimelineRubberRange(null);
-														}}
-													>
-														<div
-															data-tl-body
-															className="relative z-[10] flex flex-col justify-between p-2 min-h-0 flex-1 min-w-0 cursor-grab active:cursor-grabbing"
-															onMouseDown={(e) => beginTimelineSegmentMove(idx, e)}
-														>
-															<span className="text-[12px] font-bold font-inter text-white/85 truncate">
-																{tr || '\u00A0'}
-															</span>
-															<div className="text-[12px] font-bold font-inter text-white/70 truncate min-w-0 w-full shrink tabular-nums">
-																#{orderIdx + 1} {seg.duration.toFixed(2)}s
-															</div>
-														</div>
-														<div
-															data-tl-edge="start"
-															className="absolute left-0 top-0 bottom-0 w-2 z-[35] cursor-ew-resize hover:bg-white/25"
-															onMouseDown={(e) => beginTimelineEdgeDrag('start', idx, e)}
-														/>
-														<div
-															data-tl-edge="end"
-															className="absolute right-0 top-0 bottom-0 w-2 z-[35] cursor-ew-resize hover:bg-white/25"
-															onMouseDown={(e) => beginTimelineEdgeDrag('end', idx, e)}
-														/>
-													</div>
-												);
-											})}
-											<div
-												ref={timelinePlayheadRef}
-												className="absolute top-0 bottom-0 w-px bg-primary-main z-20 pointer-events-none"
-												style={{ left: '0%' }}
-											/>
-										</div>
-									</div>
-								</div>
-
-								{/* Зум + скроллбар: фон как у левой панели (Insert…) — задаётся родителем timelineWheelRef */}
-								<div className="flex shrink-0 items-center gap-[24px]">
-									<div className="flex items-center gap-3">
-										<button
-											type="button"
-											title={t('timeline.zoomOut')}
-											aria-label={t('timeline.zoomOut')}
-											className={`group/tzoomout ${TIMELINE_ZOOM_BTN_CLASS}`}
-											onClick={() =>
-												setTimelineZoomPercent((z) => stepTimelineZoom(z, -1))
-											}
-										>
-											<span
-												className={TIMELINE_ZOOM_OUT_ICON_CLASS}
-												style={sidebarIconMaskStyle(iconZoomOut)}
-												aria-hidden
-											/>
-										</button>
-
-										{/* непрерывный (логарифмический) зум как в NLE */}
-										<input
-											type="range"
-											min={TIMELINE_ZOOM_SLIDER_MIN}
-											max={TIMELINE_ZOOM_SLIDER_MAX}
-											step={1}
-											aria-label={t('timeline.zoomSmooth')}
-											title={t('timeline.zoomSmooth')}
-											className="timeline-zoom-slider h-[22px] w-[160px] cursor-pointer"
-											style={
-												{
-													'--timeline-zoom-fill': `${timelineZoomToFillPercent(timelineZoomPercent)}%`
-												} as React.CSSProperties
-											}
-											value={timelineZoomToSliderValue(timelineZoomPercent)}
-											onChange={(e) => {
-												const slider = Number(e.target.value);
-												setTimelineZoomPercent(sliderValueToTimelineZoom(slider));
-											}}
-										/>
-
-										<button
-											type="button"
-											title={t('timeline.zoomIn')}
-											aria-label={t('timeline.zoomIn')}
-											className={`group/tzoomin ${TIMELINE_ZOOM_BTN_CLASS}`}
-											onClick={() =>
-												setTimelineZoomPercent((z) => stepTimelineZoom(z, 1))
-											}
-										>
-											<span
-												className={TIMELINE_ZOOM_IN_ICON_CLASS}
-												style={sidebarIconMaskStyle(iconZoomIn)}
-												aria-hidden
-											/>
-										</button>
-									</div>
-
-									<div
-										className="relative h-[4px] min-w-0 flex-1 cursor-pointer overflow-hidden rounded-full bg-border-default"
-										onMouseDown={handleTimelineScrubPointerDown}
-									>
-										<div
-											ref={timelineScrollbarThumbRef}
-											className="absolute top-0 h-full rounded-full bg-primary-disabled"
-											style={{ width: '100%', left: '0%' }}
-										/>
-									</div>
-								</div>
-							</div>
+							<TimelinePanel
+								wheelRef={timelineWheelRef}
+								scrollRef={timelineScrollRef}
+								innerRef={timelineInnerRef}
+								playheadRef={timelinePlayheadRef}
+								scrollbarThumbRef={timelineScrollbarThumbRef}
+								timelineTotalDuration={timelineTotalDuration}
+								timelineTotalDurationRef={timelineTotalDurationRef}
+								segmentsSorted={timelineSegmentsSorted}
+								segmentIndexById={segmentIndexById}
+								segmentSortedOrderById={segmentSortedOrderById}
+								selectedSegmentIndex={selectedSegmentIndex}
+								selectedSegmentIds={selectedSegmentIds}
+								waveformImageSrc={waveformImageSrc}
+								waveformPeaks={waveformPeaks}
+								timelineRangePreview={timelineRangePreview}
+								timelineInsertRange={timelineInsertRange}
+								minSegmentDuration={MIN_SEGMENT_DURATION}
+								onRangeSelectPointerDown={beginTimelineRangeSelect}
+								onTimelineContextMenu={(e) => {
+									e.preventDefault();
+									const ids = Array.from(selectedSegmentIdsRef.current);
+									setTimelineContextMenu({
+										x: e.clientX,
+										y: e.clientY,
+										ids,
+										range: timelineRubberRange
+									});
+								}}
+								onSegmentClick={handleTimelineSegmentClick}
+								beginTimelineEdgeDrag={beginTimelineEdgeDrag}
+								beginTimelineSegmentMove={beginTimelineSegmentMove}
+								segmentBodyDragMovedRef={segmentBodyDragMovedRef}
+								clientXToTimelineTime={clientXToTimelineTime}
+								seekVideo={seekVideo}
+								iconZoomIn={iconZoomIn}
+								iconZoomOut={iconZoomOut}
+								zoomOutTitle={t('timeline.zoomOut')}
+								zoomInTitle={t('timeline.zoomIn')}
+								zoomSliderTitle={t('timeline.zoomSmooth')}
+							/>
 						</div>
 					</div>
 

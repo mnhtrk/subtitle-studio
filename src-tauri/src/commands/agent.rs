@@ -1,13 +1,23 @@
 use serde::{Deserialize, Serialize};
 use crate::project::{SubtitleSegment, GlossaryEntry};
+use crate::speaker_gender_rules::{
+    dialogue_context_translation_rules, segment_speaker_gender_str,
+    speaker_gender_translation_rules,
+};
 use crate::agent::dialogue_history::{DialogueHistory, AgentMessage, ConversationTurn, DialogueContext};
+use std::collections::HashSet;
 use std::sync::Mutex;
 use lazy_static::lazy_static;
 use regex::Regex;
 
 const AGENT_MODEL: &str = "gpt-5.4";
-const MAX_SEGMENTS_IN_PROMPT: usize = 200;
 const MAX_HISTORY_TURNS: usize = 30;
+const DEFAULT_NEIGHBOR_RADIUS: usize = 5;
+const MAX_NEIGHBOR_RADIUS: usize = 12;
+const COMPACT_TEXT_MAX: usize = 80;
+const COMPACT_TRANSLATION_MAX: usize = 120;
+/// При большом файле — структура сцен + фокус/пакет, без тысяч компактных строк.
+const MAX_COMPACT_LINES_IN_PROMPT: usize = 350;
 
 lazy_static! {
     static ref DIALOGUE_HISTORY: Mutex<Option<DialogueHistory>> = Mutex::new(None);
@@ -29,6 +39,16 @@ pub struct AgentContext {
     pub current_segments: Option<Vec<SubtitleSegment>>,
     pub current_glossary: Option<Vec<GlossaryEntry>>,
     pub target_language: Option<String>,
+    #[serde(default)]
+    pub focus_segment_id: Option<u32>,
+    #[serde(default)]
+    pub neighbor_radius: usize,
+    #[serde(default)]
+    pub batch_segment_ids: Option<Vec<u32>>,
+    #[serde(default)]
+    pub batch_index: Option<u32>,
+    #[serde(default)]
+    pub batch_total: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -78,6 +98,11 @@ pub async fn chat_with_agent(
             request.context.current_segments.clone(),
             request.context.current_glossary.clone(),
             request.context.target_language.clone(),
+            request.context.focus_segment_id,
+            request.context.neighbor_radius,
+            request.context.batch_segment_ids.clone(),
+            request.context.batch_index,
+            request.context.batch_total,
             &request.conversation_history,
         );
     }
@@ -94,6 +119,11 @@ pub async fn chat_with_agent(
             current_segments: None,
             current_glossary: None,
             target_language: None,
+            focus_segment_id: None,
+            neighbor_radius: 0,
+            batch_segment_ids: None,
+            batch_index: None,
+            batch_total: None,
             conversation_history: Vec::new(),
         })
     };
@@ -235,8 +265,32 @@ fn build_system_prompt(context: &DialogueContext) -> String {
         .target_language
         .as_deref()
         .unwrap_or("не указан");
-    let segments_block = format_segments_for_prompt(context.current_segments.as_deref());
+    let radius = if context.neighbor_radius == 0 {
+        DEFAULT_NEIGHBOR_RADIUS
+    } else {
+        context.neighbor_radius.min(MAX_NEIGHBOR_RADIUS)
+    };
+    let segments_block = format_segments_for_prompt(
+        context.current_segments.as_deref(),
+        context.focus_segment_id,
+        radius,
+        context.batch_segment_ids.as_deref(),
+        context.batch_index,
+        context.batch_total,
+    );
     let glossary_block = format_glossary_for_prompt(context.current_glossary.as_deref());
+    let gender_dialogue = dialogue_context_translation_rules(target_lang);
+    let gender_rules = speaker_gender_translation_rules(target_lang);
+    let gender_field_note = "\n\
+         У каждой реплики в списке ниже указан speaker_gender (male/female/unknown) — пол говорящего в этой строке.\n";
+
+    let batch_note = if context.batch_total.unwrap_or(0) > 1 {
+        "\n\
+         РЕЖИМ ПАКЕТОВ: пользователь просит пройти по всему файлу. Обрабатывай ТОЛЬКО сегменты текущего пакета (полный текст ниже). \
+         В edit_segments возвращай только изменённые id из этого пакета. Остальные пакеты придут отдельными запросами.\n"
+    } else {
+        ""
+    };
 
     format!(
         "Ты AI-ассистент приложения Subtitle Studio, помощник по субтитрам.\n\
@@ -245,8 +299,13 @@ fn build_system_prompt(context: &DialogueContext) -> String {
          Контекст проекта:\n\
          - Целевой язык перевода: {target_lang}\n\
          - {glossary_block}\n\n\
-         Текущие субтитры (id, таймкоды start-end в секундах, text = оригинал, translation = перевод):\n\
+         {batch_note}\
+         {gender_field_note}\
+         {gender_dialogue}\
+         {gender_rules}\
+         Субтитры (сначала краткая структура эпизода по сценам, затем реплики):\n\
          {segments_block}\n\n\
+         Если в сообщении есть «Прикрепленная реплика» — она помечена <<< ПРИКРЕПЛЕНО; учитывай ±{radius} соседних строк в развёрнутом фрагменте (у них тоже есть speaker_gender).\n\n\
          Как понимать намерение (смотри на смысл и историю диалога):\n\
          - Если пользователь обсуждает реплику и затем предлагает формулировку («надо вот так», «лучше так», \"should be\", \"make it\"…) — это правка субтитров.\n\
          - Если просит изменить/исправить/укоротить/перефразировать сегмент — edit_segments.\n\
@@ -274,11 +333,132 @@ fn build_system_prompt(context: &DialogueContext) -> String {
          2) {{\"type\":\"update_glossary\",\"entries\":[{{\"id\":\"\",\"source\":\"\",\"target\":\"\",\"description\":null,\"context\":null}}]}}\n\
          3) {{\"type\":\"explain_issue\",\"issue\":\"...\",\"solution\":\"...\"}}\n\
          4) {{\"type\":\"generate_text\",\"text\":\"...\"}}\n\n\
-         Если правки не нужны, actions: []."
+         Если правки не нужны, actions: [].",
+        target_lang = target_lang,
+        glossary_block = glossary_block,
+        batch_note = batch_note,
+        gender_field_note = gender_field_note,
+        gender_dialogue = gender_dialogue,
+        gender_rules = gender_rules,
+        segments_block = segments_block,
+        radius = radius,
     )
 }
 
-fn format_segments_for_prompt(segments: Option<&[SubtitleSegment]>) -> String {
+fn format_segment_line_full(s: &SubtitleSegment, mark: &str) -> String {
+    let tr = s.translation.as_deref().unwrap_or("");
+    let g = segment_speaker_gender_str(s);
+    format!(
+        "#{} [{:.2}-{:.2}] speaker_gender={} text={:?} translation={:?}{}\n",
+        s.id, s.start, s.end, g, s.text, tr, mark
+    )
+}
+
+fn format_segment_line_compact(s: &SubtitleSegment) -> String {
+    let tr = truncate_for_prompt(s.translation.as_deref().unwrap_or(""), COMPACT_TRANSLATION_MAX);
+    let txt = truncate_for_prompt(&s.text, COMPACT_TEXT_MAX);
+    let g = segment_speaker_gender_str(s);
+    format!(
+        "#{} [{:.2}-{:.2}] gender={} orig={:?} tr={:?}\n",
+        s.id, s.start, s.end, g, txt, tr
+    )
+}
+
+fn truncate_for_prompt(s: &str, max_chars: usize) -> String {
+    let t = s.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if t.chars().count() <= max_chars {
+        return t.to_string();
+    }
+    let mut out: String = t.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+fn format_time_hms(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "00:00:00".to_string();
+    }
+    let total = seconds.floor() as u64;
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// Сцены по паузам между репликами (без вызова LLM).
+fn format_episode_outline(segments: &[SubtitleSegment]) -> String {
+    if segments.is_empty() {
+        return "Структура эпизода: (нет реплик)".to_string();
+    }
+
+    const SCENE_GAP_SEC: f64 = 5.0;
+
+    let mut sorted: Vec<&SubtitleSegment> = segments.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let mut scenes: Vec<Vec<&SubtitleSegment>> = Vec::new();
+    let mut current: Vec<&SubtitleSegment> = vec![sorted[0]];
+    for w in sorted.windows(2) {
+        if w[1].start - w[0].end > SCENE_GAP_SEC {
+            scenes.push(current);
+            current = vec![w[1]];
+        } else {
+            current.push(w[1]);
+        }
+    }
+    scenes.push(current);
+
+    let total = sorted.len();
+    let duration_end = sorted.last().map(|s| s.end).unwrap_or(0.0);
+    let mut lines = vec![format!(
+        "Структура эпизода ({} сцен, пауза между сценами ≥{:.0}s, {} реплик, длительность до {}):",
+        scenes.len(),
+        SCENE_GAP_SEC,
+        total,
+        format_time_hms(duration_end)
+    )];
+
+    for (i, scene) in scenes.iter().enumerate() {
+        let start = scene.first().map(|s| s.start).unwrap_or(0.0);
+        let end = scene.last().map(|s| s.end).unwrap_or(0.0);
+        let first = scene.first();
+        let sample_o = first
+            .map(|s| truncate_for_prompt(&s.text, 70))
+            .unwrap_or_default();
+        let sample_t = first
+            .and_then(|s| s.translation.as_deref())
+            .map(|t| truncate_for_prompt(t, 70))
+            .unwrap_or_default();
+        lines.push(format!(
+            "  Сцена {} [{}–{}] — {} реплик | начало: {:?} → {:?}",
+            i + 1,
+            format_time_hms(start),
+            format_time_hms(end),
+            scene.len(),
+            sample_o,
+            sample_t
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn format_segments_for_prompt(
+    segments: Option<&[SubtitleSegment]>,
+    focus_id: Option<u32>,
+    neighbor_radius: usize,
+    batch_ids: Option<&[u32]>,
+    batch_index: Option<u32>,
+    batch_total: Option<u32>,
+) -> String {
     let Some(segments) = segments else {
         return "(сегменты не переданы)".to_string();
     };
@@ -286,27 +466,87 @@ fn format_segments_for_prompt(segments: Option<&[SubtitleSegment]>) -> String {
         return "(пустой список сегментов)".to_string();
     }
 
-    let total = segments.len();
-    let shown: Vec<_> = segments.iter().take(MAX_SEGMENTS_IN_PROMPT).collect();
-    let lines: Vec<String> = shown
-        .iter()
-        .map(|s| {
-            let tr = s.translation.as_deref().unwrap_or("");
-            format!(
-                "#{} [{:.2}-{:.2}] text={:?} translation={:?}",
-                s.id, s.start, s.end, s.text, tr
-            )
-        })
-        .collect();
+    let mut sorted: Vec<&SubtitleSegment> = segments.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
-    let mut block = lines.join("\n");
-    if total > MAX_SEGMENTS_IN_PROMPT {
-        block.push_str(&format!(
-            "\n… и ещё {} сегментов (не показаны). Уточняй id при правках.",
-            total - MAX_SEGMENTS_IN_PROMPT
-        ));
+    let total = sorted.len();
+    let mut out = format_episode_outline(segments);
+    out.push('\n');
+
+    if let Some(ids) = batch_ids {
+        if !ids.is_empty() {
+            let id_set: HashSet<u32> = ids.iter().copied().collect();
+            let bi = batch_index.unwrap_or(1);
+            let bt = batch_total.unwrap_or(1);
+            out.push_str(&format!(
+                "\nПакет {bi}/{bt} — полный текст только этих id (остальные сегменты файла в других пакетах):\n"
+            ));
+            for s in &sorted {
+                if id_set.contains(&s.id) {
+                    out.push_str(&format_segment_line_full(s, ""));
+                }
+            }
+            return out;
+        }
     }
-    block
+
+    let focus_idx = focus_id.and_then(|id| sorted.iter().position(|s| s.id == id));
+    let radius = neighbor_radius.min(MAX_NEIGHBOR_RADIUS);
+
+    let in_focus_window = |idx: usize| -> bool {
+        if let Some(fi) = focus_idx {
+            let lo = fi.saturating_sub(radius);
+            let hi = (fi + radius).min(total.saturating_sub(1));
+            idx >= lo && idx <= hi
+        } else {
+            false
+        }
+    };
+
+    out.push_str(&format!("\nВсего сегментов: {total}.\n"));
+
+    if let Some(fi) = focus_idx {
+        let lo = fi.saturating_sub(radius);
+        let hi = (fi + radius).min(total.saturating_sub(1));
+        out.push_str(&format!(
+            "Развёрнутый фрагмент (прикреплённая реплика и ±{radius} соседей, id {}..{}):\n",
+            sorted[lo].id,
+            sorted[hi].id
+        ));
+        for idx in lo..=hi {
+            let s = sorted[idx];
+            let mark = if Some(s.id) == focus_id {
+                " <<< ПРИКРЕПЛЕНО"
+            } else {
+                ""
+            };
+            out.push_str(&format_segment_line_full(s, mark));
+        }
+        out.push('\n');
+    }
+
+    if total > MAX_COMPACT_LINES_IN_PROMPT {
+        out.push_str(&format!(
+            "\nПострочный список всех {total} реплик опущен (слишком большой для одного запроса). \
+             Используй структуру сцен выше; для правок по всему файлу пользователь запускает пакетный режим. \
+             При правке указывай id из сообщения или прикреплённого фрагмента.\n"
+        ));
+    } else {
+        out.push_str("Все реплики (компактно; развёрнутый фрагмент выше не дублируется):\n");
+        for (idx, s) in sorted.iter().enumerate() {
+            if in_focus_window(idx) {
+                continue;
+            }
+            out.push_str(&format_segment_line_compact(s));
+        }
+    }
+
+    out
 }
 
 fn format_glossary_for_prompt(glossary: Option<&[GlossaryEntry]>) -> String {
