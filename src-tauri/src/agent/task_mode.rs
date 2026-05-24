@@ -120,8 +120,9 @@ Rules for task_mode:
 - answer_only: questions, discussion, advice, analysis — NO subtitle edits requested.
 - general: edit specific segment(s), rephrase, improve style, glossary, mixed small tasks — NOT whole-file replace or whole-file proofread.
 - bulk_replace: user wants to replace a term/phrase across subtitles via contextual translation. Set replace_from and replace_to to the OLD and NEW wording in the TRANSLATION column when fixing how a source term is translated. Use the source term in field text only to FIND lines — do NOT replace inside text unless the user explicitly asks to change the original dialogue. translation_only=true when the user says translate/переведи/как (how to translate), or when from and to use different scripts (e.g. Latin source term → Cyrillic translation). translation_only=false only if the user clearly wants to edit the original (text) column.
-- proofread: user asks to fix typos/grammar/spelling across subtitles — minimal fixes only, not rewriting good lines.
-- translation_fix: user asks to fix translation errors/quality across subtitles — only translation field.
+- proofread: user asks to fix typos/grammar/spelling across subtitles — minimal fixes only, not rewriting good lines. Includes project-wide checks.
+- translation_fix: user asks to fix translation errors/quality across subtitles — only translation field. Includes project-wide checks.
+- general: also use when user asks to remove Whisper watermark hallucinations only (delete_segments: Amara.org, Subtitles by… — never laughter/interjections).
 
 Do NOT guess replace_from/replace_to unless the user clearly asked for a replacement.
 For bulk_replace, extract the actual old and new wording from context (e.g. glossary term + wrong vs right translation)."#;
@@ -135,7 +136,7 @@ For bulk_replace, extract the actual old and new wording from context (e.g. glos
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4",
+            "model": INTENT_CLASSIFIER_MODEL,
             "messages": [
                 { "role": "system", "content": system },
                 { "role": "user", "content": user }
@@ -270,6 +271,16 @@ pub fn model_temperature(mode: AgentTaskMode) -> f32 {
     }
 }
 
+/// Чат агента и правки субтитров (general, proofread, bulk_replace и т.д.).
+pub const AGENT_CHAT_MODEL: &str = "gpt-5.4-mini";
+
+/// Классификация намерения — отдельно, полная модель.
+pub const INTENT_CLASSIFIER_MODEL: &str = "gpt-5.4";
+
+pub fn agent_model_for_task(_mode: AgentTaskMode) -> &'static str {
+    AGENT_CHAT_MODEL
+}
+
 pub fn task_mode_prompt_block(mode: AgentTaskMode) -> &'static str {
     match mode {
         AgentTaskMode::AnswerOnly => "\n\
@@ -287,7 +298,9 @@ pub fn task_mode_prompt_block(mode: AgentTaskMode) -> &'static str {
              РЕЖИМ ВЫЧИТКИ: только явные опечатки и грамматические ошибки.\n\
              - Не перефразируй и не «улучшай» удачные строки; корректные реплики не трогай.\n\
              - Минимальная правка (буква, окончание, знак), не новая формулировка.\n\
-             - Если ошибки нет — не включай реплику в edit_segments.\n",
+             - Если ошибки нет — не включай реплику в edit_segments.\n\
+             - Водяной знак Whisper (Amara.org, Subtitles by…) — delete_segments; смех (ха-ха, хи-хи) и междометия (ай, ой, нет) — НЕ удалять.\n\
+             - Нет строки с водяным знаком — delete_segments: [].\n",
         AgentTaskMode::TranslationFix => "\n\
              РЕЖИМ ПЕРЕВОДА: только поле translation, только явные ошибки перевода.\n\
              - Не переписывай удачный перевод; text (оригинал) не меняй.\n\
@@ -477,7 +490,12 @@ fn text_related_to_term(haystack: &str, term: &str) -> bool {
     if n < 3 {
         return false;
     }
-    let stem_len = n.saturating_sub(2).clamp(4, n);
+    // clamp(4, n) паникует при n < 4 (короткие имена: Боз, Лев)
+    let stem_len = if n < 4 {
+        n
+    } else {
+        n.saturating_sub(2).clamp(4, n)
+    };
     let stem: String = term_l.chars().take(stem_len).collect();
     if stem.len() >= 3 && hay.contains(&stem) {
         return true;
@@ -568,6 +586,13 @@ mod tests {
     fn term_related_inflection() {
         assert!(text_related_to_term("former widgets", "widget"));
         assert!(text_related_to_term("Widgets!", "widget"));
+    }
+
+    #[test]
+    fn short_name_term_does_not_panic() {
+        assert!(text_related_to_term("Привет, Боз!", "Боз"));
+        // короткие имена (3 буквы) не должны вызывать clamp-панику
+        let _ = text_related_to_term("со Львом", "Лев");
     }
 
     #[test]

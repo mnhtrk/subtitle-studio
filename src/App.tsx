@@ -51,19 +51,29 @@ import {
 } from './services/agentService';
 import {
 	deleteSegmentById,
+	deleteSegmentsByIdsWithRemoved,
 	insertEmptySegment,
 	splitSegmentAt,
 	sortAndRenumberSubtitleIds
 } from './utils/subtitleSegmentsLocal';
+import { formatSpeakerGenderForAgent } from './utils/agentChat';
+import { glossaryUpdatesForBulkReplace } from './utils/agentTask';
+import type { AgentEditScope, AgentIntent } from './services/agentService';
 import {
-	AGENT_BATCH_SIZE,
-	formatSpeakerGenderForAgent,
-	AGENT_NEIGHBOR_RADIUS,
-	chunkSubtitleSegments,
-	isWholeFileAgentRequest
-} from './utils/agentChat';
-import { agentContextFromIntent, glossaryUpdatesForBulkReplace } from './utils/agentTask';
-import type { AgentIntent } from './services/agentService';
+	collectGlossaryEpisodeFilterTerms,
+	collectTermsFromIntent,
+	intentFromGlossaryChanges,
+	listProjectSubtitleFiles,
+	resolveAgentEditScope,
+	segmentLooksLikeWhisperWatermark,
+	subtitleFilesForAgentScope,
+	type SubtitleFileBundle
+} from './utils/agentProject';
+import {
+	groupEditActionsByFile,
+	mergeSegmentList,
+	runAgentChatOnSubtitleFile
+} from './utils/agentRunner';
 import {
 	applyAutoGlossaryToProject,
 	mergePromptHintsIntoGlossary,
@@ -429,14 +439,35 @@ export default function App() {
 		end: number;
 		text: string;
 		translation?: string | null;
+		speaker_gender?: SpeakerGender | null;
 	};
 	type ChatEditDiff = {
+		fileId: string;
+		fileName: string;
 		id: number;
 		start: number;
 		end: number;
 		field: 'translation' | 'text';
 		oldText: string;
 		newText: string;
+	};
+	type ChatDeleteDiff = {
+		fileId: string;
+		fileName: string;
+		start: number;
+		end: number;
+		text: string;
+		translation: string;
+	};
+	type ChatEditBlock = {
+		fileId: string;
+		fileName: string;
+		edits: ChatEditDiff[];
+		deletions: ChatDeleteDiff[];
+		/** Полный снимок субтитров файла до правок агента (для отмены). */
+		fileSnapshot: SubtitleSegment[];
+		/** @deprecated используйте fileSnapshot */
+		snapshot?: SubtitleSegment[];
 	};
 	type ChatEditStatus = 'pending' | 'kept' | 'reverted';
 	type ChatMessage =
@@ -450,7 +481,9 @@ export default function App() {
 				id: string;
 				role: 'assistant';
 				text: string;
+				/** @deprecated используйте editBlocks */
 				edits?: ChatEditDiff[];
+				editBlocks?: ChatEditBlock[];
 				editSnapshot?: SubtitleSegment[];
 				editStatus?: ChatEditStatus;
 				isError?: boolean;
@@ -458,15 +491,36 @@ export default function App() {
 
 	const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 	const [chatInput, setChatInput] = useState('');
+	const [chatInputHasScrollbar, setChatInputHasScrollbar] = useState(false);
 	const [pendingAttachedSegment, setPendingAttachedSegment] = useState<ChatAttachedSegment | null>(null);
 	const [isAgentBusy, setIsAgentBusy] = useState(false);
-	const [agentBatchProgress, setAgentBatchProgress] = useState<{ current: number; total: number } | null>(
-		null
-	);
+	const [agentBatchProgress, setAgentBatchProgress] = useState<{
+		current: number;
+		total: number;
+		label?: string;
+	} | null>(null);
 	const [expandedDiffIds, setExpandedDiffIds] = useState<Set<string>>(new Set());
 	const chatScrollRef = useRef<HTMLDivElement | null>(null);
 	const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 	const agentSessionIdRef = useRef<string>(agentSessionIdForProject(undefined));
+
+	/** Минимальная высота текста в композере (~min-h-[96px] карточки минус padding) */
+	const CHAT_INPUT_TEXT_MIN_PX = 72;
+	const CHAT_INPUT_TEXT_MAX_PX = 220;
+	/** Текст — gap — кнопка — (gap — скроллбар, если есть прокрутка) */
+	const CHAT_COMPOSER_GAP_PX = 12;
+	const CHAT_COMPOSER_SCROLLBAR_PX = 12;
+	const CHAT_COMPOSER_SEND_BTN_PX = 32;
+	const CHAT_COMPOSER_INPUT_PADDING_RIGHT_NO_SCROLL_PX =
+		CHAT_COMPOSER_GAP_PX + CHAT_COMPOSER_SEND_BTN_PX + CHAT_COMPOSER_GAP_PX;
+	const CHAT_COMPOSER_INPUT_PADDING_RIGHT_WITH_SCROLL_PX =
+		CHAT_COMPOSER_SCROLLBAR_PX +
+		CHAT_COMPOSER_GAP_PX +
+		CHAT_COMPOSER_SEND_BTN_PX +
+		CHAT_COMPOSER_GAP_PX;
+	const CHAT_COMPOSER_SEND_BTN_RIGHT_NO_SCROLL_PX = CHAT_COMPOSER_GAP_PX;
+	const CHAT_COMPOSER_SEND_BTN_RIGHT_WITH_SCROLL_PX =
+		CHAT_COMPOSER_SCROLLBAR_PX + CHAT_COMPOSER_GAP_PX;
 
 	// тема + меню
 	const [isDarkTheme, setIsDarkTheme] = useState(() => {
@@ -2295,6 +2349,8 @@ export default function App() {
 		(
 			updated: SubtitleSegment[],
 			baseline: SubtitleSegment[],
+			fileId: string,
+			fileName: string,
 			fields: 'translation' | 'both' = 'translation'
 		): ChatEditDiff[] => {
 			const byId = new Map(baseline.map((s) => [s.id, s] as const));
@@ -2305,6 +2361,8 @@ export default function App() {
 				const textChanged = prev.text !== next.text;
 				if (fields === 'both' && textChanged) {
 					diffs.push({
+						fileId,
+						fileName,
 						id: next.id,
 						start: next.start,
 						end: next.end,
@@ -2316,6 +2374,8 @@ export default function App() {
 				const trChanged = (prev.translation ?? '') !== (next.translation ?? '');
 				if (trChanged) {
 					diffs.push({
+						fileId,
+						fileName,
 						id: next.id,
 						start: next.start,
 						end: next.end,
@@ -2335,318 +2395,50 @@ export default function App() {
 		[]
 	);
 
-	const replaceCaseInsensitive = useCallback((text: string, from: string, to: string): string => {
-		if (!from) return text;
-		const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-		// целое слово, не подстрока
-		try {
-			const pattern = new RegExp(
-				`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`,
-				'giu'
-			);
-			return text.replace(pattern, to);
-		} catch {
-			return text;
-		}
-	}, []);
-
-	const buildGlossaryReplacementEdits = useCallback(
-		(changes: GlossaryReplacementChange[], baseline: SubtitleSegment[]): SubtitleSegment[] => {
-			if (changes.length === 0) return [];
-			const updated: SubtitleSegment[] = [];
-
-			for (const segment of baseline) {
-				let nextText = segment.text;
-				let nextTranslation = segment.translation ?? null;
-
-				for (const change of changes) {
-					if (change.oldSource && change.newSource && change.oldSource !== change.newSource) {
-						nextText = replaceCaseInsensitive(nextText, change.oldSource, change.newSource);
-					}
-					if (
-						nextTranslation &&
-						change.oldTarget &&
-						change.newTarget &&
-						change.oldTarget !== change.newTarget
-					) {
-						nextTranslation = replaceCaseInsensitive(nextTranslation, change.oldTarget, change.newTarget);
-					}
-				}
-
-				if (nextText !== segment.text || (nextTranslation ?? '') !== (segment.translation ?? '')) {
-					updated.push({
-						...segment,
-						text: nextText,
-						translation: nextTranslation
-					});
-				}
-			}
-
-			return updated;
-		},
-		[replaceCaseInsensitive]
-	);
-
-	// правки сегментов + undo пары
-	const applySegmentEdits = useCallback(
-		(updated: SubtitleSegment[]): { applied: SubtitleSegment[]; originals: SubtitleSegment[] } => {
+	const restoreFileSegmentsForFile = useCallback(
+		(fileId: string, segments: SubtitleSegment[]) => {
 			const cp = currentProjectRef.current;
-			if (!cp || !activeSubtitleFileId) return { applied: [], originals: [] };
+			if (!cp) return;
 
-			const baseline = segmentsRef.current ?? [];
-			const baselineById = new Map(baseline.map((s) => [s.id, s] as const));
-			const updatedById = new Map(updated.map((s) => [s.id, s] as const));
-
-			const originals: SubtitleSegment[] = [];
-			const applied: SubtitleSegment[] = [];
-
-			const nextList = baseline.map((seg) => {
-				const u = updatedById.get(seg.id);
-				if (!u) return seg;
-				const merged: SubtitleSegment = {
-					...seg,
-					text: u.text ?? seg.text,
-					translation: u.translation ?? seg.translation
-				};
-				if (
-					(merged.text ?? '') === (seg.text ?? '') &&
-					(merged.translation ?? '') === (seg.translation ?? '')
-				) {
-					return seg;
-				}
-				originals.push(baselineById.get(seg.id) ?? seg);
-				applied.push(merged);
-				return merged;
-			});
-
-			if (applied.length === 0) return { applied: [], originals: [] };
-
+			const restored = segments.map((s) => ({ ...s }));
 			const nextProject: ProjectData = {
 				...cp,
 				files: cp.files.map((f) =>
-					f.id === activeSubtitleFileId ? { ...f, subtitle_segments: nextList } : f
+					f.id === fileId ? { ...f, subtitle_segments: restored } : f
 				)
 			};
 			currentProjectRef.current = nextProject;
 			setCurrentProject(nextProject);
-			setGeneratedSegments(nextList);
+			if (fileId === activeSubtitleFileId) {
+				segmentsRef.current = restored;
+				setGeneratedSegments(restored);
+			}
 			markProjectDirty();
-			return { applied, originals };
 		},
 		[activeSubtitleFileId, markProjectDirty]
 	);
 
-	const applyGlossaryReplacementToSubtitles = useCallback(
-		async (changes: GlossaryReplacementChange[]) => {
-			const baseline = segmentsRef.current ?? [];
-			const project = currentProjectRef.current;
-			if (changes.length === 0 || baseline.length === 0) return;
+	const setFileSegmentsForFile = useCallback(
+		(fileId: string, segments: SubtitleSegment[]) => {
+			const cp = currentProjectRef.current;
+			if (!cp) return;
 
-			const mergeUpdates = (
-				baseList: SubtitleSegment[],
-				patches: SubtitleSegment[]
-			): SubtitleSegment[] => {
-				if (patches.length === 0) return baseList;
-				const map = new Map(baseList.map((s) => [s.id, s] as const));
-				for (const patch of patches) {
-					const prev = map.get(patch.id);
-					if (!prev) continue;
-					const merged: SubtitleSegment = {
-						...prev,
-						text: patch.text ?? prev.text,
-						translation: patch.translation ?? prev.translation
-					};
-					map.set(patch.id, merged);
-				}
-				return baseList.map((s) => map.get(s.id) ?? s);
+			const nextList = segments.map((s) => ({ ...s }));
+			const nextProject: ProjectData = {
+				...cp,
+				files: cp.files.map((f) =>
+					f.id === fileId ? { ...f, subtitle_segments: nextList } : f
+				)
 			};
-
-			const addNoMatchesMessage = () => {
-				setChatMessages((prev) => [
-					...prev,
-					{
-						id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-						role: 'assistant',
-						text: 'Глоссарий сохранён, но подходящих реплик для обновления не найдено.'
-					}
-				]);
-			};
-
-			const applyAndShow = (
-				combinedList: SubtitleSegment[],
-				messageText: string
-			): boolean => {
-				const updated = combinedList.filter((next) => {
-					const prev = baseline.find((s) => s.id === next.id);
-					if (!prev) return false;
-					return (
-						prev.text !== next.text ||
-						(prev.translation ?? '') !== (next.translation ?? '')
-					);
-				});
-				if (updated.length === 0) return false;
-
-				const edits = buildChatEditDiffs(updated, baseline, 'both');
-				if (edits.length === 0) return false;
-
-				const { originals } = applySegmentEdits(updated);
-				if (originals.length === 0) return false;
-
-				setChatMessages((prev) => [
-					...prev,
-					{
-						id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-						role: 'assistant',
-						text: messageText,
-						edits,
-						editSnapshot: originals,
-						editStatus: 'pending'
-					}
-				]);
-				return true;
-			};
-
-			const changesText = changes
-				.map((change, index) => {
-					const parts: string[] = [];
-					if (change.oldSource && change.newSource && change.oldSource !== change.newSource) {
-						parts.push(`Original text: "${change.oldSource}" -> "${change.newSource}"`);
-					}
-					if (change.oldTarget && change.newTarget && change.oldTarget !== change.newTarget) {
-						parts.push(`Translation: "${change.oldTarget}" -> "${change.newTarget}"`);
-					}
-					if (parts.length === 0) return '';
-					const ctx = change.newContext || change.oldContext;
-					if (ctx) parts.push(`Context: ${ctx}`);
-					return `${index + 1}. ${parts.join('; ')}`;
-				})
-				.filter((line) => line.length > 0)
-				.join('\n');
-
-			const hiddenPrompt = `Примени изменения глоссария ко всем подходящим репликам.
-
-Изменения глоссария:
-${changesText}
-
-Правила:
-- Учитывай Context термина (имя, род, склонение).
-- Заменяй все словоформы термина (падежи, множественное число, приставки вроде ex-/бывшей).
-- Если в изменении указан только Translation — меняй только поле translation, text не трогай.
-- Если только Original text — только text. Если оба — оба поля.
-- Для имён в переводе: правильное склонение по фразе (падеж, с/со), особые формы (напр. Лев → со Львом, «Что со Львом?»), не механическая подстановка.
-- Не заменяй случайные подстроки внутри других слов.
-- Верни только изменённые сегменты (id + изменённые поля).`;
-
-			const agentContext = {
-				project_id: project?.id ?? null,
-				current_glossary: project?.glossary ?? null,
-				target_language: project?.target_language ?? null,
-				task_mode: 'glossary_sync' as const
-			};
-
-			setIsAgentBusy(true);
-			setAgentBatchProgress(null);
-			try {
-				const localPatches = buildGlossaryReplacementEdits(changes, baseline);
-				let combinedList = mergeUpdates(baseline, localPatches);
-
-				const runAgentPass = async (segments: SubtitleSegment[]) => {
-					if (segments.length > AGENT_BATCH_SIZE) {
-						const batches = chunkSubtitleSegments(segments, AGENT_BATCH_SIZE);
-						let working = segments;
-						for (let i = 0; i < batches.length; i++) {
-							const batch = batches[i];
-							const ids = batch.map((s) => s.id);
-							setAgentBatchProgress({ current: i + 1, total: batches.length });
-							const batchPrompt = `${hiddenPrompt}
-
-ПАКЕТНАЯ ОБРАБОТКА: часть ${i + 1} из ${batches.length}.
-Обработай только сегменты (id: ${ids.join(', ')}).`;
-							const response = await agentService.chat(
-								batchPrompt,
-								{
-									...agentContext,
-									current_segments: working,
-									batch_segment_ids: ids,
-									batch_index: i + 1,
-									batch_total: batches.length
-								},
-								{
-									sessionId: agentSessionIdRef.current,
-									conversationHistory: []
-								}
-							);
-							for (const action of response.actions ?? []) {
-								if ('EditSegments' in action) {
-									working = mergeUpdates(working, action.EditSegments.segments);
-								}
-							}
-						}
-						setAgentBatchProgress(null);
-						return working;
-					}
-
-					const response = await agentService.chat(
-						hiddenPrompt,
-						{
-							...agentContext,
-							current_segments: segments
-						},
-						{
-							sessionId: agentSessionIdRef.current,
-							conversationHistory: []
-						}
-					);
-					let working = segments;
-					for (const action of response.actions ?? []) {
-						if ('EditSegments' in action) {
-							working = mergeUpdates(working, action.EditSegments.segments);
-						}
-					}
-					return working;
-				};
-
-				combinedList = await runAgentPass(combinedList);
-
-				const editCount = combinedList.filter((next) => {
-					const prev = baseline.find((s) => s.id === next.id);
-					if (!prev) return false;
-					return (
-						prev.text !== next.text ||
-						(prev.translation ?? '') !== (next.translation ?? '')
-					);
-				}).length;
-
-				const message =
-					editCount > 0
-						? `Готово: обновлено ${editCount} реплик согласно глоссарию.`
-						: 'Глоссарий сохранён. В субтитрах подходящих вхождений не найдено.';
-
-				if (!applyAndShow(combinedList, message)) {
-					addNoMatchesMessage();
-				}
-			} catch (err) {
-				const fallbackPatches = buildGlossaryReplacementEdits(changes, baseline);
-				const fallbackList = mergeUpdates(baseline, fallbackPatches);
-				if (applyAndShow(fallbackList, `Обновил реплики по изменениям в глоссарии: ${changes.length}.`)) {
-					return;
-				}
-				const detail = err instanceof Error ? err.message : String(err);
-				setChatMessages((prev) => [
-					...prev,
-					{
-						id: `e_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-						role: 'assistant',
-						text: `Не удалось обновить реплики по глоссарию: ${detail}`,
-						isError: true
-					}
-				]);
-			} finally {
-				setIsAgentBusy(false);
-				setAgentBatchProgress(null);
+			currentProjectRef.current = nextProject;
+			setCurrentProject(nextProject);
+			if (fileId === activeSubtitleFileId) {
+				segmentsRef.current = nextList;
+				setGeneratedSegments(nextList);
 			}
+			markProjectDirty();
 		},
-		[applySegmentEdits, buildChatEditDiffs, buildGlossaryReplacementEdits]
+		[activeSubtitleFileId, markProjectDirty]
 	);
 
 	const handleKeepEdits = useCallback((messageId: string) => {
@@ -2657,16 +2449,30 @@ ${changesText}
 		);
 	}, []);
 
-	const handleUndoEdits = useCallback((messageId: string) => {
-		const target = chatMessages.find((m) => m.id === messageId);
-		if (!target || target.role !== 'assistant' || !target.editSnapshot) return;
-		applySegmentEdits(target.editSnapshot);
-		setChatMessages((prev) =>
-			prev.map((m) =>
-				m.id === messageId && m.role === 'assistant' ? { ...m, editStatus: 'reverted' } : m
-			)
-		);
-	}, [chatMessages, applySegmentEdits]);
+	const handleUndoEdits = useCallback(
+		(messageId: string) => {
+			const target = chatMessages.find((m) => m.id === messageId);
+			if (!target || target.role !== 'assistant') return;
+			if (target.editBlocks && target.editBlocks.length > 0) {
+				for (const block of target.editBlocks) {
+					const snap = block.fileSnapshot ?? block.snapshot;
+					if (snap) restoreFileSegmentsForFile(block.fileId, snap);
+				}
+			} else if (target.editSnapshot) {
+				if (activeSubtitleFileId) {
+					restoreFileSegmentsForFile(activeSubtitleFileId, target.editSnapshot);
+				}
+			} else {
+				return;
+			}
+			setChatMessages((prev) =>
+				prev.map((m) =>
+					m.id === messageId && m.role === 'assistant' ? { ...m, editStatus: 'reverted' } : m
+				)
+			);
+		},
+		[chatMessages, activeSubtitleFileId, restoreFileSegmentsForFile]
+	);
 
 	const handleAskAgentAboutSelectedSegment = useCallback(() => {
 		const seg = generatedSegments[selectedSegmentIndex];
@@ -2676,7 +2482,8 @@ ${changesText}
 			start: seg.start,
 			end: seg.end,
 			text: seg.text,
-			translation: seg.translation ?? null
+			translation: seg.translation ?? null,
+			speaker_gender: seg.speaker_gender ?? null
 		});
 		requestAnimationFrame(() => chatInputRef.current?.focus());
 	}, [generatedSegments, selectedSegmentIndex]);
@@ -2727,31 +2534,17 @@ ${changesText}
 		[]
 	);
 
-	const mergeSegmentPatches = useCallback(
-		(baseList: SubtitleSegment[], patches: SubtitleSegment[]): SubtitleSegment[] => {
-			if (patches.length === 0) return baseList;
-			const map = new Map(baseList.map((s) => [s.id, s] as const));
-			for (const patch of patches) {
-				const prev = map.get(patch.id);
-				if (!prev) continue;
-				map.set(patch.id, {
-					...prev,
-					text: patch.text ?? prev.text,
-					translation: patch.translation ?? prev.translation
-				});
-			}
-			return baseList.map((s) => map.get(s.id) ?? s);
-		},
-		[]
-	);
+	const applyAgentActionsToProject = useCallback(
+		async (actions: AgentAction[], files: SubtitleFileBundle[]): Promise<ChatEditBlock[]> => {
+			if (actions.length === 0 || files.length === 0) return [];
 
-	const mergeAgentActionsInMemory = useCallback(
-		async (actions: AgentAction[], baseline: SubtitleSegment[]): Promise<SubtitleSegment[]> => {
-			if (actions.length === 0) return baseline;
 			const cp = currentProjectRef.current;
-			let combinedList = baseline;
-			const glossaryChanges: GlossaryReplacementChange[] = [];
+			const baselines = new Map<string, SubtitleSegment[]>();
+			for (const f of files) {
+				baselines.set(f.id, [...f.segments]);
+			}
 
+			const glossaryChanges: GlossaryReplacementChange[] = [];
 			for (const action of actions) {
 				if ('UpdateGlossary' in action && cp) {
 					const { glossary, changes } = mergeGlossaryAgentUpdates(
@@ -2764,62 +2557,296 @@ ${changesText}
 						currentProjectRef.current = nextProject;
 						setCurrentProject(nextProject);
 						markProjectDirty();
-						if (cp.path) {
-							try {
-								await projectService.updateGlossary(cp.path, glossary);
-							} catch {
-								/* локально уже обновлено */
-							}
-						}
 					}
-				}
-				if ('EditSegments' in action) {
-					combinedList = mergeSegmentPatches(combinedList, action.EditSegments.segments);
 				}
 			}
 
-			if (glossaryChanges.length > 0) {
-				const patches = buildGlossaryReplacementEdits(glossaryChanges, combinedList);
-				combinedList = mergeSegmentPatches(combinedList, patches);
+			const grouped = groupEditActionsByFile(actions, activeSubtitleFileId);
+			const blocks: ChatEditBlock[] = [];
+			const sweepWatermarks = actions.some((a) => 'DeleteSegments' in a);
+
+			for (const meta of files) {
+				const fileId = meta.id;
+				const baseline = baselines.get(fileId);
+				if (!baseline) continue;
+				const fileActions = grouped.get(fileId) ?? [];
+				let working = [...baseline];
+				const editPatches: SubtitleSegment[] = [];
+				const deletions: ChatDeleteDiff[] = [];
+
+				for (const action of fileActions) {
+					if ('EditSegments' in action) {
+						editPatches.push(...action.EditSegments.segments);
+						working = mergeSegmentList(working, action.EditSegments.segments);
+					} else if ('DeleteSegments' in action) {
+						const ids = action.DeleteSegments.segment_ids;
+						const { segments: next, removed } = deleteSegmentsByIdsWithRemoved(working, ids);
+						for (const seg of removed) {
+							deletions.push({
+								fileId,
+								fileName: meta.name,
+								start: seg.start,
+								end: seg.end,
+								text: seg.text,
+								translation: seg.translation ?? ''
+							});
+						}
+						working = next;
+					}
+				}
+
+				if (sweepWatermarks) {
+					const missed = working.filter((s) => segmentLooksLikeWhisperWatermark(s));
+					if (missed.length > 0) {
+						const { segments: next, removed } = deleteSegmentsByIdsWithRemoved(
+							working,
+							missed.map((s) => s.id)
+						);
+						for (const seg of removed) {
+							const dup = deletions.some(
+								(d) =>
+									Math.abs(d.start - seg.start) < 0.05 &&
+									d.text === seg.text &&
+									d.translation === (seg.translation ?? '')
+							);
+							if (!dup) {
+								deletions.push({
+									fileId,
+									fileName: meta.name,
+									start: seg.start,
+									end: seg.end,
+									text: seg.text,
+									translation: seg.translation ?? ''
+								});
+							}
+						}
+						working = next;
+					}
+				}
+
+				deletions.sort((a, b) => (a.start !== b.start ? a.start - b.start : a.end - b.end));
+				for (const d of deletions) {
+					d.fileName = meta.name;
+				}
+
+				let edits: ChatEditDiff[] = [];
+				if (editPatches.length > 0) {
+					const patchedIds = new Set(editPatches.map((s) => s.id));
+					const merged = mergeSegmentList(baseline, editPatches);
+					const updated = merged.filter((s) => patchedIds.has(s.id));
+					edits = buildChatEditDiffs(updated, baseline, fileId, meta.name, 'both');
+				}
+
+				if (edits.length === 0 && deletions.length === 0) continue;
+
+				const fileSnapshot = baseline.map((s) => ({ ...s }));
+				setFileSegmentsForFile(fileId, working);
+
+				blocks.push({
+					fileId,
+					fileName: meta.name,
+					edits,
+					deletions,
+					fileSnapshot
+				});
 			}
-			return combinedList;
+			return blocks;
 		},
 		[
-			buildGlossaryReplacementEdits,
+			activeSubtitleFileId,
+			buildChatEditDiffs,
 			mergeGlossaryAgentUpdates,
-			mergeSegmentPatches,
-			markProjectDirty
+			markProjectDirty,
+			setFileSegmentsForFile
 		]
 	);
 
-	const applyAgentResponseActions = useCallback(
-		async (
-			actions: AgentAction[],
-			baseline: SubtitleSegment[]
-		): Promise<{ edits: ChatEditDiff[]; snapshot: SubtitleSegment[] } | null> => {
-			if (actions.length === 0 || baseline.length === 0) return null;
+	const applyGlossaryReplacementToSubtitles = useCallback(
+		async (changes: GlossaryReplacementChange[]) => {
+			const project = currentProjectRef.current;
+			if (changes.length === 0 || !project) return;
 
-			const combinedList = await mergeAgentActionsInMemory(actions, baseline);
+			const terms = collectGlossaryEpisodeFilterTerms(changes);
+			const allFiles = listProjectSubtitleFiles(project);
+			const targetFiles = subtitleFilesForAgentScope(
+				project,
+				activeSubtitleFileId,
+				'whole_project',
+				terms
+			);
+			if (targetFiles.length === 0) {
+				setChatMessages((prev) => [
+					...prev,
+					{
+						id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+						role: 'assistant',
+						text: 'Глоссарий сохранён, но подходящих реплик для обновления не найдено.'
+					}
+				]);
+				return;
+			}
 
-			const updated = combinedList.filter((next) => {
-				const prev = baseline.find((s) => s.id === next.id);
-				if (!prev) return false;
-				return (
-					prev.text !== next.text ||
-					(prev.translation ?? '') !== (next.translation ?? '')
-				);
-			});
-			if (updated.length === 0) return null;
+			const changesText = changes
+				.map((change, index) => {
+					const parts: string[] = [];
+					if (change.oldSource && change.newSource && change.oldSource !== change.newSource) {
+						parts.push(`Original text: "${change.oldSource}" -> "${change.newSource}"`);
+					}
+					if (change.oldTarget && change.newTarget && change.oldTarget !== change.newTarget) {
+						parts.push(`Translation: "${change.oldTarget}" -> "${change.newTarget}"`);
+					}
+					if (parts.length === 0) return '';
+					const ctx = change.newContext || change.oldContext;
+					if (ctx) parts.push(`Context: ${ctx}`);
+					return `${index + 1}. ${parts.join('; ')}`;
+				})
+				.filter((line) => line.length > 0)
+				.join('\n');
 
-			const edits = buildChatEditDiffs(updated, baseline, 'both');
-			if (edits.length === 0) return null;
+			const glossaryIntent = intentFromGlossaryChanges(changes);
 
-			const { originals } = applySegmentEdits(updated);
-			if (originals.length === 0) return null;
+			const replaceNote =
+				glossaryIntent.task_mode === 'bulk_replace' &&
+				glossaryIntent.replace_from &&
+				glossaryIntent.replace_to
+					? `\nГлавная замена в переводе: «${glossaryIntent.replace_from}» → «${glossaryIntent.replace_to}» (все падежи и словоформы этого имени/термина).${
+							glossaryIntent.translation_only
+								? ' Только поле translation; text (оригинал) не менять.'
+								: ''
+						}\n`
+					: '';
 
-			return { edits, snapshot: originals };
+			const hiddenPrompt = `Примени изменения глоссария ко всем подходящим репликам в этом эпизоде.
+
+Изменения глоссария:
+${changesText}
+${replaceNote}
+Правила:
+- Меняй ТОЛЬКО реплики, где встречается старая формулировка из глоссария (или её словоформа/падеж).
+- Не подставляй новый термин вместо других слов (никто, другие имена, похожие по звучанию слова — не трогать).
+- Учитывай Context термина (имя, род, склонение).
+- Для имён в переводе: правильное склонение по фразе (падеж, с/со), особые формы языка, не «lemma + окончание».
+- Если в изменении указан только Translation — меняй только translation; только Original — только text.
+- Верни только изменённые сегменты (id + изменённые поля). message оставь пустым.`;
+
+			setIsAgentBusy(true);
+			setAgentBatchProgress(null);
+			try {
+				const allActions: AgentAction[] = [];
+				for (let fi = 0; fi < targetFiles.length; fi++) {
+					const file = targetFiles[fi];
+					setAgentBatchProgress({
+						current: fi + 1,
+						total: targetFiles.length,
+						label: file.name
+					});
+					const { actions: fileActions } = await runAgentChatOnSubtitleFile({
+						messageForAgent: hiddenPrompt,
+						file,
+						allFiles,
+						intent: glossaryIntent,
+						editScope: 'whole_project',
+						projectId: project.id ?? null,
+						glossary: project.glossary ?? null,
+						targetLanguage: project.target_language ?? null,
+						sessionId: agentSessionIdRef.current,
+						conversationHistory: [],
+						hasAttachedSegment: false,
+						onBatchProgress: (c, t) =>
+							setAgentBatchProgress({
+								current: c,
+								total: t,
+								label: file.name
+							})
+					});
+					allActions.push(...fileActions);
+				}
+				setAgentBatchProgress(null);
+				const blocks = await applyAgentActionsToProject(allActions, targetFiles);
+				const editCount = blocks.reduce(
+				(n, b) => n + b.edits.length + (b.deletions?.length ?? 0),
+				0
+			);
+				const message =
+					editCount > 0
+						? `Готово: обновлено ${editCount} реплик в ${blocks.length} эпизод(ах) согласно глоссарию.`
+						: 'Глоссарий сохранён. В субтитрах подходящих вхождений не найдено.';
+				if (blocks.length === 0) {
+					setChatMessages((prev) => [
+						...prev,
+						{
+							id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+							role: 'assistant',
+							text: message
+						}
+					]);
+				} else {
+					setChatMessages((prev) => [
+						...prev,
+						{
+							id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+							role: 'assistant',
+							text: message,
+							editBlocks: blocks,
+							editStatus: 'pending'
+						}
+					]);
+				}
+			} catch (err) {
+				const detail = err instanceof Error ? err.message : String(err);
+				setChatMessages((prev) => [
+					...prev,
+					{
+						id: `e_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+						role: 'assistant',
+						text: `Не удалось обновить реплики по глоссарию: ${detail}`,
+						isError: true
+					}
+				]);
+			} finally {
+				setIsAgentBusy(false);
+				setAgentBatchProgress(null);
+			}
 		},
-		[applySegmentEdits, buildChatEditDiffs, mergeAgentActionsInMemory]
+		[activeSubtitleFileId, applyAgentActionsToProject]
+	);
+
+	const navigateToChatEdit = useCallback(
+		async (fileId: string, segmentId: number, seekStart?: number) => {
+			const cp = currentProjectRef.current;
+			if (!cp) return;
+			const file = cp.files.find((f) => f.id === fileId && f.file_type === 'Subtitle');
+			if (!file) return;
+
+			if (activeSubtitleFileId !== fileId) {
+				await activateProjectTrack(file);
+			}
+
+			const segs =
+				currentProjectRef.current?.files.find((f) => f.id === fileId)?.subtitle_segments ?? [];
+			let idx = segs.findIndex((s) => s.id === segmentId);
+			if (idx < 0 && seekStart != null) {
+				idx = segs.findIndex((s) => Math.abs(s.start - seekStart) < 0.05);
+			}
+			if (idx < 0) {
+				if (seekStart != null) {
+					selectSegmentAndSeek(-1, seekStart);
+				}
+				return;
+			}
+
+			const seg = segs[idx];
+			segmentsRef.current = segs;
+
+			setSelectedSegmentIds(new Set([segmentId]));
+			selectSegmentAndSeek(idx, seg.start);
+
+			requestAnimationFrame(() => {
+				const row = document.querySelector(`[data-subtitle-row-index="${idx}"]`);
+				row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+			});
+		},
+		[activateProjectTrack, activeSubtitleFileId, selectSegmentAndSeek]
 	);
 
 	const handleSendChatMessage = useCallback(async () => {
@@ -2840,8 +2867,8 @@ ${changesText}
 		setAgentBatchProgress(null);
 
 		try {
-			const baseline = segmentsRef.current ?? [];
 			const project = currentProjectRef.current;
+			if (!project) return;
 			const messageForAgent = attached
 				? `${text}\n\nПрикрепленная реплика:\n#${attached.id} [${formatChatTimecode(attached.start)}] speaker_gender=${formatSpeakerGenderForAgent(attached.speaker_gender)}\nOriginal: ${attached.text}\nTranslation: ${attached.translation ?? ''}`
 				: text;
@@ -2851,129 +2878,97 @@ ${changesText}
 				sessionId: agentSessionIdRef.current,
 				conversationHistory: history
 			});
-			const intentCtx = agentContextFromIntent(intent);
-			const agentContextBase = {
-				project_id: project?.id ?? null,
-				current_segments: baseline,
-				current_glossary: project?.glossary ?? null,
-				target_language: project?.target_language ?? null,
-				focus_segment_id: attached?.id ?? null,
-				neighbor_radius: attached ? AGENT_NEIGHBOR_RADIUS : 0,
-				...intentCtx
-			};
 
-			const useBatch =
-				!attached &&
-				baseline.length > AGENT_BATCH_SIZE &&
-				intent.task_mode !== 'answer_only' &&
-				(isWholeFileAgentRequest(text) || intent.task_mode === 'bulk_replace');
+			const editScope: AgentEditScope = resolveAgentEditScope({
+				message: text,
+				hasAttachedSegment: !!attached,
+				intent
+			});
 
-			if (useBatch) {
-				const batches = chunkSubtitleSegments(baseline, AGENT_BATCH_SIZE);
-				let working = baseline;
-
-				for (let i = 0; i < batches.length; i++) {
-					const batch = batches[i];
-					const ids = batch.map((s) => s.id);
-					setAgentBatchProgress({ current: i + 1, total: batches.length });
-
-					const replaceHint =
-						intent.task_mode === 'bulk_replace' &&
-						intent.replace_from &&
-						intent.replace_to
-							? `\nЗамена: «${intent.replace_from}» → «${intent.replace_to}». Все словоформы и падежи; для имён — грамматически верные формы (особые склонения, предлоги с/со), не подстановка «lemma + окончание».`
-							: '';
-
-					const batchPrompt = `${messageForAgent}${replaceHint}
-
-ПАКЕТНАЯ ОБРАБОТКА: часть ${i + 1} из ${batches.length}.
-Обработай только сегменты этого пакета (id: ${ids.join(', ')}).
-Если в пакете нечего менять — actions: [].`;
-
-					const response = await agentService.chat(batchPrompt, {
-						...agentContextBase,
-						current_segments: working,
-						batch_segment_ids: ids,
-						batch_index: i + 1,
-						batch_total: batches.length
-					}, {
-						sessionId: agentSessionIdRef.current,
-						conversationHistory: history
-					});
-
-					working = await mergeAgentActionsInMemory(response.actions ?? [], working);
+			let projectForAgent = project;
+			if (editScope === 'whole_project' && project.path) {
+				let reloaded = false;
+				for (const file of projectForAgent.files) {
+					if (file.file_type !== 'Subtitle' || file.id.startsWith('disk:')) continue;
+					if ((file.subtitle_segments?.length ?? 0) > 0) continue;
+					const abs = joinProjectPath(projectForAgent.path, file.path.replace(/\\/g, '/'));
+					await projectService.importExistingSubtitles(abs, projectForAgent.path, file.id);
+					reloaded = true;
 				}
+				if (reloaded) {
+					projectForAgent = await projectService.open(projectForAgent.path);
+					currentProjectRef.current = projectForAgent;
+					setCurrentProject(projectForAgent);
+				}
+			}
 
-				setAgentBatchProgress(null);
-				const updated = working.filter((next) => {
-					const prev = baseline.find((s) => s.id === next.id);
-					if (!prev) return false;
-					return (
-						prev.text !== next.text ||
-						(prev.translation ?? '') !== (next.translation ?? '')
-					);
-				});
-				let applied =
-					updated.length > 0
-						? await applyAgentResponseActions(
-								[{ EditSegments: { segments: updated } }],
-								baseline
-							)
-						: null;
+			const terms =
+				intent.task_mode === 'bulk_replace' ||
+				intent.task_mode === 'glossary_sync' ||
+				intent.task_mode === 'proofread' ||
+				intent.task_mode === 'translation_fix'
+					? collectTermsFromIntent(intent)
+					: [];
 
-				if (
-					intent.task_mode === 'bulk_replace' &&
-					intent.replace_from &&
-					intent.replace_to
-				) {
-					const glossaryUpdates = glossaryUpdatesForBulkReplace(
-						intent.replace_from,
-						intent.replace_to,
-						project?.glossary ?? []
-					);
-					if (glossaryUpdates.length > 0) {
-						const glossaryApplied = await applyAgentResponseActions(
-							[{ UpdateGlossary: { entries: glossaryUpdates } }],
-							baseline
-						);
-						if (glossaryApplied && !applied) {
-							applied = glossaryApplied;
-						}
+			const targetFiles = subtitleFilesForAgentScope(
+				projectForAgent,
+				activeSubtitleFileId,
+				editScope,
+				terms.length > 0 ? terms : null
+			);
+
+			console.log('[agent][debug] chat send', {
+				editScope,
+				task_mode: intent.task_mode,
+				episodes: targetFiles.map((f) => `${f.name} (${f.segments.length} segs)`)
+			});
+
+			if (targetFiles.length === 0) {
+				setChatMessages((prev) => [
+					...prev,
+					{
+						id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+						role: 'assistant',
+						text: 'В проекте нет субтитров для обработки.'
 					}
-				}
-
-				const editCount = updated.length;
-				const summary =
-					editCount > 0
-						? intent.task_mode === 'bulk_replace' &&
-							intent.replace_from &&
-							intent.replace_to
-							? `Готово: обновлено ${editCount} реплик (замена «${intent.replace_from}» → «${intent.replace_to}»).`
-							: `Готово: исправлено ${editCount} реплик.`
-						: 'Готово. В субтитрах изменений не потребовалось.';
-
-				const aiMsg: ChatMessage = {
-					id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-					role: 'assistant',
-					text: summary,
-					edits: applied?.edits,
-					editSnapshot: applied?.snapshot,
-					editStatus: applied?.snapshot && applied.snapshot.length > 0 ? 'pending' : undefined
-				};
-				setChatMessages((prev) => [...prev, aiMsg]);
+				]);
 				return;
 			}
 
-			const response = await agentService.chat(
-				messageForAgent,
-				agentContextBase,
-				{
-					sessionId: agentSessionIdRef.current,
-					conversationHistory: history
-				}
-			);
+			const allFiles = listProjectSubtitleFiles(projectForAgent);
+			const allActions: AgentAction[] = [];
+			let assistantMessage = '';
 
-			let applied = await applyAgentResponseActions(response.actions ?? [], baseline);
+			for (let fi = 0; fi < targetFiles.length; fi++) {
+				const file = targetFiles[fi];
+				setAgentBatchProgress({
+					current: fi + 1,
+					total: targetFiles.length,
+					label: file.name
+				});
+				const { actions, message } = await runAgentChatOnSubtitleFile({
+					messageForAgent,
+					file,
+					allFiles,
+					intent,
+					editScope,
+					projectId: projectForAgent.id ?? null,
+					glossary: projectForAgent.glossary ?? null,
+					targetLanguage: projectForAgent.target_language ?? null,
+					sessionId: agentSessionIdRef.current,
+					conversationHistory: history,
+					hasAttachedSegment: !!attached,
+					focusSegmentId: attached?.id ?? null,
+					onBatchProgress: (c, t) =>
+						setAgentBatchProgress({
+							current: c,
+							total: t,
+							label: file.name
+						})
+				});
+				if (message.trim()) assistantMessage = message.trim();
+				allActions.push(...actions);
+			}
 
 			if (
 				intent.task_mode === 'bulk_replace' &&
@@ -2983,26 +2978,46 @@ ${changesText}
 				const glossaryUpdates = glossaryUpdatesForBulkReplace(
 					intent.replace_from,
 					intent.replace_to,
-					project?.glossary ?? []
+					projectForAgent.glossary ?? []
 				);
 				if (glossaryUpdates.length > 0) {
-					const glossaryApplied = await applyAgentResponseActions(
-						[{ UpdateGlossary: { entries: glossaryUpdates } }],
-						baseline
-					);
-					if (glossaryApplied && !applied) {
-						applied = glossaryApplied;
-					}
+					allActions.push({ UpdateGlossary: { entries: glossaryUpdates } });
+				}
+			}
+
+			setAgentBatchProgress(null);
+			const applyFiles = listProjectSubtitleFiles(projectForAgent);
+			const blocks = await applyAgentActionsToProject(
+				allActions,
+				applyFiles.length > 0 ? applyFiles : targetFiles
+			);
+			const editCount = blocks.reduce(
+				(n, b) => n + b.edits.length + (b.deletions?.length ?? 0),
+				0
+			);
+
+			let summary = assistantMessage;
+			if (!summary) {
+				if (editCount > 0) {
+					summary =
+						targetFiles.length > 1
+							? `Готово: ${editCount} изменений в ${blocks.length} эпизод(ах).`
+							: intent.task_mode === 'bulk_replace' &&
+								  intent.replace_from &&
+								  intent.replace_to
+								? `Готово: обновлено ${editCount} реплик (замена «${intent.replace_from}» → «${intent.replace_to}»).`
+								: `Готово: исправлено ${editCount} реплик.`;
+				} else {
+					summary = 'Готово. В субтитрах изменений не потребовалось.';
 				}
 			}
 
 			const aiMsg: ChatMessage = {
 				id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
 				role: 'assistant',
-				text: response.message ?? '',
-				edits: applied?.edits,
-				editSnapshot: applied?.snapshot,
-				editStatus: applied?.snapshot && applied.snapshot.length > 0 ? 'pending' : undefined
+				text: summary,
+				editBlocks: blocks.length > 0 ? blocks : undefined,
+				editStatus: blocks.length > 0 ? 'pending' : undefined
 			};
 			setChatMessages((prev) => [...prev, aiMsg]);
 		} catch (err) {
@@ -3025,10 +3040,10 @@ ${changesText}
 		isAgentBusy,
 		pendingAttachedSegment,
 		chatMessages,
+		activeSubtitleFileId,
 		formatChatTimecode,
-		applyAgentResponseActions,
-		buildAgentConversationHistory,
-		mergeAgentActionsInMemory
+		applyAgentActionsToProject,
+		buildAgentConversationHistory
 	]);
 
 	const handleChatInputKeyDown = useCallback(
@@ -3046,6 +3061,25 @@ ${changesText}
 		if (!el) return;
 		el.scrollTop = el.scrollHeight;
 	}, [chatMessages, isAgentBusy]);
+
+	const syncChatInputHeight = useCallback(() => {
+		const el = chatInputRef.current;
+		if (!el) return;
+		el.style.height = '0px';
+		const contentHeight = el.scrollHeight;
+		const next = Math.min(
+			CHAT_INPUT_TEXT_MAX_PX,
+			Math.max(CHAT_INPUT_TEXT_MIN_PX, contentHeight)
+		);
+		el.style.height = `${next}px`;
+		const overflows = contentHeight > CHAT_INPUT_TEXT_MAX_PX;
+		el.style.overflowY = overflows ? 'auto' : 'hidden';
+		setChatInputHasScrollbar(overflows || el.scrollHeight > el.clientHeight + 1);
+	}, []);
+
+	useLayoutEffect(() => {
+		syncChatInputHeight();
+	}, [chatInput, pendingAttachedSegment, syncChatInputHeight]);
 
 	const hasOriginalText = useMemo(
 		() => generatedSegments.some((s) => (s.text ?? '').trim().length > 0),
@@ -5278,10 +5312,11 @@ ${changesText}
 						</div>
 					</div>
 
-					{/* Блок чата */}
+					{/* Лента + композер: скролл на всю высоту, карточка ввода внизу без наложения */}
+					<div className="flex-1 min-h-0 flex flex-col bg-surface-bg">
 					<div
 						ref={chatScrollRef}
-						className="flex-1 overflow-auto p-[12px] bg-surface-bg flex flex-col gap-4 subtitle-table-scroll"
+						className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3 pt-3 flex flex-col gap-4 subtitle-table-scroll chat-agent-scroll"
 					>
 						{chatMessages.length === 0 && !isAgentBusy && (
 							<div className="m-auto text-center text-caption font-inter text-text-primary/50 px-4">
@@ -5292,7 +5327,7 @@ ${changesText}
 						{chatMessages.map((msg) => {
 							if (msg.role === 'user') {
 								return (
-									<div key={msg.id} className="self-end max-w-[90%] flex flex-col items-end">
+									<div key={msg.id} className="self-end max-w-full min-w-0 flex flex-col items-end">
 										<div className="bg-surface-secondary rounded-[10px] rounded-tr-none p-[10px] select-text">
 											<p className="text-body-reg text-text-primary font-inter leading-tight whitespace-pre-wrap">
 												{msg.text}
@@ -5325,41 +5360,64 @@ ${changesText}
 								);
 							}
 
-							const expanded = expandedDiffIds.has(msg.id);
+							const legacyEdits: ChatEditBlock[] =
+								msg.edits && msg.edits.length > 0 && !msg.editBlocks
+									? [
+											{
+												fileId: activeSubtitleFileId ?? '',
+												fileName: '',
+												edits: msg.edits,
+												deletions: [],
+												fileSnapshot: msg.editSnapshot ?? [],
+												snapshot: msg.editSnapshot ?? []
+											}
+										]
+									: [];
+							const editBlocks: ChatEditBlock[] =
+								msg.editBlocks && msg.editBlocks.length > 0 ? msg.editBlocks : legacyEdits;
+							const blockChangeCount = (b: ChatEditBlock) =>
+								b.edits.length + (b.deletions?.length ?? 0);
+							const totalEdits = editBlocks.reduce((n, b) => n + blockChangeCount(b), 0);
+							const diffPanelExpanded = expandedDiffIds.has(msg.id);
+
 							return (
-								<div key={msg.id} className="self-start max-w-[95%] flex flex-col items-start">
+								<div key={msg.id} className="self-start w-full min-w-0 flex flex-col items-stretch">
 									<div
-										className={`rounded-[10px] rounded-bl-none p-[10px] select-text ${
+										className={`rounded-[10px] rounded-bl-none p-[10px] select-text w-full min-w-0 ${
 											msg.isError ? 'bg-inline-error' : 'bg-surface-panel'
 										}`}
 									>
 										{msg.text && (
-											<p className="text-body-reg text-text-primary font-inter leading-tight whitespace-pre-wrap">
+											<p className="text-body-reg text-text-primary font-inter leading-tight whitespace-pre-wrap break-words">
 												{msg.text}
 											</p>
 										)}
 
-										{msg.edits && msg.edits.length > 0 && (
+										{totalEdits > 0 && (
 											<div
-												className={`bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full ${
+												className={`bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[10px] w-full min-w-0 max-w-full ${
 													msg.text ? 'mt-3' : ''
 												}`}
 											>
-												<div className="flex items-center justify-between gap-2">
+												<div className="flex flex-wrap items-center gap-x-2 gap-y-1 w-full min-w-0">
 													<button
 														type="button"
-														title={expanded ? t('aiAgent.collapse') : t('aiAgent.expand')}
-														aria-expanded={expanded}
+														title={
+															diffPanelExpanded ? t('aiAgent.collapse') : t('aiAgent.expand')
+														}
+														aria-expanded={diffPanelExpanded}
 														onClick={() => toggleDiffExpanded(msg.id)}
 														className="group flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-primary transition-colors hover:bg-text-primary/15"
 													>
 														<span
 															className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
-															style={sidebarIconMaskStyle(expanded ? iconArrowUp : iconArrowDown)}
+															style={sidebarIconMaskStyle(
+																diffPanelExpanded ? iconArrowUp : iconArrowDown
+															)}
 															aria-hidden
 														/>
 													</button>
-													<div className="flex gap-[12px] shrink-0 items-center">
+													<div className="flex gap-[8px] shrink-0 items-center ml-auto">
 														{msg.editStatus === 'pending' && (
 															<>
 																<button
@@ -5391,38 +5449,125 @@ ${changesText}
 													</div>
 												</div>
 
-												{!expanded && (
-													<p className="text-caption font-inter text-text-primary/70">
-														{msg.edits.length}{' '}
-														{msg.edits.length === 1 ? t('aiAgent.change') : t('aiAgent.changes')}
+												{!diffPanelExpanded && (
+													<p className="text-caption font-inter text-text-primary/70 break-words w-full min-w-0">
+														{totalEdits}{' '}
+														{totalEdits === 1 ? t('aiAgent.change') : t('aiAgent.changes')}
+														{editBlocks.length > 1 ? ` · ${editBlocks.length} файлов` : ''}
 													</p>
 												)}
 
-												{expanded && (
-													<div className="flex flex-col gap-[10px]">
-														{msg.edits.map((d) => (
-															<div key={`${d.id}-${d.field}`} className="flex flex-col gap-[6px]">
-																<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
-																	<span className="whitespace-nowrap">#{d.id}</span>
-																	<span className="whitespace-nowrap">
-																		[ {formatChatTimecode(d.start)} ]
-																	</span>
-																	<div className="flex-1 h-[1px] bg-border-default" />
-																</div>
-																<div className="flex flex-col gap-[4px]">
-																	<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center">
-																		<span className="text-caption text-text-primary font-inter break-words">
-																			{d.oldText}
+												{diffPanelExpanded && (
+													<div className="flex flex-col gap-[12px] w-full min-w-0">
+														{editBlocks.map((block) => {
+															const blockKey = `${msg.id}::${block.fileId}`;
+															const blockExpanded = expandedDiffIds.has(blockKey);
+															return (
+																<div
+																	key={blockKey}
+																	className="flex flex-col gap-[8px] border-t border-border-default/60 pt-[8px] first:border-t-0 first:pt-0 w-full min-w-0"
+																>
+																	<div className="flex items-start gap-2 w-full min-w-0">
+																		<button
+																			type="button"
+																			title={
+																				blockExpanded
+																					? t('aiAgent.collapse')
+																					: t('aiAgent.expand')
+																			}
+																			onClick={() => toggleDiffExpanded(blockKey)}
+																			className="group flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-primary transition-colors hover:bg-text-primary/15 mt-px"
+																		>
+																			<span
+																				className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
+																				style={sidebarIconMaskStyle(
+																					blockExpanded ? iconArrowUp : iconArrowDown
+																				)}
+																				aria-hidden
+																			/>
+																		</button>
+																		<span className="text-caption font-inter text-text-primary font-medium break-words min-w-0 flex-1 leading-snug">
+																			{block.fileName || block.fileId}
+																		</span>
+																		<span className="text-caption font-inter text-text-primary/50 shrink-0 whitespace-nowrap pt-px">
+																			{t('aiAgent.episodeChanges', {
+																				count: blockChangeCount(block)
+																			})}
 																		</span>
 																	</div>
-																	<div className="min-h-[22px] bg-inline-success rounded-[2px] p-[4px] flex items-center">
-																		<span className="text-caption text-text-primary font-inter break-words">
-																			{d.newText}
-																		</span>
-																	</div>
+																	{blockExpanded && (
+																		<div className="flex flex-col gap-[10px] w-full min-w-0 mt-[10px]">
+																			{block.deletions?.map((d, delIdx) => (
+																				<div
+																					key={`del-${d.fileId}-${d.start}-${d.end}-${delIdx}`}
+																					className="flex flex-col gap-[6px] w-full min-w-0 rounded-[4px]"
+																				>
+																					<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60 min-w-0 w-full">
+																						<span className="whitespace-nowrap text-text-primary/50">
+																							{t('aiAgent.deletedLine')}
+																						</span>
+																						<span className="whitespace-nowrap">
+																							[ {formatChatTimecode(d.start)} ]
+																						</span>
+																						<div className="flex-1 min-w-[8px] h-[1px] bg-border-default" />
+																					</div>
+																					<div className="flex flex-col gap-[4px] w-full min-w-0">
+																						{d.text.trim() !== '' && (
+																							<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center w-full min-w-0">
+																								<span className="text-caption text-text-primary font-inter break-words">
+																									{d.text}
+																								</span>
+																							</div>
+																						)}
+																						{d.translation.trim() !== '' && (
+																							<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center w-full min-w-0">
+																								<span className="text-caption text-text-primary font-inter break-words">
+																									{d.translation}
+																								</span>
+																							</div>
+																						)}
+																					</div>
+																				</div>
+																			))}
+																			{block.edits.map((d) => (
+																				<button
+																					type="button"
+																					key={`${d.fileId}-${d.id}-${d.field}`}
+																					onClick={() =>
+																						void navigateToChatEdit(
+																							d.fileId,
+																							d.id,
+																							d.start
+																						)
+																					}
+																					className="flex flex-col gap-[6px] text-left w-full min-w-0 p-0 border-0 bg-transparent rounded-[4px] transition-colors hover:bg-text-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40"
+																				>
+																					<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60 min-w-0 w-full">
+																						<span className="whitespace-nowrap">#{d.id}</span>
+																						<span className="whitespace-nowrap">
+																							[ {formatChatTimecode(d.start)} ]
+																						</span>
+																						<div className="flex-1 min-w-[8px] h-[1px] bg-border-default" />
+																					</div>
+																					<div className="flex flex-col gap-[4px] w-full min-w-0">
+																						<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center w-full min-w-0">
+																							<span className="text-caption text-text-primary font-inter break-words">
+																								{d.oldText}
+																							</span>
+																						</div>
+																						<div className="min-h-[22px] bg-inline-success rounded-[2px] p-[4px] flex items-center w-full min-w-0">
+																							<span className="text-caption text-text-primary font-inter break-words">
+																								{d.newText}
+																							</span>
+																						</div>
+																					</div>
+																				</button>
+																			))}
+																		</div>
+																	)}
 																</div>
-															</div>
-														))}
+															);
+														})}
 													</div>
 												)}
 											</div>
@@ -5433,14 +5578,20 @@ ${changesText}
 						})}
 
 						{isAgentBusy && (
-							<div className="self-start max-w-[95%]">
-								<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px]">
-									<p className="text-body-reg text-text-primary/60 font-inter leading-tight">
+							<div className="self-start w-full min-w-0">
+								<div className="bg-surface-panel rounded-[10px] rounded-bl-none p-[8px] w-full min-w-0">
+									<p className="text-body-reg text-text-primary/60 font-inter leading-snug break-words [overflow-wrap:anywhere] min-w-0">
 										{agentBatchProgress
-											? t('aiAgent.batchProgress', {
-													current: agentBatchProgress.current,
-													total: agentBatchProgress.total
-												})
+											? agentBatchProgress.label
+												? t('aiAgent.episodeProgress', {
+														current: agentBatchProgress.current,
+														total: agentBatchProgress.total,
+														name: agentBatchProgress.label
+													})
+												: t('aiAgent.batchProgress', {
+														current: agentBatchProgress.current,
+														total: agentBatchProgress.total
+													})
 											: t('aiAgent.thinking')}
 									</p>
 								</div>
@@ -5448,11 +5599,10 @@ ${changesText}
 						)}
 					</div>
 
-					{/* Нижнее поле ввода */}
-					<div className="p-3 bg-surface-bg shrink-0">
-						<div className="relative flex flex-col bg-surface-secondary border border-border-default rounded-[10px] group transition-all focus-within:border-primary-main/50 shadow-sm min-h-[96px]">
+					<div className="shrink-0 px-3 pb-3 pt-2">
+						<div className="relative flex flex-col bg-surface-secondary border border-border-default rounded-[10px] group transition-[border-color] focus-within:border-primary-main/50 min-h-[96px] max-h-[min(320px,45vh)] overflow-hidden">
 							{pendingAttachedSegment && (
-								<div className="mx-3 mt-3 mb-1 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px]">
+								<div className="mx-3 mt-3 mb-1 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] shrink-0">
 									<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
 										<span className="whitespace-nowrap">#{pendingAttachedSegment.id}</span>
 										<span className="whitespace-nowrap">
@@ -5486,24 +5636,39 @@ ${changesText}
 							<textarea
 								ref={chatInputRef}
 								value={chatInput}
-								onChange={(e) => setChatInput(e.target.value)}
+								onChange={(e) => {
+									setChatInput(e.target.value);
+									requestAnimationFrame(syncChatInputHeight);
+								}}
 								onKeyDown={handleChatInputKeyDown}
 								disabled={isAgentBusy}
 								placeholder={t('aiAgent.placeholder')}
-								className="w-full h-full p-3 pr-[56px] bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto no-scrollbar disabled:opacity-60"
 								rows={3}
+								style={{
+									paddingRight: chatInputHasScrollbar
+										? CHAT_COMPOSER_INPUT_PADDING_RIGHT_WITH_SCROLL_PX
+										: CHAT_COMPOSER_INPUT_PADDING_RIGHT_NO_SCROLL_PX
+								}}
+								className={`block w-full min-h-[72px] max-h-[220px] p-3 pb-11 bg-transparent border-none outline-none text-body-reg text-text-primary placeholder:text-primary-disabled font-inter resize-none overflow-y-auto subtitle-table-scroll chat-composer-input disabled:opacity-60${chatInputHasScrollbar ? ' chat-composer-input--scroll' : ''}`}
 							/>
 
-							<div className="absolute right-3 bottom-3">
+							<div
+								className="absolute bottom-3 z-10 pointer-events-none transition-[right] duration-150 ease-out"
+								style={{
+									right: chatInputHasScrollbar
+										? CHAT_COMPOSER_SEND_BTN_RIGHT_WITH_SCROLL_PX
+										: CHAT_COMPOSER_SEND_BTN_RIGHT_NO_SCROLL_PX
+								}}
+							>
 								<button
 									type="button"
 									title={t('aiAgent.sendMessage')}
 									onClick={() => void handleSendChatMessage()}
 									disabled={isAgentBusy || chatInput.trim().length === 0}
-									className="group/send flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-0 bg-secondary-hover p-0 outline-none transition-colors hover:bg-primary-main focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-50"
+									className="pointer-events-auto group/send flex h-8 w-8 shrink-0 items-center justify-center rounded-full border-0 bg-secondary-hover p-0 outline-none transition-colors hover:bg-primary-main focus-visible:ring-2 focus-visible:ring-primary-main/40 disabled:pointer-events-none disabled:opacity-50"
 								>
 									<span
-										className="pointer-events-none inline-block h-6 w-6 shrink-0 origin-center bg-white transition-transform duration-200 ease-out will-change-transform group-hover/send:scale-110 group-active/send:scale-[0.92]"
+										className="pointer-events-none inline-block h-5 w-5 shrink-0 origin-center bg-white transition-transform duration-200 ease-out will-change-transform group-hover/send:scale-110 group-active/send:scale-[0.92]"
 										style={sidebarIconMaskStyle(iconSend)}
 										aria-hidden
 									/>
@@ -5511,6 +5676,7 @@ ${changesText}
 							</div>
 
 						</div>
+					</div>
 					</div>
 
 					{/* РЕСАЙЗЕР */}

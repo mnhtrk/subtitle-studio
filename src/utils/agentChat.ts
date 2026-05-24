@@ -8,13 +8,15 @@ export function formatSpeakerGenderForAgent(gender?: string | null): string {
 }
 export const AGENT_BATCH_SIZE = 40;
 
-/** Запрос на правку всего файла / всех субтитров — обрабатываем пакетами. */
+/** Запрос на правку всего файла эпизода — обрабатываем пакетами (в т.ч. при «весь проект»: пакеты по каждому эпизоду). */
 export function isWholeFileAgentRequest(text: string): boolean {
 	const t = text.toLowerCase();
 	return (
-		/всех?\s+субтит|все\s+реплик|весь\s+(файл|проект|эпизод|список)|по\s+всем|пройди(сь)?\s+по|пройтись\s+по|исправ(ь|ить|ить)\s+(все|всё)|провер(ь|ить)\s+(все|всё)|кажд(ую|ый)\s+реплик|all\s+subtitle|every\s+subtitle|entire\s+(file|project)/i.test(
+		/всех?\s+субтит|все\s+реплик|весь\s+(файл|эпизод|список)|по\s+всем|пройди(сь)?\s+по|пройтись\s+по|исправ(ь|ить)\s+(все|всё)|провер(ь|ить)\s+(все|всё)|кажд(ую|ый)\s+реплик|all\s+subtitle|every\s+subtitle|entire\s+file/i.test(
 			t
-		)
+		) ||
+		/галлюцин|whisper|amara|удал(и|ить).*(галлюцин|мусор)|remove\s+.*hallucin|delete\s+.*hallucin/i.test(t) ||
+		/из\s+проекта|по\s+проекту|в\s+проекте|всех?\s+эпизод|весь\s+проект|whole\s+project|entire\s+project/i.test(t)
 	);
 }
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { GlossaryEntry, projectService } from '../../services/projectService';
+import type { GlossaryEntry } from '../../services/projectService';
 import { useI18n } from '../../i18n';
 
 interface GlossaryRow {
@@ -125,7 +125,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
           context: r.context.trim() || null
         }));
       const changes = collectReplacementChanges(loadedEntries, entries);
-      await projectService.updateGlossary(projectPath, entries);
+      // Только в память проекта; на диск — при «Сохранить проект»
       onSaved?.(entries, changes);
       setLoadedEntries(entries);
       setRows(entriesToRows(entries));

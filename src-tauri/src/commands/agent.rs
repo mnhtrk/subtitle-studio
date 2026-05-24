@@ -4,16 +4,17 @@ use crate::speaker_gender_rules::{
     dialogue_context_translation_rules, proper_name_declension_rules, segment_speaker_gender_str,
     speaker_gender_translation_rules,
 };
-use crate::agent::dialogue_history::{DialogueHistory, AgentMessage, ConversationTurn, DialogueContext};
+use crate::agent::dialogue_history::{
+    DialogueHistory, AgentMessage, ConversationTurn, DialogueContext, SubtitleFileContext,
+};
 use crate::agent::task_mode::{
-    classify_agent_intent, filter_changed_segments, model_temperature, task_mode_prompt_block,
-    AgentIntent, AgentTaskMode,
+    agent_model_for_task, classify_agent_intent, filter_changed_segments, model_temperature,
+    task_mode_prompt_block, AgentIntent, AgentTaskMode,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
 use lazy_static::lazy_static;
 
-const AGENT_MODEL: &str = "gpt-5.4";
 const MAX_HISTORY_TURNS: usize = 30;
 const DEFAULT_NEIGHBOR_RADIUS: usize = 5;
 const MAX_NEIGHBOR_RADIUS: usize = 12;
@@ -42,6 +43,15 @@ pub struct AgentContext {
     pub current_segments: Option<Vec<SubtitleSegment>>,
     pub current_glossary: Option<Vec<GlossaryEntry>>,
     pub target_language: Option<String>,
+    #[serde(default)]
+    pub active_subtitle_file_id: Option<String>,
+    #[serde(default)]
+    pub active_subtitle_file_name: Option<String>,
+    /// active_episode | whole_project
+    #[serde(default)]
+    pub edit_scope: Option<String>,
+    #[serde(default)]
+    pub subtitle_files: Vec<SubtitleFileContext>,
     #[serde(default)]
     pub focus_segment_id: Option<u32>,
     #[serde(default)]
@@ -86,7 +96,16 @@ pub struct AgentIntentResponse {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum AgentAction {
-    EditSegments { segments: Vec<SubtitleSegment> },
+    EditSegments {
+        #[serde(default)]
+        file_id: Option<String>,
+        segments: Vec<SubtitleSegment>,
+    },
+    DeleteSegments {
+        #[serde(default)]
+        file_id: Option<String>,
+        segment_ids: Vec<u32>,
+    },
     UpdateGlossary { entries: Vec<GlossaryEntry> },
     GenerateText { text: String },
     ExplainIssue { issue: String, solution: String },
@@ -148,6 +167,10 @@ pub async fn chat_with_agent(
             request.context.current_segments.clone(),
             request.context.current_glossary.clone(),
             request.context.target_language.clone(),
+            request.context.active_subtitle_file_id.clone(),
+            request.context.active_subtitle_file_name.clone(),
+            request.context.edit_scope.clone(),
+            request.context.subtitle_files.clone(),
             request.context.focus_segment_id,
             request.context.neighbor_radius,
             request.context.batch_segment_ids.clone(),
@@ -170,6 +193,10 @@ pub async fn chat_with_agent(
             current_segments: None,
             current_glossary: None,
             target_language: None,
+            active_subtitle_file_id: None,
+            active_subtitle_file_name: None,
+            edit_scope: None,
+            subtitle_files: Vec::new(),
             focus_segment_id: None,
             neighbor_radius: 0,
             batch_segment_ids: None,
@@ -354,6 +381,24 @@ async fn run_agent_turn(
         "content": request.message
     }));
 
+    let ep = context
+        .active_subtitle_file_name
+        .as_deref()
+        .unwrap_or("?");
+    println!(
+        "[agent][debug] turn episode={ep} batch={:?}/{:?} scope={:?} user_chars={}",
+        context.batch_index,
+        context.batch_total,
+        context.edit_scope,
+        request.message.len()
+    );
+    for (part_i, chunk) in request.message.as_bytes().chunks(3500).enumerate() {
+        println!(
+            "[agent][debug] turn_user[{part_i}]={}",
+            String::from_utf8_lossy(chunk)
+        );
+    }
+
     call_agent_model(messages, api_key, context, task_mode, intent).await
 }
 
@@ -385,7 +430,7 @@ async fn call_agent_model(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": AGENT_MODEL,
+            "model": agent_model_for_task(task_mode),
             "messages": messages,
             "response_format": { "type": "json_object" },
             "temperature": model_temperature(task_mode),
@@ -409,6 +454,23 @@ async fn call_agent_model(
         .as_str()
         .ok_or_else(|| "Пустой ответ агента".to_string())?;
 
+    let ep = context
+        .active_subtitle_file_name
+        .as_deref()
+        .unwrap_or("?");
+    println!(
+        "[agent][debug] api_reply episode={ep} batch={:?}/{:?} chars={}",
+        context.batch_index,
+        context.batch_total,
+        content.len()
+    );
+    for (part_i, chunk) in content.as_bytes().chunks(3500).enumerate() {
+        println!(
+            "[agent][debug] api_reply_body[{part_i}]={}",
+            String::from_utf8_lossy(chunk)
+        );
+    }
+
     let parsed: AgentTurnJson = serde_json::from_str(content)
         .map_err(|e| format!("Агент вернул невалидный JSON ({}): {}", e, content))?;
 
@@ -429,7 +491,24 @@ fn build_system_prompt(
     } else {
         context.neighbor_radius.min(MAX_NEIGHBOR_RADIUS)
     };
-    let segments_block = format_segments_for_prompt(
+    let episode_header = match (
+        context.active_subtitle_file_name.as_deref(),
+        context.active_subtitle_file_id.as_deref(),
+    ) {
+        (Some(name), Some(id)) => format!(
+            "ТЕКУЩИЙ ЭПИЗОД: «{name}» (file_id: {id}). Все edit_segments в этом ответе относятся только к этому эпизоду.\n"
+        ),
+        _ => String::new(),
+    };
+    let scope_note = match context.edit_scope.as_deref() {
+        Some("whole_project") => {
+            "Область: весь проект — пользователь просил пройтись по всем эпизодам. \
+             В ЭТОМ ответе передан только один эпизод (см. заголовок): edit_segments и delete_segments \
+             только с его file_id. Остальные эпизоды обработает интерфейс отдельными запросами.\n"
+        }
+        _ => "Область: текущий эпизод (не меняй другие серии).\n",
+    };
+    let mut segments_block = format_segments_for_prompt(
         context.current_segments.as_deref(),
         context.focus_segment_id,
         radius,
@@ -437,6 +516,11 @@ fn build_system_prompt(
         context.batch_index,
         context.batch_total,
     );
+    if !episode_header.is_empty() {
+        segments_block = format!("{episode_header}{scope_note}\n{segments_block}");
+    } else {
+        segments_block = format!("{scope_note}\n{segments_block}");
+    }
     let glossary_block = format_glossary_for_prompt(context.current_glossary.as_deref());
     let gender_dialogue = dialogue_context_translation_rules(target_lang);
     let gender_rules = speaker_gender_translation_rules(target_lang);
@@ -445,13 +529,23 @@ fn build_system_prompt(
          У каждой реплики в списке ниже указан speaker_gender (male/female/unknown) — пол говорящего в этой строке.\n";
 
     let batch_note = if context.batch_total.unwrap_or(0) > 1 {
-        "\n\
-         РЕЖИМ ПАКЕТОВ: задача разбита на части. Обрабатывай ТОЛЬКО сегменты текущего пакета (полный текст ниже).\n\
-         - Выполни ТОЛЬКО то, что пользователь попросил в сообщении (замена слова/термина, конкретная правка и т.д.).\n\
-         - НЕ проводи общую проверку качества и НЕ исправляй другие неточности, род, говорящего, стиль — даже если видишь ошибки.\n\
-         - Если в этом пакете нечего менять — actions: [].\n\
-         - Поле message оставь пустым (\"\"); не пиши «пакет N», «не найдено» и т.п. — итог соберёт интерфейс.\n\
-         - В edit_segments — только id из этого пакета, только строки, затронутые задачей пользователя.\n"
+        match task_mode {
+            AgentTaskMode::Proofread => "\n\
+                 РЕЖИМ ПАКЕТОВ (ВЫЧИТКА): в этом ответе — один пакет эпизода, полный текст всех его реплик ниже.\n\
+                 - Проверь КАЖДУЮ реплику пакета: опечатки, пунктуация, точка в конце, стиль («Хммм» → «Хм-м-м...»).\n\
+                 - Минимальная правка; не перефразируй. Уже корректные реплики не включай в edit_segments.\n\
+                 - Только id из текущего пакета. message: \"\".\n",
+            AgentTaskMode::TranslationFix => "\n\
+                 РЕЖИМ ПАКЕТОВ (ПЕРЕВОД): проверь КАЖДУЮ реплику пакета (полный текст ниже).\n\
+                 - Только поле translation, только явные ошибки. message: \"\".\n",
+            _ => "\n\
+                 РЕЖИМ ПАКЕТОВ: задача разбита на части. В этом ответе — один пакет (полный текст реплик пакета ниже).\n\
+                 - Обработай ВСЕ реплики пакета из списка id в сообщении пользователя; не пропускай id без проверки.\n\
+                 - Выполни задачу из сообщения пользователя; не расширяй её на посторонние правки.\n\
+                 - Если в пакете нечего менять — actions: []. message: \"\".\n\
+                 - edit_segments — только id этого пакета.\n\
+                 - delete_segments: только водяной знак Whisper (amara.org, subtitles by…); смех и междометия не удалять.\n",
+        }
     } else {
         ""
     };
@@ -498,6 +592,7 @@ fn build_system_prompt(
          Как понимать намерение (смотри на смысл и историю диалога):\n\
          - Если пользователь обсуждает реплику и затем предлагает формулировку («надо вот так», «лучше так», \"should be\", \"make it\"…) — это правка субтитров.\n\
          - Если просит изменить/исправить/укоротить/перефразировать сегмент — edit_segments.\n\
+         - Если просит удалить галлюцинации/мусор Whisper или конкретную мусорную строку — delete_segments (см. правила ниже).\n\
          - Если только спрашивает, советует, уточняет без просьбы применить изменения — actions: [], только message.\n\
          - Если просит улучшить перевод — edit_segments с полем translation.\n\
          - Если просит анализ качества без правок — explain_issue.\n\
@@ -514,6 +609,15 @@ fn build_system_prompt(
          Правила правок:\n\
          - В edit_segments указывай ТОЛЬКО изменённые сегменты (id обязателен).\n\
          - Включай только поля, которые меняются: text и/или translation.\n\
+         - delete_segments — ТОЛЬКО водяные знаки/галлюцинации Whisper (технические вставки ASR), НЕ речь персонажей.\n\
+         - УДАЛЯЙ (белый список): строка содержит признаки водяного знака — «Subtitles by…» / «Subtitles by DimaTorzok» и любое имя, \
+           «subtitles created», «субтитры сделаны», «Amara.org», «amara.org», обрывок «org.» без сцены; или полностью пустая строка-мусор.\n\
+         - ЗАПРЕЩЕНО удалять через delete_segments (это диалог, даже если коротко или повтор звука):\n\
+           смех и реакции — «Ха-ха», «Хи-хи», «Ха-ха-ха», «Хе-хе», «Лол»; междометия — «Ой», «Ай», «Ай-ай», «Э-э», \
+           «Нет!», «Что?», «А?», «А-а-а» как крик/реакция в сцене; «…»; любые осмысленные реплики с именами и действиями.\n\
+         - Повторяющиеся слоги в сцене (крик, смех, испуг) — НЕ галлюцинация Whisper; не путай с водяным знаком.\n\
+         - Галлюцинации — редкие отдельные вставки (обычно 1–3 на эпизод), не десятки строк. Нет водяного знака в пакете — delete_segments: []. \
+           При сомнении — не удаляй.\n\
          - Не выдумывай id. Не меняй таймкоды.\n\
          - Не перефразируй весь файл без явной просьбы.\n\
          - В message не хвали себя за посторонние правки; если в пакете нечего менять по задаче — так и напиши, actions: [].\n\n\
@@ -524,10 +628,12 @@ fn build_system_prompt(
            \"suggestions\": null ИЛИ [\"строка\", ...]\n\
          }}\n\n\
          Типы элементов actions:\n\
-         1) {{\"type\":\"edit_segments\",\"segments\":[{{\"id\":1,\"text\":\"...\",\"translation\":\"...\"}}]}}\n\
-         2) {{\"type\":\"update_glossary\",\"entries\":[{{\"id\":\"\",\"source\":\"\",\"target\":\"\",\"description\":null,\"context\":null}}]}}\n\
-         3) {{\"type\":\"explain_issue\",\"issue\":\"...\",\"solution\":\"...\"}}\n\
-         4) {{\"type\":\"generate_text\",\"text\":\"...\"}}\n\n\
+         1) {{\"type\":\"edit_segments\",\"file_id\":\"{file_id_hint}\",\"segments\":[{{\"id\":1,\"text\":\"...\",\"translation\":\"...\"}}]}}\n\
+         (file_id — id текущего эпизода; если не уверен — укажи тот же id, что в заголовке эпизода)\n\
+         2) {{\"type\":\"delete_segments\",\"file_id\":\"{file_id_hint}\",\"segment_ids\":[3,7]}}\n\
+         3) {{\"type\":\"update_glossary\",\"entries\":[{{\"id\":\"\",\"source\":\"\",\"target\":\"\",\"description\":null,\"context\":null}}]}}\n\
+         4) {{\"type\":\"explain_issue\",\"issue\":\"...\",\"solution\":\"...\"}}\n\
+         5) {{\"type\":\"generate_text\",\"text\":\"...\"}}\n\n\
          Если правки не нужны, actions: [].",
         target_lang = target_lang,
         glossary_block = glossary_block,
@@ -539,7 +645,34 @@ fn build_system_prompt(
         name_declension_rules = name_declension_rules,
         segments_block = segments_block,
         radius = radius,
+        file_id_hint = context
+            .active_subtitle_file_id
+            .as_deref()
+            .unwrap_or("null"),
     )
+}
+
+fn segments_for_file_id<'a>(
+    context: &'a DialogueContext,
+    file_id: Option<&str>,
+) -> Option<&'a [SubtitleSegment]> {
+    if let Some(fid) = file_id.filter(|s| !s.trim().is_empty()) {
+        if let Some(f) = context.subtitle_files.iter().find(|f| f.file_id == fid) {
+            return Some(f.segments.as_slice());
+        }
+        if context.active_subtitle_file_id.as_deref() == Some(fid) {
+            return context.current_segments.as_deref();
+        }
+        return None;
+    }
+    context.current_segments.as_deref()
+}
+
+fn resolve_action_file_id(context: &DialogueContext, from_action: Option<&str>) -> Option<String> {
+    if let Some(id) = from_action.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(id.to_string());
+    }
+    context.active_subtitle_file_id.clone()
 }
 
 fn format_segment_line_full(s: &SubtitleSegment, mark: &str) -> String {
@@ -681,7 +814,8 @@ fn format_segments_for_prompt(
             let bi = batch_index.unwrap_or(1);
             let bt = batch_total.unwrap_or(1);
             out.push_str(&format!(
-                "\nПакет {bi}/{bt} — полный текст только этих id (остальные сегменты файла в других пакетах):\n"
+                "\nПакет {bi}/{bt} — полный текст ВСЕХ реплик этого пакета (id в сообщении пользователя). \
+                 Остальные id файла — в других пакетах:\n"
             ));
             for s in &sorted {
                 if id_set.contains(&s.id) {
@@ -800,7 +934,18 @@ fn map_turn_to_response(
             }
         }
     }
+    let raw_action_count = actions.len();
     actions = filter_actions_by_task(actions, context, task_mode, intent);
+    if context.batch_total.unwrap_or(1) > 1 {
+        println!(
+            "[agent][debug] actions_filtered episode={:?} batch={:?}/{:?} raw={} kept={}",
+            context.active_subtitle_file_name,
+            context.batch_index,
+            context.batch_total,
+            raw_action_count,
+            actions.len()
+        );
+    }
 
     let in_batch = context.batch_total.unwrap_or(0) > 1;
     let message = if in_batch {
@@ -819,6 +964,44 @@ fn map_turn_to_response(
     })
 }
 
+fn segment_is_whisper_watermark(seg: &SubtitleSegment) -> bool {
+    let text = seg.text.trim();
+    let tr = seg.translation.as_deref().unwrap_or("").trim();
+    let hay = format!("{text}\n{tr}").to_lowercase();
+    if hay.is_empty() {
+        return false;
+    }
+    if hay.contains("amara.org") || hay.contains("amara.") {
+        return true;
+    }
+    if hay.contains("subtitles by")
+        || hay.contains("subtitle by")
+        || hay.contains("subtitles created")
+    {
+        return true;
+    }
+    if hay.contains("субтитр") && (hay.contains("сделан") || hay.contains("сообществ")) {
+        return true;
+    }
+    let t = text.to_lowercase();
+    if t == "org." || t == "org" {
+        return true;
+    }
+    let t = tr.to_lowercase();
+    t == "org." || t == "org"
+}
+
+fn filter_delete_ids_to_watermarks(base: &[SubtitleSegment], ids: Vec<u32>) -> Vec<u32> {
+    ids.into_iter()
+        .filter(|id| {
+            base.iter()
+                .find(|s| s.id == *id)
+                .map(segment_is_whisper_watermark)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 fn filter_actions_by_task(
     actions: Vec<AgentAction>,
     context: &DialogueContext,
@@ -833,29 +1016,69 @@ fn filter_actions_by_task(
     };
 
     if task_mode == AgentTaskMode::General {
-        return actions;
+        return actions
+            .into_iter()
+            .filter_map(|action| match action {
+                AgentAction::DeleteSegments {
+                    file_id,
+                    segment_ids,
+                } => {
+                    let base = segments_for_file_id(context, file_id.as_deref())?;
+                    let ids = filter_delete_ids_to_watermarks(base, segment_ids);
+                    if ids.is_empty() {
+                        None
+                    } else {
+                        Some(AgentAction::DeleteSegments {
+                            file_id: resolve_action_file_id(context, file_id.as_deref()),
+                            segment_ids: ids,
+                        })
+                    }
+                }
+                other => Some(other),
+            })
+            .collect();
     }
 
     if task_mode == AgentTaskMode::AnswerOnly {
         return actions
             .into_iter()
-            .filter(|a| !matches!(a, AgentAction::EditSegments { .. }))
+            .filter(|a| {
+                !matches!(
+                    a,
+                    AgentAction::EditSegments { .. } | AgentAction::DeleteSegments { .. }
+                )
+            })
             .collect();
     }
-
-    let Some(base) = context.current_segments.as_deref() else {
-        return actions;
-    };
 
     actions
         .into_iter()
         .filter_map(|action| match action {
-            AgentAction::EditSegments { segments } => {
+            AgentAction::DeleteSegments {
+                file_id,
+                segment_ids,
+            } => {
+                let base = segments_for_file_id(context, file_id.as_deref())?;
+                let ids = filter_delete_ids_to_watermarks(base, segment_ids);
+                if ids.is_empty() {
+                    None
+                } else {
+                    Some(AgentAction::DeleteSegments {
+                        file_id: resolve_action_file_id(context, file_id.as_deref()),
+                        segment_ids: ids,
+                    })
+                }
+            }
+            AgentAction::EditSegments { file_id, segments } => {
+                let base = segments_for_file_id(context, file_id.as_deref())?;
                 let filtered = filter_changed_segments(task_mode, base, segments, intent);
                 if filtered.is_empty() {
                     None
                 } else {
-                    Some(AgentAction::EditSegments { segments: filtered })
+                    Some(AgentAction::EditSegments {
+                        file_id: resolve_action_file_id(context, file_id.as_deref()),
+                        segments: filtered,
+                    })
                 }
             }
             AgentAction::UpdateGlossary { .. }
@@ -884,16 +1107,50 @@ fn parse_action(
 
     match action_type {
         "edit_segments" => {
+            let file_id_raw = value
+                .get("file_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let patches: Vec<SegmentPatch> =
                 serde_json::from_value(value.get("segments")?.clone()).ok()?;
-            let base = context.current_segments.as_deref()?;
+            let base = segments_for_file_id(context, file_id_raw.as_deref())?;
             let merged = apply_segment_patches(base, &patches);
             let changed = collect_changed_segments(base, &merged);
             let filtered = filter_changed_segments(task_mode, base, changed, intent);
             if filtered.is_empty() {
                 return None;
             }
-            Some(AgentAction::EditSegments { segments: filtered })
+            Some(AgentAction::EditSegments {
+                file_id: resolve_action_file_id(context, file_id_raw.as_deref()),
+                segments: filtered,
+            })
+        }
+        "delete_segments" => {
+            let file_id_raw = value
+                .get("file_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let ids: Vec<u32> = value
+                .get("segment_ids")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .or_else(|| {
+                    value
+                        .get("ids")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                })
+                .unwrap_or_default();
+            if ids.is_empty() {
+                return None;
+            }
+            let base = segments_for_file_id(context, file_id_raw.as_deref())?;
+            let valid = filter_delete_ids_to_watermarks(base, ids);
+            if valid.is_empty() {
+                return None;
+            }
+            Some(AgentAction::DeleteSegments {
+                file_id: resolve_action_file_id(context, file_id_raw.as_deref()),
+                segment_ids: valid,
+            })
         }
         "update_glossary" => {
             let entries: Vec<GlossaryEntry> =

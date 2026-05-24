@@ -106,7 +106,10 @@ const enMessages = {
 		kept: 'Kept',
 		reverted: 'Reverted',
 		change: 'change',
-		changes: 'changes'
+		changes: 'changes',
+		episodeProgress: 'Batch {current} of {total}: {name}',
+		episodeChanges: '{count} changes',
+		deletedLine: 'Removed'
 	},
 	table: {
 		startTime: 'Start time',
@@ -423,7 +426,7 @@ const ruMessages: Messages = {
 		more: 'Ещё',
 		emptyHint: 'Задайте вопрос агенту или попросите изменить реплики',
 		thinking: 'Агент думает...',
-		batchProgress: 'Пакет {current} из {total}...',
+		batchProgress: 'Пачка {current} из {total}...',
 		placeholder: 'Помоги, пожалуйста, перевести...',
 		sendMessage: 'Отправить сообщение',
 		removeAttachment: 'Убрать реплику',
@@ -436,7 +439,10 @@ const ruMessages: Messages = {
 		kept: 'Принято',
 		reverted: 'Отменено',
 		change: 'изменение',
-		changes: 'изменений'
+		changes: 'изменений',
+		episodeProgress: 'Пачка {current} из {total}: {name}',
+		episodeChanges: '{count} изм.',
+		deletedLine: 'Удалено'
 	},
 	table: {
 		startTime: 'Начало',

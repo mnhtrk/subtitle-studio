@@ -168,7 +168,29 @@
   background: var(--color-surface-bg);
 }
 
+.chat-agent-scroll {
+  scrollbar-gutter: stable;
+}
 
+/* Поле ввода агента: дорожка скролла только при переполнении */
+.chat-composer-input::-webkit-scrollbar-corner {
+  background: var(--color-surface-secondary);
+}
+
+.dark .chat-composer-input::-webkit-scrollbar-corner {
+  background: var(--color-surface-secondary);
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
 
 /* ������� ����������� ����� � ����������� ������ ������� */
 .resizer {

@@ -19,11 +19,26 @@ pub struct ConversationTurn {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SubtitleFileContext {
+    pub file_id: String,
+    pub file_name: String,
+    pub segments: Vec<SubtitleSegment>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DialogueContext {
     pub project_id: Option<String>,
     pub current_segments: Option<Vec<SubtitleSegment>>,
     pub current_glossary: Option<Vec<GlossaryEntry>>,
     pub target_language: Option<String>,
+    #[serde(default)]
+    pub active_subtitle_file_id: Option<String>,
+    #[serde(default)]
+    pub active_subtitle_file_name: Option<String>,
+    #[serde(default)]
+    pub edit_scope: Option<String>,
+    #[serde(default)]
+    pub subtitle_files: Vec<SubtitleFileContext>,
     #[serde(default)]
     pub focus_segment_id: Option<u32>,
     #[serde(default)]
@@ -57,6 +72,10 @@ impl DialogueHistory {
                 current_segments: None,
                 current_glossary: None,
                 target_language: None,
+                active_subtitle_file_id: None,
+                active_subtitle_file_name: None,
+                edit_scope: None,
+                subtitle_files: Vec::new(),
                 focus_segment_id: None,
                 neighbor_radius: 0,
                 batch_segment_ids: None,
@@ -79,6 +98,10 @@ impl DialogueHistory {
         segments: Option<Vec<SubtitleSegment>>,
         glossary: Option<Vec<GlossaryEntry>>,
         target_language: Option<String>,
+        active_subtitle_file_id: Option<String>,
+        active_subtitle_file_name: Option<String>,
+        edit_scope: Option<String>,
+        subtitle_files: Vec<SubtitleFileContext>,
         focus_segment_id: Option<u32>,
         neighbor_radius: usize,
         batch_segment_ids: Option<Vec<u32>>,
@@ -92,6 +115,10 @@ impl DialogueHistory {
         session.current_segments = segments;
         session.current_glossary = glossary;
         session.target_language = target_language;
+        session.active_subtitle_file_id = active_subtitle_file_id;
+        session.active_subtitle_file_name = active_subtitle_file_name;
+        session.edit_scope = edit_scope;
+        session.subtitle_files = subtitle_files;
         session.focus_segment_id = focus_segment_id;
         session.neighbor_radius = neighbor_radius;
         session.batch_segment_ids = batch_segment_ids;

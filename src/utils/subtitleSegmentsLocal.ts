@@ -40,6 +40,25 @@ export function deleteSegmentById(segments: SubtitleSegment[], segmentId: number
 	return sortAndRenumberSubtitleIds(segments.filter((s) => s.id !== segmentId));
 }
 
+export function deleteSegmentsByIds(segments: SubtitleSegment[], segmentIds: number[]): SubtitleSegment[] {
+	return deleteSegmentsByIdsWithRemoved(segments, segmentIds).segments;
+}
+
+export function deleteSegmentsByIdsWithRemoved(
+	segments: SubtitleSegment[],
+	segmentIds: number[]
+): { segments: SubtitleSegment[]; removed: SubtitleSegment[] } {
+	if (segmentIds.length === 0) {
+		return { segments, removed: [] };
+	}
+	const drop = new Set(segmentIds);
+	const removed = segments.filter((s) => drop.has(s.id));
+	return {
+		segments: sortAndRenumberSubtitleIds(segments.filter((s) => !drop.has(s.id))),
+		removed
+	};
+}
+
 export function splitSegmentAt(
 	segments: SubtitleSegment[],
 	index: number,

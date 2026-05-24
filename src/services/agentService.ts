@@ -1,11 +1,23 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { SubtitleSegment, GlossaryEntry } from './projectService';
 
+export interface SubtitleFileContext {
+  file_id: string;
+  file_name: string;
+  segments: SubtitleSegment[];
+}
+
+export type AgentEditScope = 'active_episode' | 'whole_project';
+
 export interface AgentContext {
   project_id?: string | null;
   current_segments?: SubtitleSegment[] | null;
   current_glossary?: GlossaryEntry[] | null;
   target_language?: string | null;
+  active_subtitle_file_id?: string | null;
+  active_subtitle_file_name?: string | null;
+  edit_scope?: AgentEditScope | null;
+  subtitle_files?: SubtitleFileContext[];
   /** Реплика из Спросить агента в промпт попадёт окно соседей. */
   focus_segment_id?: number | null;
   /** Сколько сегментов до/после focus включить полным текстом (по умолчанию 5) */
@@ -29,7 +41,8 @@ export interface AgentIntent {
 }
 
 export type AgentAction =
-  | { EditSegments: { segments: SubtitleSegment[] } }
+  | { EditSegments: { file_id?: string | null; segments: SubtitleSegment[] } }
+  | { DeleteSegments: { file_id?: string | null; segment_ids: number[] } }
   | { UpdateGlossary: { entries: GlossaryEntry[] } }
   | { GenerateText: { text: string } }
   | { ExplainIssue: { issue: string; solution: string } };
@@ -67,7 +80,23 @@ export const agentService = {
     context: AgentContext,
     options: AgentChatOptions
   ): Promise<AgentResponse> => {
-    return await invoke<AgentResponse>('chat_with_agent', {
+    console.log('[agent][debug] invoke chat_with_agent', {
+      episode: context.active_subtitle_file_name,
+      fileId: context.active_subtitle_file_id,
+      editScope: context.edit_scope,
+      batch: context.batch_index
+        ? `${context.batch_index}/${context.batch_total}`
+        : null,
+      batchSegmentIds: context.batch_segment_ids,
+      segments: context.current_segments?.length ?? 0,
+      userMessageChars: message.length
+    });
+    for (let p = 0; p * 3500 < message.length; p++) {
+      console.log(
+        `[agent][debug] invoke_user[${p}]=${message.slice(p * 3500, (p + 1) * 3500)}`
+      );
+    }
+    const response = await invoke<AgentResponse>('chat_with_agent', {
       request: {
         message,
         context,
@@ -75,6 +104,19 @@ export const agentService = {
         conversation_history: options.conversationHistory ?? []
       }
     });
+    const actionsJson = JSON.stringify(response.actions ?? []);
+    console.log('[agent][debug] invoke chat_with_agent done', {
+      episode: context.active_subtitle_file_name,
+      message: response.message ?? '',
+      actionsCount: response.actions?.length ?? 0,
+      actionsChars: actionsJson.length
+    });
+    for (let p = 0; p * 3500 < actionsJson.length; p++) {
+      console.log(
+        `[agent][debug] invoke_actions[${p}]=${actionsJson.slice(p * 3500, (p + 1) * 3500)}`
+      );
+    }
+    return response;
   }
 };
 
