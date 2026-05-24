@@ -615,6 +615,150 @@ pub async fn delete_episode_from_project(
     Ok(project)
 }
 
+fn split_file_name_extension(name: &str) -> (String, String) {
+    let path = Path::new(name);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| name.to_string());
+    (stem, ext)
+}
+
+fn sanitize_file_base_name(raw: &str, extension: &str) -> Result<String, String> {
+    let mut base = raw.trim().to_string();
+    if base.is_empty() {
+        return Err("Имя файла не может быть пустым".to_string());
+    }
+    if !extension.is_empty() {
+        let suffix = format!(".{}", extension);
+        if base.len() > suffix.len() && base.to_lowercase().ends_with(&suffix.to_lowercase()) {
+            base = base[..base.len() - suffix.len()].trim().to_string();
+        }
+    }
+    if base.is_empty() {
+        return Err("Имя файла не может быть пустым".to_string());
+    }
+    const INVALID: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+    if base.chars().any(|c| INVALID.contains(&c)) {
+        return Err("Имя содержит недопустимые символы: \\ / : * ? \" < > |".to_string());
+    }
+    Ok(base)
+}
+
+fn build_file_name(base: &str, ext: &str) -> String {
+    if ext.is_empty() {
+        base.to_string()
+    } else {
+        format!("{}.{}", base, ext)
+    }
+}
+
+fn relative_path_for_renamed(parent_rel: &str, new_name: &str) -> String {
+    let parent = parent_rel.replace('\\', "/");
+    if parent.is_empty() {
+        new_name.to_string()
+    } else {
+        format!("{}/{}", parent, new_name)
+    }
+}
+
+fn default_parent_dir(file_type: &ProjectType) -> &'static str {
+    match file_type {
+        ProjectType::Video => "video",
+        ProjectType::Subtitle => "subtitles",
+        ProjectType::Config => "config",
+    }
+}
+
+fn rename_file_on_disk(
+    root: &Path,
+    old_rel: &str,
+    new_rel: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    let old_full = root.join(old_rel);
+    let new_full = root.join(new_rel);
+    if new_full.exists() && new_full != old_full {
+        return Err(format!("Файл «{}» уже существует", new_name));
+    }
+    if !old_full.exists() {
+        return Err(format!("Файл не найден на диске: {}", old_full.display()));
+    }
+    fs::rename(&old_full, &new_full).map_err(|e| format!("Ошибка переименования: {}", e))
+}
+
+#[tauri::command]
+pub async fn rename_project_file(
+    project_path: String,
+    file_id: String,
+    new_base_name: String,
+    app_handle: tauri::AppHandle,
+) -> Result<Project, String> {
+    let project_path_buf = Path::new(&project_path);
+    let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
+    let root = project_path_buf;
+
+    let file_idx = project
+        .files
+        .iter()
+        .position(|f| f.id == file_id)
+        .ok_or_else(|| "Файл не найден в проекте".to_string())?;
+
+    let file = project.files[file_idx].clone();
+    let (_, ext) = split_file_name_extension(&file.name);
+    let base = sanitize_file_base_name(&new_base_name, &ext)?;
+    let new_name = build_file_name(&base, &ext);
+
+    if new_name == file.name {
+        return Ok(project);
+    }
+
+    let parent_rel = Path::new(&file.path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| default_parent_dir(&file.file_type).to_string());
+    let new_rel = relative_path_for_renamed(&parent_rel, &new_name);
+    rename_file_on_disk(root, &file.path, &new_rel, &new_name)?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    {
+        let f = &mut project.files[file_idx];
+        f.name = new_name;
+        f.path = new_rel;
+        f.updated_at = now.clone();
+    }
+
+    if let Some(partner_id) = file.linked_file_id.clone() {
+        if let Some(pidx) = project.files.iter().position(|f| f.id == partner_id) {
+            let partner = project.files[pidx].clone();
+            let (_, partner_ext) = split_file_name_extension(&partner.name);
+            let partner_new_name = build_file_name(&base, &partner_ext);
+            if partner_new_name != partner.name {
+                let partner_parent = Path::new(&partner.path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| default_parent_dir(&partner.file_type).to_string());
+                let partner_new_rel = relative_path_for_renamed(&partner_parent, &partner_new_name);
+                rename_file_on_disk(root, &partner.path, &partner_new_rel, &partner_new_name)?;
+                let partner_mut = &mut project.files[pidx];
+                partner_mut.name = partner_new_name;
+                partner_mut.path = partner_new_rel;
+                partner_mut.updated_at = now.clone();
+            }
+        }
+    }
+
+    project.updated_at = now;
+    project.save_to_file(&app_handle)?;
+    Ok(project)
+}
+
 #[tauri::command]
 pub async fn delete_project_file_artifact(
     project_path: String,

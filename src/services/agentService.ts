@@ -14,6 +14,18 @@ export interface AgentContext {
   batch_segment_ids?: number[] | null;
   batch_index?: number | null;
   batch_total?: number | null;
+  /** Режим задачи (определяет ии) general  bulk_replace  proofread  translation_fix  answer_only */
+  task_mode?: string | null;
+  replace_from?: string | null;
+  replace_to?: string | null;
+  translation_only?: boolean;
+}
+
+export interface AgentIntent {
+  task_mode: string;
+  replace_from?: string | null;
+  replace_to?: string | null;
+  translation_only?: boolean;
 }
 
 export type AgentAction =
@@ -26,6 +38,7 @@ export interface AgentResponse {
   message: string;
   actions?: AgentAction[];
   suggestions?: string[] | null;
+  task_mode?: string | null;
 }
 
 export interface ConversationTurn {
@@ -35,10 +48,20 @@ export interface ConversationTurn {
 
 export interface AgentChatOptions {
   sessionId: string;
-  conversationHistory?: ConversationTurn[]; // без текущего msg
+  conversationHistory?: ConversationTurn[];
 }
 
 export const agentService = {
+  classifyIntent: async (
+    message: string,
+    options: AgentChatOptions
+  ): Promise<AgentIntent> => {
+    return await invoke<AgentIntent>('classify_agent_intent_command', {
+      message,
+      conversationHistory: options.conversationHistory ?? []
+    });
+  },
+
   chat: async (
     message: string,
     context: AgentContext,

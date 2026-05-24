@@ -161,6 +161,14 @@ export const projectService = {
     return await invoke('remove_file_from_project', { projectPath, fileId, deletePhysicalFile });
   },
 
+  renameProjectFile: async (
+    projectPath: string,
+    fileId: string,
+    newBaseName: string
+  ): Promise<ProjectData> => {
+    return await invoke('rename_project_file', { projectPath, fileId, newBaseName });
+  },
+
   deleteProjectFileArtifact: async (
     projectPath: string,
     relativePath: string
@@ -246,6 +254,18 @@ export const projectService = {
     outputPath: string
   ): Promise<string> => {
     return await invoke('export_subtitles', { projectPath, fileId, format, outputPath });
+  },
+
+  getCachedWaveform: async (
+    mediaPath: string,
+    cacheJsonPath: string,
+    cachePngPath: string
+  ): Promise<{ peaks: number[]; sample_rate: number; duration: number } | null> => {
+    return await invoke('get_cached_waveform', {
+      mediaPath,
+      cacheJsonPath,
+      cachePngPath
+    });
   },
 
   generateWaveform: async (

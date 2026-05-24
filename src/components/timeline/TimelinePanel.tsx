@@ -67,12 +67,16 @@ export type TimelinePanelProps = {
 	minSegmentDuration: number;
 	onRangeSelectPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
 	onTimelineContextMenu: (e: React.MouseEvent<HTMLDivElement>) => void;
-	onSegmentClick: (e: React.MouseEvent<HTMLDivElement>, seg: SubtitleSegment, idx: number) => void;
+	onSegmentClick: (
+		e: React.MouseEvent<HTMLDivElement>,
+		seg: SubtitleSegment,
+		idx: number,
+		clickTime: number
+	) => void;
 	beginTimelineEdgeDrag: (edge: 'start' | 'end', idx: number, e: React.MouseEvent) => void;
 	beginTimelineSegmentMove: (idx: number, e: React.MouseEvent) => void;
 	segmentBodyDragMovedRef: MutableRefObject<boolean>;
 	clientXToTimelineTime: (clientX: number) => number;
-	seekVideo: (time: number) => void;
 	iconZoomIn: string;
 	iconZoomOut: string;
 	zoomOutTitle: string;
@@ -105,7 +109,6 @@ function TimelinePanelInner({
 	beginTimelineSegmentMove,
 	segmentBodyDragMovedRef,
 	clientXToTimelineTime,
-	seekVideo,
 	iconZoomIn,
 	iconZoomOut,
 	zoomOutTitle,
@@ -490,9 +493,7 @@ function TimelinePanelInner({
 											return;
 										}
 										e.stopPropagation();
-										const t = clientXToTimelineTime(e.clientX);
-										seekVideo(t);
-										onSegmentClick(e, seg, idx);
+										onSegmentClick(e, seg, idx, clientXToTimelineTime(e.clientX));
 									}}
 								>
 									<div

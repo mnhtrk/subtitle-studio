@@ -63,6 +63,7 @@ fn main() {
             commands::project::delete_subtitle_segment,
             commands::project::get_project_statistics,
             commands::project::find_and_replace_in_subtitles,
+            commands::audio::get_cached_waveform,
             commands::audio::generate_waveform,
             commands::audio::generate_waveform_png,
             commands::audio::probe_media_duration,
@@ -72,6 +73,7 @@ fn main() {
             commands::files::import_existing_subtitles,
             commands::files::parse_subtitle_file,
             commands::files::delete_episode_from_project,
+            commands::files::rename_project_file,
             commands::files::delete_project_file_artifact,
             commands::sync::sync_subtitles_with_video,
             commands::quality::check_translation_quality,
@@ -81,6 +83,7 @@ fn main() {
             commands::notifications::log_message,
             commands::ai::validate_api_key,
             commands::agent::chat_with_agent,
+            commands::agent::classify_agent_intent_command,
         ])
         
         .setup(|app| {

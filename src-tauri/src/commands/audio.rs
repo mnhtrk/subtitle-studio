@@ -12,6 +12,39 @@ pub struct WaveformData {
     pub duration: f64,
 }
 
+fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+#[tauri::command]
+pub async fn get_cached_waveform(
+    media_path: String,
+    cache_json_path: String,
+    cache_png_path: String,
+) -> Result<Option<WaveformData>, String> {
+    let media = Path::new(&media_path);
+    let json = Path::new(&cache_json_path);
+    let png = Path::new(&cache_png_path);
+    if !media.exists() || !json.exists() || !png.exists() {
+        return Ok(None);
+    }
+    let Some(media_m) = file_mtime(media) else {
+        return Ok(None);
+    };
+    if let Some(jm) = file_mtime(json) {
+        if media_m > jm {
+            return Ok(None);
+        }
+    }
+    if let Some(pm) = file_mtime(png) {
+        if media_m > pm {
+            return Ok(None);
+        }
+    }
+    let content = fs::read_to_string(json).map_err(|e| e.to_string())?;
+    serde_json::from_str(&content).map_err(|e| e.to_string()).map(Some)
+}
+
 #[tauri::command]
 pub async fn generate_waveform(
     audio_path: String,

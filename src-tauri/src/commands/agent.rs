@@ -1,14 +1,17 @@
 use serde::{Deserialize, Serialize};
 use crate::project::{SubtitleSegment, GlossaryEntry};
 use crate::speaker_gender_rules::{
-    dialogue_context_translation_rules, segment_speaker_gender_str,
+    dialogue_context_translation_rules, proper_name_declension_rules, segment_speaker_gender_str,
     speaker_gender_translation_rules,
 };
 use crate::agent::dialogue_history::{DialogueHistory, AgentMessage, ConversationTurn, DialogueContext};
+use crate::agent::task_mode::{
+    classify_agent_intent, filter_changed_segments, model_temperature, task_mode_prompt_block,
+    AgentIntent, AgentTaskMode,
+};
 use std::collections::HashSet;
 use std::sync::Mutex;
 use lazy_static::lazy_static;
-use regex::Regex;
 
 const AGENT_MODEL: &str = "gpt-5.4";
 const MAX_HISTORY_TURNS: usize = 30;
@@ -49,6 +52,14 @@ pub struct AgentContext {
     pub batch_index: Option<u32>,
     #[serde(default)]
     pub batch_total: Option<u32>,
+    #[serde(default)]
+    pub task_mode: Option<String>,
+    #[serde(default)]
+    pub replace_from: Option<String>,
+    #[serde(default)]
+    pub replace_to: Option<String>,
+    #[serde(default)]
+    pub translation_only: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -57,6 +68,20 @@ pub struct AgentResponse {
     #[serde(default)]
     pub actions: Vec<AgentAction>,
     pub suggestions: Option<Vec<String>>,
+    /// Режим задачи после классификации (для пакетных запросов с фронта)
+    #[serde(default)]
+    pub task_mode: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AgentIntentResponse {
+    pub task_mode: String,
+    #[serde(default)]
+    pub replace_from: Option<String>,
+    #[serde(default)]
+    pub replace_to: Option<String>,
+    #[serde(default)]
+    pub translation_only: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -65,6 +90,31 @@ pub enum AgentAction {
     UpdateGlossary { entries: Vec<GlossaryEntry> },
     GenerateText { text: String },
     ExplainIssue { issue: String, solution: String },
+}
+
+#[tauri::command]
+pub async fn classify_agent_intent_command(
+    message: String,
+    conversation_history: Option<Vec<ConversationTurn>>,
+) -> Result<AgentIntentResponse, String> {
+    let conversation_history = conversation_history.unwrap_or_default();
+    let api_key = get_api_key()?;
+    let tail: Vec<(String, String)> = conversation_history
+        .iter()
+        .rev()
+        .take(6)
+        .map(|t| (t.role.clone(), t.content.clone()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let intent = classify_agent_intent(&api_key, &message, &tail).await?;
+    Ok(AgentIntentResponse {
+        task_mode: intent.task_mode,
+        replace_from: intent.replace_from,
+        replace_to: intent.replace_to,
+        translation_only: intent.translation_only,
+    })
 }
 
 #[tauri::command]
@@ -103,6 +153,7 @@ pub async fn chat_with_agent(
             request.context.batch_segment_ids.clone(),
             request.context.batch_index,
             request.context.batch_total,
+            request.context.task_mode.clone(),
             &request.conversation_history,
         );
     }
@@ -124,6 +175,7 @@ pub async fn chat_with_agent(
             batch_segment_ids: None,
             batch_index: None,
             batch_total: None,
+            task_mode: None,
             conversation_history: Vec::new(),
         })
     };
@@ -144,33 +196,135 @@ pub async fn chat_with_agent(
         );
     }
 
-    let response = run_agent_turn(&request, &dialogue_context, &api_key).await;
+    let (task_mode, intent) = resolve_task_mode_and_intent(
+        &api_key,
+        &request.context,
+        &request.message,
+        &request.conversation_history,
+    )
+    .await?;
 
-    if let Ok(ref agent_response) = response {
-        let mut history_guard = DIALOGUE_HISTORY
-            .lock()
-            .map_err(|_| "Ошибка блокировки истории диалогов".to_string())?;
-        let history = history_guard.as_mut().unwrap();
-        history.add_message(
-            &session_id,
-            AgentMessage {
-                id: uuid::Uuid::new_v4().to_string(),
-                role: "assistant".to_string(),
-                content: agent_response.message.clone(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            },
-        );
+    if task_mode == AgentTaskMode::AnswerOnly {
+        let response = run_agent_turn(
+            &request,
+            &dialogue_context,
+            &api_key,
+            task_mode,
+            intent.as_ref(),
+        )
+        .await?;
+        if should_record_assistant_turn(&request.context) {
+            record_assistant_message(&session_id, &response.message)?;
+        }
+        return Ok(AgentResponse {
+            task_mode: Some(task_mode.as_str().to_string()),
+            ..response
+        });
     }
 
-    response
+    let response = run_agent_turn(
+        &request,
+        &dialogue_context,
+        &api_key,
+        task_mode,
+        intent.as_ref(),
+    )
+    .await?;
+
+    if should_record_assistant_turn(&request.context) {
+        record_assistant_message(&session_id, &response.message)?;
+    }
+
+    Ok(AgentResponse {
+        task_mode: Some(task_mode.as_str().to_string()),
+        ..response
+    })
+}
+
+async fn resolve_task_mode_and_intent(
+    api_key: &str,
+    context: &AgentContext,
+    message: &str,
+    conversation_history: &[ConversationTurn],
+) -> Result<(AgentTaskMode, Option<AgentIntent>), String> {
+    if let Some(mode_str) = context.task_mode.as_deref() {
+        if let Some(mode) = AgentTaskMode::parse(mode_str) {
+            if mode != AgentTaskMode::General {
+                if mode == AgentTaskMode::BulkReplace {
+                    if let Some(intent) = bulk_replace_intent_from_context(context) {
+                        return Ok((mode, Some(intent)));
+                    }
+                } else if mode == AgentTaskMode::GlossarySync {
+                    return Ok((mode, None));
+                } else {
+                    return Ok((mode, None));
+                }
+            }
+        }
+    }
+
+    let tail: Vec<(String, String)> = conversation_history
+        .iter()
+        .rev()
+        .take(6)
+        .map(|t| (t.role.clone(), t.content.clone()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    let intent = classify_agent_intent(api_key, message, &tail).await?;
+    let mode = intent.mode();
+    Ok((mode, Some(intent)))
+}
+
+fn bulk_replace_intent_from_context(context: &AgentContext) -> Option<AgentIntent> {
+    let from = context.replace_from.as_deref()?.trim();
+    let to = context.replace_to.as_deref()?.trim();
+    if from.is_empty() || to.is_empty() {
+        return None;
+    }
+    Some(AgentIntent {
+        task_mode: AgentTaskMode::BulkReplace.as_str().to_string(),
+        replace_from: Some(from.to_string()),
+        replace_to: Some(to.to_string()),
+        translation_only: context.translation_only.unwrap_or(false),
+    })
+}
+
+/// Промежуточные пакеты не пишем в историю — иначе чат забьётся «пакет N: не найдено».
+fn should_record_assistant_turn(context: &AgentContext) -> bool {
+    match (context.batch_total, context.batch_index) {
+        (Some(total), Some(idx)) if total > 1 => idx >= total,
+        _ => true,
+    }
+}
+
+fn record_assistant_message(session_id: &str, content: &str) -> Result<(), String> {
+    let mut history_guard = DIALOGUE_HISTORY
+        .lock()
+        .map_err(|_| "Ошибка блокировки истории диалогов".to_string())?;
+    let history = history_guard.as_mut().unwrap();
+    history.add_message(
+        session_id,
+        AgentMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        },
+    );
+    Ok(())
 }
 
 async fn run_agent_turn(
     request: &AgentRequest,
     context: &DialogueContext,
     api_key: &str,
+    task_mode: AgentTaskMode,
+    intent: Option<&AgentIntent>,
 ) -> Result<AgentResponse, String> {
-    let system_prompt = build_system_prompt(context);
+    let system_prompt = build_system_prompt(context, task_mode, intent);
     let mut messages = vec![serde_json::json!({
         "role": "system",
         "content": system_prompt
@@ -200,7 +354,7 @@ async fn run_agent_turn(
         "content": request.message
     }));
 
-    call_agent_model(messages, api_key, context, &request.message).await
+    call_agent_model(messages, api_key, context, task_mode, intent).await
 }
 
 fn push_turn(messages: &mut Vec<serde_json::Value>, turn: &ConversationTurn) {
@@ -223,7 +377,8 @@ async fn call_agent_model(
     messages: Vec<serde_json::Value>,
     api_key: &str,
     context: &DialogueContext,
-    user_message: &str,
+    task_mode: AgentTaskMode,
+    intent: Option<&AgentIntent>,
 ) -> Result<AgentResponse, String> {
     let client = reqwest::Client::new();
     let res = client
@@ -233,7 +388,7 @@ async fn call_agent_model(
             "model": AGENT_MODEL,
             "messages": messages,
             "response_format": { "type": "json_object" },
-            "temperature": 0.35,
+            "temperature": model_temperature(task_mode),
             "max_completion_tokens": 4096
         }))
         .send()
@@ -257,10 +412,14 @@ async fn call_agent_model(
     let parsed: AgentTurnJson = serde_json::from_str(content)
         .map_err(|e| format!("Агент вернул невалидный JSON ({}): {}", e, content))?;
 
-    map_turn_to_response(parsed, context, user_message)
+    map_turn_to_response(parsed, context, task_mode, intent)
 }
 
-fn build_system_prompt(context: &DialogueContext) -> String {
+fn build_system_prompt(
+    context: &DialogueContext,
+    task_mode: AgentTaskMode,
+    intent: Option<&AgentIntent>,
+) -> String {
     let target_lang = context
         .target_language
         .as_deref()
@@ -281,16 +440,44 @@ fn build_system_prompt(context: &DialogueContext) -> String {
     let glossary_block = format_glossary_for_prompt(context.current_glossary.as_deref());
     let gender_dialogue = dialogue_context_translation_rules(target_lang);
     let gender_rules = speaker_gender_translation_rules(target_lang);
+    let name_declension_rules = proper_name_declension_rules(target_lang);
     let gender_field_note = "\n\
          У каждой реплики в списке ниже указан speaker_gender (male/female/unknown) — пол говорящего в этой строке.\n";
 
     let batch_note = if context.batch_total.unwrap_or(0) > 1 {
         "\n\
-         РЕЖИМ ПАКЕТОВ: пользователь просит пройти по всему файлу. Обрабатывай ТОЛЬКО сегменты текущего пакета (полный текст ниже). \
-         В edit_segments возвращай только изменённые id из этого пакета. Остальные пакеты придут отдельными запросами.\n"
+         РЕЖИМ ПАКЕТОВ: задача разбита на части. Обрабатывай ТОЛЬКО сегменты текущего пакета (полный текст ниже).\n\
+         - Выполни ТОЛЬКО то, что пользователь попросил в сообщении (замена слова/термина, конкретная правка и т.д.).\n\
+         - НЕ проводи общую проверку качества и НЕ исправляй другие неточности, род, говорящего, стиль — даже если видишь ошибки.\n\
+         - Если в этом пакете нечего менять — actions: [].\n\
+         - Поле message оставь пустым (\"\"); не пиши «пакет N», «не найдено» и т.п. — итог соберёт интерфейс.\n\
+         - В edit_segments — только id из этого пакета, только строки, затронутые задачей пользователя.\n"
     } else {
         ""
     };
+    let mut task_block = task_mode_prompt_block(task_mode).to_string();
+    if task_mode == AgentTaskMode::BulkReplace {
+        if let Some(i) = intent {
+            if let (Some(from), Some(to)) = (&i.replace_from, &i.replace_to) {
+                let scope = if i.translation_only {
+                    "только в поле translation"
+                } else {
+                    "в text и/или translation"
+                };
+                let text_rule = if i.translation_only {
+                    "\nОБЯЗАТЕЛЬНО: в edit_segments только поле translation — поле text не включай.\n"
+                } else {
+                    ""
+                };
+                task_block.push_str(&format!(
+                    "\nЗамена по задаче: «{from}» → «{to}» ({scope}).\n\
+                     Термин в text — только ориентир для поиска реплик; не подставляй перевод в оригинал.\n\
+                     Для имён: все падежи и предлоги (не только именительный); особые формы (беглая гласная и т.п.).\n\
+                     {text_rule}"
+                ));
+            }
+        }
+    }
 
     format!(
         "Ты AI-ассистент приложения Subtitle Studio, помощник по субтитрам.\n\
@@ -300,9 +487,11 @@ fn build_system_prompt(context: &DialogueContext) -> String {
          - Целевой язык перевода: {target_lang}\n\
          - {glossary_block}\n\n\
          {batch_note}\
+         {task_block}\
          {gender_field_note}\
          {gender_dialogue}\
          {gender_rules}\
+         {name_declension_rules}\
          Субтитры (сначала краткая структура эпизода по сценам, затем реплики):\n\
          {segments_block}\n\n\
          Если в сообщении есть «Прикрепленная реплика» — она помечена <<< ПРИКРЕПЛЕНО; учитывай ±{radius} соседних строк в развёрнутом фрагменте (у них тоже есть speaker_gender).\n\n\
@@ -313,6 +502,11 @@ fn build_system_prompt(context: &DialogueContext) -> String {
          - Если просит улучшить перевод — edit_segments с полем translation.\n\
          - Если просит анализ качества без правок — explain_issue.\n\
          - Если про термины/глоссарий — update_glossary и при необходимости edit_segments.\n\n\
+         ОБЛАСТЬ ЗАДАЧИ (самое важное):\n\
+         - Меняй субтитры ТОЛЬКО в рамках того, что пользователь явно попросил в текущем сообщении и в согласованной истории диалога.\n\
+         - Не исправляй «заодно» другие ошибки, неточности перевода, род, говорящего, пунктуацию — даже если они очевидны.\n\
+         - Правила speaker_gender ниже — справочник для строк, которые ты УЖЕ меняешь по просьбе пользователя; не повод править остальные реплики.\n\
+         - Если пользователь просит заменить термин/фразу — меняй только это (и глоссарий, если просили); не переписывай соседний смысл.\n\n\
          КРИТИЧНО:\n\
          - Если в message обещаешь внести правки / заменить / обновить глоссарий — в actions ОБЯЗАТЕЛЬНО нужен соответствующий объект. Нельзя писать «заменю» и оставлять actions пустым.\n\
          - «Замени везде A на B», «лучше Geek вместо Nerd», «давай» после согласования — это команды на применение.\n\
@@ -321,7 +515,8 @@ fn build_system_prompt(context: &DialogueContext) -> String {
          - В edit_segments указывай ТОЛЬКО изменённые сегменты (id обязателен).\n\
          - Включай только поля, которые меняются: text и/или translation.\n\
          - Не выдумывай id. Не меняй таймкоды.\n\
-         - Не перефразируй весь файл без явной просьбы.\n\n\
+         - Не перефразируй весь файл без явной просьбы.\n\
+         - В message не хвали себя за посторонние правки; если в пакете нечего менять по задаче — так и напиши, actions: [].\n\n\
          Верни СТРОГО один JSON-объект (без markdown):\n\
          {{\n\
            \"message\": \"текст ответа пользователю\",\n\
@@ -337,9 +532,11 @@ fn build_system_prompt(context: &DialogueContext) -> String {
         target_lang = target_lang,
         glossary_block = glossary_block,
         batch_note = batch_note,
+        task_block = task_block,
         gender_field_note = gender_field_note,
         gender_dialogue = gender_dialogue,
         gender_rules = gender_rules,
+        name_declension_rules = name_declension_rules,
         segments_block = segments_block,
         radius = radius,
     )
@@ -532,9 +729,8 @@ fn format_segments_for_prompt(
 
     if total > MAX_COMPACT_LINES_IN_PROMPT {
         out.push_str(&format!(
-            "\nПострочный список всех {total} реплик опущен (слишком большой для одного запроса). \
-             Используй структуру сцен выше; для правок по всему файлу пользователь запускает пакетный режим. \
-             При правке указывай id из сообщения или прикреплённого фрагмента.\n"
+            "\nПострочный список всех {total} реплик опущен (слишком большой для одного запроса без пакетов). \
+             Если пришёл пакет с id — работай только с полным текстом пакета выше.\n"
         ));
     } else {
         out.push_str("Все реплики (компактно; развёрнутый фрагмент выше не дублируется):\n");
@@ -586,39 +782,104 @@ struct SegmentPatch {
 fn map_turn_to_response(
     parsed: AgentTurnJson,
     context: &DialogueContext,
-    user_message: &str,
+    task_mode: AgentTaskMode,
+    intent: Option<&AgentIntent>,
 ) -> Result<AgentResponse, String> {
     let message = parsed.message.trim().to_string();
     let mut actions: Vec<AgentAction> = Vec::new();
 
     for value in &parsed.actions {
-        if let Some(a) = parse_action(value, context) {
+        if let Some(a) = parse_action(value, context, task_mode, intent) {
             actions.push(a);
         }
     }
     if actions.is_empty() {
         if let Some(ref single) = parsed.action {
-            if let Some(a) = parse_action(single, context) {
+            if let Some(a) = parse_action(single, context, task_mode, intent) {
                 actions.push(a);
             }
         }
     }
-    if actions.is_empty() {
-        actions.extend(infer_actions_fallback(user_message, context));
-    }
+    actions = filter_actions_by_task(actions, context, task_mode, intent);
+
+    let in_batch = context.batch_total.unwrap_or(0) > 1;
+    let message = if in_batch {
+        String::new()
+    } else if message.is_empty() {
+        "Готово.".to_string()
+    } else {
+        message
+    };
 
     Ok(AgentResponse {
-        message: if message.is_empty() {
-            "Готово.".to_string()
-        } else {
-            message
-        },
+        message,
         actions,
         suggestions: parsed.suggestions,
+        task_mode: None,
     })
 }
 
-fn parse_action(value: &serde_json::Value, context: &DialogueContext) -> Option<AgentAction> {
+fn filter_actions_by_task(
+    actions: Vec<AgentAction>,
+    context: &DialogueContext,
+    task_mode: AgentTaskMode,
+    intent: Option<&AgentIntent>,
+) -> Vec<AgentAction> {
+    let in_batch = context.batch_total.unwrap_or(0) > 1;
+    let task_mode = if task_mode == AgentTaskMode::General && in_batch {
+        AgentTaskMode::StrictBatch
+    } else {
+        task_mode
+    };
+
+    if task_mode == AgentTaskMode::General {
+        return actions;
+    }
+
+    if task_mode == AgentTaskMode::AnswerOnly {
+        return actions
+            .into_iter()
+            .filter(|a| !matches!(a, AgentAction::EditSegments { .. }))
+            .collect();
+    }
+
+    let Some(base) = context.current_segments.as_deref() else {
+        return actions;
+    };
+
+    actions
+        .into_iter()
+        .filter_map(|action| match action {
+            AgentAction::EditSegments { segments } => {
+                let filtered = filter_changed_segments(task_mode, base, segments, intent);
+                if filtered.is_empty() {
+                    None
+                } else {
+                    Some(AgentAction::EditSegments { segments: filtered })
+                }
+            }
+            AgentAction::UpdateGlossary { .. }
+                if matches!(
+                    task_mode,
+                    AgentTaskMode::Proofread
+                        | AgentTaskMode::TranslationFix
+                        | AgentTaskMode::StrictBatch
+                        | AgentTaskMode::GlossarySync
+                ) =>
+            {
+                None
+            }
+            other => Some(other),
+        })
+        .collect()
+}
+
+fn parse_action(
+    value: &serde_json::Value,
+    context: &DialogueContext,
+    task_mode: AgentTaskMode,
+    intent: Option<&AgentIntent>,
+) -> Option<AgentAction> {
     let action_type = value.get("type").and_then(|v| v.as_str())?;
 
     match action_type {
@@ -627,9 +888,12 @@ fn parse_action(value: &serde_json::Value, context: &DialogueContext) -> Option<
                 serde_json::from_value(value.get("segments")?.clone()).ok()?;
             let base = context.current_segments.as_deref()?;
             let merged = apply_segment_patches(base, &patches);
-            Some(AgentAction::EditSegments {
-                segments: collect_changed_segments(base, &merged),
-            })
+            let changed = collect_changed_segments(base, &merged);
+            let filtered = filter_changed_segments(task_mode, base, changed, intent);
+            if filtered.is_empty() {
+                return None;
+            }
+            Some(AgentAction::EditSegments { segments: filtered })
         }
         "update_glossary" => {
             let entries: Vec<GlossaryEntry> =
@@ -689,178 +953,6 @@ fn collect_changed_segments(
         .collect()
 }
 
-fn infer_actions_fallback(user_message: &str, context: &DialogueContext) -> Vec<AgentAction> {
-    let mut actions = Vec::new();
-    let msg = user_message.trim();
-    if msg.is_empty() {
-        return actions;
-    }
-
-    if let Some((from, to)) = parse_bulk_replace_request(msg) {
-        if let Some(glossary) = context.current_glossary.as_deref() {
-            let updates = glossary_updates_for_replace(&from, &to, glossary);
-            if !updates.is_empty() {
-                actions.push(AgentAction::UpdateGlossary { entries: updates });
-            }
-        }
-        actions.extend(bulk_replace_actions(&from, &to, context, false));
-        return actions;
-    }
-
-    if let Some((entry, old_target)) = parse_glossary_translation_preference(msg, context) {
-        actions.push(AgentAction::UpdateGlossary {
-            entries: vec![entry.clone()],
-        });
-        if !old_target.is_empty() && !entry.target.is_empty() {
-            actions.extend(bulk_replace_actions(
-                &old_target,
-                &entry.target,
-                context,
-                true,
-            ));
-        }
-        return actions;
-    }
-
-    if is_short_confirmation(msg) {
-        if let Some((from, to)) = infer_replace_from_dialogue(context) {
-            actions.extend(bulk_replace_actions(&from, &to, context, false));
-        }
-    }
-
-    actions
-}
-
-fn bulk_replace_actions(
-    from: &str,
-    to: &str,
-    context: &DialogueContext,
-    translation_only: bool,
-) -> Vec<AgentAction> {
-    let Some(base) = context.current_segments.as_deref() else {
-        return Vec::new();
-    };
-    if from.trim().is_empty() || from.eq_ignore_ascii_case(to) {
-        return Vec::new();
-    }
-
-    let merged = bulk_replace_in_segments(base, from, to, translation_only);
-    let changed = collect_changed_segments(base, &merged);
-    if changed.is_empty() {
-        return Vec::new();
-    }
-    vec![AgentAction::EditSegments { segments: changed }]
-}
-
-fn bulk_replace_in_segments(
-    base: &[SubtitleSegment],
-    from: &str,
-    to: &str,
-    translation_only: bool,
-) -> Vec<SubtitleSegment> {
-    base.iter()
-        .map(|seg| {
-            let mut next = seg.clone();
-            if !translation_only {
-                next.text = replace_word_case_insensitive(&seg.text, from, to);
-            }
-            if let Some(tr) = &seg.translation {
-                let replaced = replace_word_case_insensitive(tr, from, to);
-                if replaced != *tr {
-                    next.translation = Some(replaced);
-                }
-            }
-            next
-        })
-        .collect()
-}
-
-fn replace_word_case_insensitive(haystack: &str, from: &str, to: &str) -> String {
-    if from.is_empty() {
-        return haystack.to_string();
-    }
-    let escaped = regex::escape(from);
-    let pattern = format!(r"(?iu)(?<![\p{{L}}\p{{N}}_]){}(?![\p{{L}}\p{{N}}_])", escaped);
-    let Ok(re) = Regex::new(&pattern) else {
-        return haystack.to_string();
-    };
-    re.replace_all(haystack, to).into_owned()
-}
-
-fn parse_bulk_replace_request(msg: &str) -> Option<(String, String)> {
-    let patterns = [
-        r"(?is)(?:замени(?:те)?|поменя(?:й|йте)|исправ(?:ь|ьте)|переименуй(?:те)?)\s+(?:везде|во\s+всех|everywhere)?\s*(?:«)?(.+?)(?:»)?\s+(?:на|в)\s*(?:«)?(.+?)(?:»)?\s*\.?$",
-        r"(?is)replace\s+(?:all\s+)?(?:«)?(.+?)(?:»)?\s+with\s+(?:«)?(.+?)(?:»)?\s*\.?$",
-    ];
-    for pat in patterns {
-        let Ok(re) = Regex::new(pat) else {
-            continue;
-        };
-        if let Some(caps) = re.captures(msg) {
-            let from = caps.get(1)?.as_str().trim().to_string();
-            let to = caps.get(2)?.as_str().trim().to_string();
-            if !from.is_empty() && !to.is_empty() {
-                return Some((from, to));
-            }
-        }
-    }
-    None
-}
-
-fn parse_glossary_translation_preference(
-    msg: &str,
-    context: &DialogueContext,
-) -> Option<(GlossaryEntry, String)> {
-    let glossary = context.current_glossary.as_deref()?;
-    let new_target_re =
-        Regex::new(r"(?i)(?:лучше|better|предпочитаю|prefer)\s+(?:«)?([^«\n,.!?]+)").ok()?;
-    let new_target = new_target_re
-        .captures(msg)?
-        .get(1)?
-        .as_str()
-        .trim()
-        .trim_matches(|c| c == '«' || c == '»' || c == '"' || c == '\'');
-    if new_target.is_empty() {
-        return None;
-    }
-
-    let msg_lower = msg.to_lowercase();
-    for entry in glossary {
-        let source = entry.source.trim();
-        if source.is_empty() {
-            continue;
-        }
-        if !msg_lower.contains(&source.to_lowercase()) {
-            continue;
-        }
-        let old_target = entry.target.trim().to_string();
-        if old_target.is_empty() || old_target.eq_ignore_ascii_case(new_target) {
-            continue;
-        }
-        let mut updated = entry.clone();
-        updated.target = new_target.to_string();
-        return Some((updated, old_target));
-    }
-    None
-}
-
-fn is_short_confirmation(msg: &str) -> bool {
-    let m = msg.trim().to_lowercase();
-    matches!(
-        m.as_str(),
-        "давай"
-            | "да"
-            | "ок"
-            | "ok"
-            | "yes"
-            | "делай"
-            | "сделай"
-            | "пожалуйста"
-            | "go ahead"
-            | "do it"
-    )
-}
-
 fn glossary_updates_for_replace(
     from: &str,
     to: &str,
@@ -881,39 +973,6 @@ fn glossary_updates_for_replace(
         }
     }
     updates
-}
-
-fn infer_replace_from_dialogue(context: &DialogueContext) -> Option<(String, String)> {
-    let last_assistant = context
-        .conversation_history
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant")?;
-    let content = last_assistant.content.as_str();
-
-    if let Some((from, to)) = parse_bulk_replace_request(content) {
-        return Some((from, to));
-    }
-
-    let arrow_re = Regex::new(
-        r"(?i)(?:«)?([^«\n]+?)(?:»)?\s*(?:→|->|—>)\s*(?:«)?([^«\n]+?)(?:»)?",
-    )
-    .ok()?;
-    if let Some(caps) = arrow_re.captures(content) {
-        let from = caps.get(1)?.as_str().trim().to_string();
-        let to = caps.get(2)?.as_str().trim().to_string();
-        if !from.is_empty() && !to.is_empty() {
-            return Some((from, to));
-        }
-    }
-
-    if let Some((entry, old_target)) = parse_glossary_translation_preference(content, context) {
-        if !old_target.is_empty() && !entry.target.is_empty() {
-            return Some((old_target, entry.target));
-        }
-    }
-
-    None
 }
 
 fn get_api_key() -> Result<String, String> {

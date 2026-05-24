@@ -34,6 +34,8 @@ pub struct DialogueContext {
     pub batch_index: Option<u32>,
     #[serde(default)]
     pub batch_total: Option<u32>,
+    #[serde(default)]
+    pub task_mode: Option<String>,
     pub conversation_history: Vec<AgentMessage>,
 }
 
@@ -60,6 +62,7 @@ impl DialogueHistory {
                 batch_segment_ids: None,
                 batch_index: None,
                 batch_total: None,
+                task_mode: None,
                 conversation_history: Vec::new(),
             }
         })
@@ -81,6 +84,7 @@ impl DialogueHistory {
         batch_segment_ids: Option<Vec<u32>>,
         batch_index: Option<u32>,
         batch_total: Option<u32>,
+        task_mode: Option<String>,
         client_history: &[ConversationTurn],
     ) {
         let session = self.get_or_create_session(session_id);
@@ -93,6 +97,7 @@ impl DialogueHistory {
         session.batch_segment_ids = batch_segment_ids;
         session.batch_index = batch_index;
         session.batch_total = batch_total;
+        session.task_mode = task_mode;
 
         if client_history.is_empty() {
             return;

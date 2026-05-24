@@ -84,7 +84,8 @@ const enMessages = {
 	},
 	projectTree: {
 		newFile: 'New file',
-		newFolder: 'New folder'
+		newFolder: 'New folder',
+		rename: 'Rename'
 	},
 	aiAgent: {
 		title: 'AI-agent',
@@ -197,6 +198,9 @@ const enMessages = {
 		deleteFolderTitle: 'Delete folder',
 		deleteFolderConfirm: 'Delete all files from folder «{folder}» ({count})?',
 		deleteFolderFailed: 'Could not delete folder: {detail}',
+		renameFileTitle: 'Rename file',
+		renameFileSave: 'Rename',
+		renameFileFailed: 'Could not rename file: {detail}',
 		openProjectFailed:
 			'Choose a Subtitle Studio project folder – it must contain project.json in the root. A regular folder without it will not work.\n\n{detail}',
 		openProjectFailedTitle: 'Could not open project',
@@ -410,7 +414,8 @@ const ruMessages: Messages = {
 	},
 	projectTree: {
 		newFile: 'Новый файл',
-		newFolder: 'Новая папка'
+		newFolder: 'Новая папка',
+		rename: 'Переименовать'
 	},
 	aiAgent: {
 		title: 'ИИ-агент',
@@ -524,6 +529,9 @@ const ruMessages: Messages = {
 		deleteFolderTitle: 'Удаление папки',
 		deleteFolderConfirm: 'Удалить все файлы из папки «{folder}» ({count})?',
 		deleteFolderFailed: 'Не удалось удалить папку: {detail}',
+		renameFileTitle: 'Переименовать файл',
+		renameFileSave: 'Переименовать',
+		renameFileFailed: 'Не удалось переименовать файл: {detail}',
 		openProjectFailed:
 			'Укажите папку проекта Subtitle Studio – в корне должен быть файл project.json. Обычная папка без него не подойдёт.\n\n{detail}',
 		openProjectFailedTitle: 'Не удалось открыть проект',

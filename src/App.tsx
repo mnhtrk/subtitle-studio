@@ -20,6 +20,12 @@ import { GlossaryModal, type GlossaryReplacementChange } from './components/moda
 import { ActivationModal } from './components/modals/ActivationModal';
 import { SettingsModal } from './components/modals/SettingsModal';
 import { AboutModal } from './components/modals/AboutModal';
+import { ProjectTreeFileRow } from './components/project/ProjectTreeFileRow';
+import {
+	patchDiskFilesAfterRename,
+	renamedFileMeta,
+	splitFileNameAndExtension
+} from './utils/fileName';
 import { useI18n } from './i18n';
 import { TimelinePanel } from './components/timeline/TimelinePanel';
 import { SubtitleTable } from './components/subtitles/SubtitleTable';
@@ -56,6 +62,8 @@ import {
 	chunkSubtitleSegments,
 	isWholeFileAgentRequest
 } from './utils/agentChat';
+import { agentContextFromIntent, glossaryUpdatesForBulkReplace } from './utils/agentTask';
+import type { AgentIntent } from './services/agentService';
 import {
 	applyAutoGlossaryToProject,
 	mergePromptHintsIntoGlossary,
@@ -292,6 +300,8 @@ const PLAYBACK_UI_STATE_COMMIT_MS = 400;
 const PLAYBACK_TIMELINE_FOLLOW_MS = 200;
 /** Порог (с), ниже которого повторный seek к видео не делаем. */
 const SEEK_TIME_EPSILON = 0.02;
+/** Допуск на границе реплики (мс): fastSeek/округление пикселей таймлайна. */
+const SEGMENT_TIME_EPSILON = 0.001;
 const TIMELINE_CLICK_MOVE_PX = 5;
 function setVideoCurrentTime(v: HTMLVideoElement, time: number, fast = true) {
 	const t = Math.max(0, time);
@@ -325,13 +335,23 @@ function readShowOriginalVideoSubtitles(): boolean {
 	return true;
 }
 
+function clampTimeIntoSegment(t: number, seg: SubtitleSegment): number {
+	const innerEnd = Math.max(seg.start, seg.end - SEGMENT_TIME_EPSILON);
+	return Math.min(innerEnd, Math.max(seg.start, t));
+}
+
 function findActiveSegmentAtTime(
 	segments: SubtitleSegment[],
 	currentTime: number
 ): SubtitleSegment | undefined {
 	let active: SubtitleSegment | undefined;
 	for (const s of segments) {
-		if (currentTime >= s.start && currentTime < s.end) active = s;
+		if (
+			currentTime + SEGMENT_TIME_EPSILON >= s.start &&
+			currentTime < s.end
+		) {
+			active = s;
+		}
 	}
 	return active;
 }
@@ -588,6 +608,7 @@ export default function App() {
 	const [waveformPeaks, setWaveformPeaks] = useState<number[] | null>(null);
 	const [waveformImageSrc, setWaveformImageSrc] = useState<string | null>(null);
 	const [projectDiskFiles, setProjectDiskFiles] = useState<{ relative_path: string; name: string }[]>([]);
+	const projectDiskFilesRef = useRef<{ relative_path: string; name: string }[]>([]);
 	const [probedMediaDuration, setProbedMediaDuration] = useState<number | null>(null);
 	// controlled - иначе delete + blur пишет мусор
 	const [segEditorTranslation, setSegEditorTranslation] = useState('');
@@ -622,6 +643,8 @@ export default function App() {
 	const [aiBusy, setAiBusy] = useState<{ operation: 'transcribe' | 'translate'; stage: 'audio' | 'transcribe' | 'translate' | 'apply' } | null>(null);
 	const [aiMenuError, setAiMenuError] = useState<string | null>(null);
 	const [projectFileMenu, setProjectFileMenu] = useState<{ x: number; y: number; file: ProjectFile } | null>(null);
+	const [inlineRenameFileId, setInlineRenameFileId] = useState<string | null>(null);
+	const [inlineRenameDraft, setInlineRenameDraft] = useState('');
 	const [selectedTreeItem, setSelectedTreeItem] = useState<
 		| { kind: 'file'; id: string }
 		| { kind: 'folder'; name: 'config' | 'video' | 'subtitles' }
@@ -910,19 +933,72 @@ export default function App() {
 		else v.pause();
 	}, []);
 
-	const selectSegmentAndSeek = useCallback((idxOrUpdater: number | ((prev: number) => number)) => {
-		setSelectedSegmentIndex((prev) => {
-			const next = typeof idxOrUpdater === 'function' ? idxOrUpdater(prev) : idxOrUpdater;
-			if (next < 0) return next;
-			const seg = segmentsRef.current[next];
-			if (seg) {
-				const t = Math.max(0, seg.start);
-				seekVideo(t);
-				ensureTimelineCenteredAtTime(t);
+	const pushSubtitleOverlayText = useCallback(
+		(translation: string, original: string, sig: string, force = false) => {
+			if (!force && sig === lastPlaybackOverlaySigRef.current) return;
+			lastPlaybackOverlaySigRef.current = sig;
+		const trEl = videoTranslationOverlayRef.current;
+		if (trEl) trEl.textContent = translation.trim() || '\u00A0';
+		if (showOriginalVideoSubtitlesRef.current) {
+			const origEl = videoOriginalOverlayRef.current;
+			if (origEl) origEl.textContent = original.trim() || '\u00A0';
+		}
+		},
+		[]
+	);
+
+	const applySegmentEditorAndOverlay = useCallback(
+		(seg: SubtitleSegment | null, overlayTime?: number) => {
+			if (!seg) {
+				segEditorTranslationRef.current = '';
+				segEditorOriginalRef.current = '';
+				setSegEditorTranslation('');
+				setSegEditorOriginal('');
+				setSegEditorStart('');
+				setSegEditorDuration('');
+			} else {
+				const tr = seg.translation ?? '';
+				const orig = seg.text ?? '';
+				segEditorTranslationRef.current = tr;
+				segEditorOriginalRef.current = orig;
+				setSegEditorTranslation(tr);
+				setSegEditorOriginal(orig);
+				setSegEditorStart(formatSrtTime(seg.start));
+				setSegEditorDuration(seg.duration.toFixed(3));
 			}
-			return next;
-		});
-	}, [ensureTimelineCenteredAtTime, seekVideo]);
+			const t =
+				overlayTime ??
+				currentPlaybackTimeRef.current;
+			syncSubtitleOverlayRef.current(t, true);
+		},
+		[]
+	);
+
+	const selectSegmentAndSeek = useCallback(
+		(idxOrUpdater: number | ((prev: number) => number), seekTime?: number) => {
+			const prev = selectedSegmentIndexRef.current;
+			const next = typeof idxOrUpdater === 'function' ? idxOrUpdater(prev) : idxOrUpdater;
+			selectedSegmentIndexRef.current = next;
+			setSelectedSegmentIndex(next);
+
+			if (next < 0) {
+				applySegmentEditorAndOverlay(null);
+				return;
+			}
+			const seg = segmentsRef.current[next];
+			if (!seg) return;
+
+			const t =
+				seekTime !== undefined
+					? clampTimeIntoSegment(seekTime, seg)
+					: Math.max(0, seg.start);
+			applySegmentEditorAndOverlay(seg, t);
+			seekVideo(t, { force: true, updateState: true, followTimeline: true });
+			ensureTimelineCenteredAtTime(t);
+		},
+		[applySegmentEditorAndOverlay, ensureTimelineCenteredAtTime, seekVideo]
+	);
+	projectDiskFilesRef.current = projectDiskFiles;
 	timelineTotalDurationRef.current = timelineTotalDuration;
 	selectedSegmentIndexRef.current = selectedSegmentIndex;
 	showOriginalVideoSubtitlesRef.current = showOriginalVideoSubtitles;
@@ -963,12 +1039,12 @@ export default function App() {
 	}, [timelineSegmentsSorted]);
 
 	const handleTimelineSegmentClick = useCallback(
-		(_e: React.MouseEvent, _seg: SubtitleSegment, idx: number) => {
-			setSelectedSegmentIndex(idx);
+		(_e: React.MouseEvent, _seg: SubtitleSegment, idx: number, clickTime: number) => {
 			setSelectedSegmentIds(new Set());
 			setTimelineRubberRange(null);
+			selectSegmentAndSeek(idx, clickTime);
 		},
-		[]
+		[selectSegmentAndSeek]
 	);
 
 	const treeFiles = useMemo(() => {
@@ -1000,23 +1076,14 @@ export default function App() {
 		return `${s.id}|${s.start}|${s.end}|${s.translation ?? ''}|${s.text}`;
 	}, [selectedSegmentIndex, generatedSegments]);
 
-	useEffect(() => {
+	useLayoutEffect(() => {
+		selectedSegmentIndexRef.current = selectedSegmentIndex;
 		const seg =
 			selectedSegmentIndex >= 0 && selectedSegmentIndex < generatedSegments.length
 				? generatedSegments[selectedSegmentIndex]
 				: null;
-		if (!seg) {
-			setSegEditorTranslation('');
-			setSegEditorOriginal('');
-			setSegEditorStart('');
-			setSegEditorDuration('');
-			return;
-		}
-		setSegEditorTranslation(seg.translation ?? '');
-		setSegEditorOriginal(seg.text ?? '');
-		setSegEditorStart(formatSrtTime(seg.start));
-		setSegEditorDuration(seg.duration.toFixed(3));
-	}, [editorSegmentSig, selectedSegmentIndex]);
+		applySegmentEditorAndOverlay(seg);
+	}, [selectedSegmentIndex, editorSegmentSig, generatedSegments, applySegmentEditorAndOverlay]);
 
 	// перед save - сбросить редактор в проект
 	const flushSubtitleEditorToProject = useCallback(() => {
@@ -1841,6 +1908,91 @@ export default function App() {
 		}
 	}, [activeSubtitleFileId, pushProjectHistorySnapshot, t]);
 
+	const startInlineRename = useCallback((file: ProjectFile) => {
+		const { base } = splitFileNameAndExtension(file.name);
+		setInlineRenameFileId(file.id);
+		setInlineRenameDraft(base);
+	}, []);
+
+	const cancelInlineRename = useCallback(() => {
+		setInlineRenameFileId(null);
+		setInlineRenameDraft('');
+	}, []);
+
+	const commitInlineRename = useCallback(async () => {
+		const fileId = inlineRenameFileId;
+		if (!fileId) return;
+		const cp = currentProjectRef.current;
+		if (!cp) {
+			cancelInlineRename();
+			return;
+		}
+		const file = cp.files.find((f) => f.id === fileId);
+		if (!file) {
+			cancelInlineRename();
+			return;
+		}
+		const trimmed = inlineRenameDraft.trim();
+		const { base: originalBase } = splitFileNameAndExtension(file.name);
+		cancelInlineRename();
+		if (!trimmed || trimmed === originalBase) return;
+
+		const now = new Date().toISOString();
+		const renameTargets = new Map<string, { name: string; path: string }>();
+		renameTargets.set(file.id, renamedFileMeta(file.name, file.path, trimmed));
+		if (file.linked_file_id) {
+			const partner = cp.files.find((f) => f.id === file.linked_file_id);
+			if (partner) {
+				renameTargets.set(
+					partner.id,
+					renamedFileMeta(partner.name, partner.path, trimmed)
+				);
+			}
+		}
+		const optimistic: ProjectData = {
+			...cp,
+			updated_at: now,
+			files: cp.files.map((f) => {
+				const meta = renameTargets.get(f.id);
+				return meta ? { ...f, name: meta.name, path: meta.path, updated_at: now } : f;
+			})
+		};
+		const projectBefore = cp;
+		const diskBefore = [...projectDiskFilesRef.current];
+
+		currentProjectRef.current = optimistic;
+		setCurrentProject(optimistic);
+		setProjectDiskFiles((prev) => patchDiskFilesAfterRename(prev, cp.files, fileId, trimmed));
+
+		try {
+			pushProjectHistorySnapshot();
+			const opened = await projectService.renameProjectFile(cp.path, fileId, trimmed);
+			currentProjectRef.current = opened;
+			setCurrentProject(opened);
+			const list = await projectService.listProjectDirectoryFiles(cp.path);
+			setProjectDiskFiles(list);
+		} catch (e) {
+			currentProjectRef.current = projectBefore;
+			setCurrentProject(projectBefore);
+			setProjectDiskFiles(diskBefore);
+			const msg = e instanceof Error ? e.message : String(e);
+			await message(t('dialog.renameFileFailed', { detail: msg }), {
+				kind: 'error',
+				title: t('dialog.renameFileTitle')
+			});
+		}
+	}, [inlineRenameFileId, inlineRenameDraft, cancelInlineRename, pushProjectHistorySnapshot, t]);
+
+	const openProjectFileContextMenu = useCallback(
+		(e: React.MouseEvent, file: ProjectFile) => {
+			e.preventDefault();
+			e.stopPropagation();
+			setSelectedTreeItem({ kind: 'file', id: file.id });
+			setProjectFileMenu({ x: e.clientX, y: e.clientY, file });
+		},
+		[]
+	);
+
 	const handleDeleteSelectedTreeItem = useCallback(async () => {
 		const cp = currentProjectRef.current;
 		if (!cp) return;
@@ -2371,52 +2523,104 @@ export default function App() {
 				.filter((line) => line.length > 0)
 				.join('\n');
 
-			const hiddenPrompt = `Исправь реплики согласно изменениям глоссария.
+			const hiddenPrompt = `Примени изменения глоссария ко всем подходящим репликам.
 
 Изменения глоссария:
 ${changesText}
 
 Правила:
-- Прочитай ВСЕ переданные сегменты от первого до последнего, не пропуская ни одного.
-- Учитывай поле Context каждого термина: оно описывает, что это за слово (имя, локация, бренд), род, склоняется ли. Используй это, чтобы корректно подобрать форму при замене и не путать с похожими словами.
-- Заменяй только реальные вхождения целых слов (или их падежных форм). НЕ заменяй подстроки, попавшие случайно внутрь другого слова: например, имя "Айся" не должно заменяться внутри слова "возвращайся".
-- Если термин помечен как несклоняемый — оставляй замену в исходной форме. Если склоняется — подбирай корректное окончание под падеж в реплике.
-- Найди в original text и translation все вхождения, включая склонения, формы с окончаниями, падежи, единственное и множественное число, разные регистры.
-- Например, если термин был "Фонтеросса", учитывай формы "Фонтероссы", "Фонтероссу", "Фонтероссе", "Фонтероссой".
-- Если меняется вариант original text — обнови поле text. Если меняется вариант перевода — обнови поле translation.
-- Не показывай рассуждения. Верни только изменённые сегменты с полным новым текстом.`;
+- Учитывай Context термина (имя, род, склонение).
+- Заменяй все словоформы термина (падежи, множественное число, приставки вроде ex-/бывшей).
+- Если в изменении указан только Translation — меняй только поле translation, text не трогай.
+- Если только Original text — только text. Если оба — оба поля.
+- Для имён в переводе: правильное склонение по фразе (падеж, с/со), особые формы (напр. Лев → со Львом, «Что со Львом?»), не механическая подстановка.
+- Не заменяй случайные подстроки внутри других слов.
+- Верни только изменённые сегменты (id + изменённые поля).`;
+
+			const agentContext = {
+				project_id: project?.id ?? null,
+				current_glossary: project?.glossary ?? null,
+				target_language: project?.target_language ?? null,
+				task_mode: 'glossary_sync' as const
+			};
 
 			setIsAgentBusy(true);
+			setAgentBatchProgress(null);
 			try {
-				// сначала локальная замена
 				const localPatches = buildGlossaryReplacementEdits(changes, baseline);
 				let combinedList = mergeUpdates(baseline, localPatches);
 
-				// потом агент по склонениям
-				const response = await agentService.chat(
-					hiddenPrompt,
-					{
-						project_id: project?.id ?? null,
-						current_segments: combinedList,
-						current_glossary: project?.glossary ?? null,
-						target_language: project?.target_language ?? null
-					},
-					{
-						sessionId: agentSessionIdRef.current,
-						conversationHistory: buildAgentConversationHistory(chatMessages)
+				const runAgentPass = async (segments: SubtitleSegment[]) => {
+					if (segments.length > AGENT_BATCH_SIZE) {
+						const batches = chunkSubtitleSegments(segments, AGENT_BATCH_SIZE);
+						let working = segments;
+						for (let i = 0; i < batches.length; i++) {
+							const batch = batches[i];
+							const ids = batch.map((s) => s.id);
+							setAgentBatchProgress({ current: i + 1, total: batches.length });
+							const batchPrompt = `${hiddenPrompt}
+
+ПАКЕТНАЯ ОБРАБОТКА: часть ${i + 1} из ${batches.length}.
+Обработай только сегменты (id: ${ids.join(', ')}).`;
+							const response = await agentService.chat(
+								batchPrompt,
+								{
+									...agentContext,
+									current_segments: working,
+									batch_segment_ids: ids,
+									batch_index: i + 1,
+									batch_total: batches.length
+								},
+								{
+									sessionId: agentSessionIdRef.current,
+									conversationHistory: []
+								}
+							);
+							for (const action of response.actions ?? []) {
+								if ('EditSegments' in action) {
+									working = mergeUpdates(working, action.EditSegments.segments);
+								}
+							}
+						}
+						setAgentBatchProgress(null);
+						return working;
 					}
-				);
-				const actions = response.actions ?? [];
-				for (const action of actions) {
-					if ('EditSegments' in action) {
-						combinedList = mergeUpdates(combinedList, action.EditSegments.segments);
+
+					const response = await agentService.chat(
+						hiddenPrompt,
+						{
+							...agentContext,
+							current_segments: segments
+						},
+						{
+							sessionId: agentSessionIdRef.current,
+							conversationHistory: []
+						}
+					);
+					let working = segments;
+					for (const action of response.actions ?? []) {
+						if ('EditSegments' in action) {
+							working = mergeUpdates(working, action.EditSegments.segments);
+						}
 					}
-				}
+					return working;
+				};
+
+				combinedList = await runAgentPass(combinedList);
+
+				const editCount = combinedList.filter((next) => {
+					const prev = baseline.find((s) => s.id === next.id);
+					if (!prev) return false;
+					return (
+						prev.text !== next.text ||
+						(prev.translation ?? '') !== (next.translation ?? '')
+					);
+				}).length;
 
 				const message =
-					(response.message && response.message.trim().length > 0
-						? response.message.trim()
-						: `Обновил реплики по изменениям в глоссарии: ${changes.length}.`);
+					editCount > 0
+						? `Готово: обновлено ${editCount} реплик согласно глоссарию.`
+						: 'Глоссарий сохранён. В субтитрах подходящих вхождений не найдено.';
 
 				if (!applyAndShow(combinedList, message)) {
 					addNoMatchesMessage();
@@ -2439,9 +2643,10 @@ ${changesText}
 				]);
 			} finally {
 				setIsAgentBusy(false);
+				setAgentBatchProgress(null);
 			}
 		},
-		[applySegmentEdits, buildChatEditDiffs, buildGlossaryReplacementEdits, buildAgentConversationHistory, chatMessages]
+		[applySegmentEdits, buildChatEditDiffs, buildGlossaryReplacementEdits]
 	);
 
 	const handleKeepEdits = useCallback((messageId: string) => {
@@ -2641,34 +2846,49 @@ ${changesText}
 				? `${text}\n\nПрикрепленная реплика:\n#${attached.id} [${formatChatTimecode(attached.start)}] speaker_gender=${formatSpeakerGenderForAgent(attached.speaker_gender)}\nOriginal: ${attached.text}\nTranslation: ${attached.translation ?? ''}`
 				: text;
 
+			const history = buildAgentConversationHistory(chatMessages);
+			const intent: AgentIntent = await agentService.classifyIntent(text, {
+				sessionId: agentSessionIdRef.current,
+				conversationHistory: history
+			});
+			const intentCtx = agentContextFromIntent(intent);
 			const agentContextBase = {
 				project_id: project?.id ?? null,
 				current_segments: baseline,
 				current_glossary: project?.glossary ?? null,
 				target_language: project?.target_language ?? null,
 				focus_segment_id: attached?.id ?? null,
-				neighbor_radius: attached ? AGENT_NEIGHBOR_RADIUS : 0
+				neighbor_radius: attached ? AGENT_NEIGHBOR_RADIUS : 0,
+				...intentCtx
 			};
 
-			const history = buildAgentConversationHistory(chatMessages);
 			const useBatch =
-				!attached && baseline.length > AGENT_BATCH_SIZE && isWholeFileAgentRequest(text);
+				!attached &&
+				baseline.length > AGENT_BATCH_SIZE &&
+				intent.task_mode !== 'answer_only' &&
+				(isWholeFileAgentRequest(text) || intent.task_mode === 'bulk_replace');
 
 			if (useBatch) {
 				const batches = chunkSubtitleSegments(baseline, AGENT_BATCH_SIZE);
 				let working = baseline;
-				const batchNotes: string[] = [];
 
 				for (let i = 0; i < batches.length; i++) {
 					const batch = batches[i];
 					const ids = batch.map((s) => s.id);
 					setAgentBatchProgress({ current: i + 1, total: batches.length });
 
-					const batchPrompt = `${messageForAgent}
+					const replaceHint =
+						intent.task_mode === 'bulk_replace' &&
+						intent.replace_from &&
+						intent.replace_to
+							? `\nЗамена: «${intent.replace_from}» → «${intent.replace_to}». Все словоформы и падежи; для имён — грамматически верные формы (особые склонения, предлоги с/со), не подстановка «lemma + окончание».`
+							: '';
+
+					const batchPrompt = `${messageForAgent}${replaceHint}
 
 ПАКЕТНАЯ ОБРАБОТКА: часть ${i + 1} из ${batches.length}.
-Проверь и при необходимости исправь ТОЛЬКО сегменты этого пакета (id: ${ids.join(', ')}).
-В edit_segments верни только изменённые строки из этого пакета.`;
+Обработай только сегменты этого пакета (id: ${ids.join(', ')}).
+Если в пакете нечего менять — actions: [].`;
 
 					const response = await agentService.chat(batchPrompt, {
 						...agentContextBase,
@@ -2682,9 +2902,6 @@ ${changesText}
 					});
 
 					working = await mergeAgentActionsInMemory(response.actions ?? [], working);
-					if (response.message?.trim()) {
-						batchNotes.push(`Пакет ${i + 1}/${batches.length}: ${response.message.trim()}`);
-					}
 				}
 
 				setAgentBatchProgress(null);
@@ -2696,7 +2913,7 @@ ${changesText}
 						(prev.translation ?? '') !== (next.translation ?? '')
 					);
 				});
-				const applied =
+				let applied =
 					updated.length > 0
 						? await applyAgentResponseActions(
 								[{ EditSegments: { segments: updated } }],
@@ -2704,10 +2921,36 @@ ${changesText}
 							)
 						: null;
 
+				if (
+					intent.task_mode === 'bulk_replace' &&
+					intent.replace_from &&
+					intent.replace_to
+				) {
+					const glossaryUpdates = glossaryUpdatesForBulkReplace(
+						intent.replace_from,
+						intent.replace_to,
+						project?.glossary ?? []
+					);
+					if (glossaryUpdates.length > 0) {
+						const glossaryApplied = await applyAgentResponseActions(
+							[{ UpdateGlossary: { entries: glossaryUpdates } }],
+							baseline
+						);
+						if (glossaryApplied && !applied) {
+							applied = glossaryApplied;
+						}
+					}
+				}
+
+				const editCount = updated.length;
 				const summary =
-					batchNotes.length > 0
-						? batchNotes.join('\n\n')
-						: `Обработано ${batches.length} пакетов по ${AGENT_BATCH_SIZE} реплик.`;
+					editCount > 0
+						? intent.task_mode === 'bulk_replace' &&
+							intent.replace_from &&
+							intent.replace_to
+							? `Готово: обновлено ${editCount} реплик (замена «${intent.replace_from}» → «${intent.replace_to}»).`
+							: `Готово: исправлено ${editCount} реплик.`
+						: 'Готово. В субтитрах изменений не потребовалось.';
 
 				const aiMsg: ChatMessage = {
 					id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -2730,7 +2973,28 @@ ${changesText}
 				}
 			);
 
-			const applied = await applyAgentResponseActions(response.actions ?? [], baseline);
+			let applied = await applyAgentResponseActions(response.actions ?? [], baseline);
+
+			if (
+				intent.task_mode === 'bulk_replace' &&
+				intent.replace_from &&
+				intent.replace_to
+			) {
+				const glossaryUpdates = glossaryUpdatesForBulkReplace(
+					intent.replace_from,
+					intent.replace_to,
+					project?.glossary ?? []
+				);
+				if (glossaryUpdates.length > 0) {
+					const glossaryApplied = await applyAgentResponseActions(
+						[{ UpdateGlossary: { entries: glossaryUpdates } }],
+						baseline
+					);
+					if (glossaryApplied && !applied) {
+						applied = glossaryApplied;
+					}
+				}
+			}
 
 			const aiMsg: ChatMessage = {
 				id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -3895,7 +4159,7 @@ ${changesText}
 		previewFrameLastTimeRef.current = -1;
 		clearPreviewFrame();
 		requestAnimationFrame(() => applyPlaybackUiRef.current(0, { commitState: true }));
-	}, [activeVideoAbsolutePath, clearPreviewFrame]);
+	}, [activeVideoFile?.id, clearPreviewFrame]);
 
 	useLayoutEffect(() => {
 		const v = videoRef.current;
@@ -3954,42 +4218,57 @@ ${changesText}
 	}, [activeVideoAbsolutePath]);
 
 	useEffect(() => {
-		if (!activeVideoAbsolutePath || !currentProject) return;
+		const videoId = activeVideoFile?.id;
+		const cp = currentProjectRef.current ?? currentProject;
+		if (!videoId || !cp) return;
+		const video =
+			cp.files.find((f) => f.id === videoId && f.file_type === 'Video') ?? activeVideoFile;
+		if (!video || video.file_type !== 'Video') return;
+		const mediaPath = joinProjectPath(cp.path, video.path);
 		let cancelled = false;
-		const videoIdForCache = activeVideoFile?.id ?? 'shared';
-		const outJson = joinProjectPath(
-			currentProject.path,
-			'config',
-			`waveform_cache_${videoIdForCache}.json`
-		);
-		const outPng = joinProjectPath(
-			currentProject.path,
-			'config',
-			`waveform_${videoIdForCache}.png`
-		);
+		const videoIdForCache = video.id;
+		const outJson = joinProjectPath(cp.path, 'config', `waveform_cache_${videoIdForCache}.json`);
+		const outPng = joinProjectPath(cp.path, 'config', `waveform_${videoIdForCache}.png`);
+		const applyWaveformData = (data: {
+			peaks: number[];
+			duration: number;
+		}) => {
+			if (data.peaks?.length) {
+				setWaveformPeaks(data.peaks.map((p) => Number(p)));
+			}
+			if (Number.isFinite(data.duration) && data.duration > 0) {
+				setProbedMediaDuration((prev) =>
+					prev != null && prev > 0 ? Math.max(prev, data.duration) : data.duration
+				);
+			}
+		};
+		const applyWaveformPng = () => {
+			const url = convertFileSrc(outPng.replace(/\\/g, '/'));
+			setWaveformImageSrc(`${url}?v=${videoIdForCache}`);
+		};
 		(async () => {
+			try {
+				const cached = await projectService.getCachedWaveform(mediaPath, outJson, outPng);
+				if (cancelled) return;
+				if (cached) {
+					applyWaveformData(cached);
+					applyWaveformPng();
+					return;
+				}
+			} catch (e) {
+				console.warn('[waveform] cache read:', e);
+			}
+			if (cancelled) return;
 			setWaveformImageSrc(null);
 			try {
-				await projectService.generateWaveformPng(activeVideoAbsolutePath, outPng, 4096, 1024);
-				if (!cancelled) {
-					const url = convertFileSrc(outPng.replace(/\\/g, '/'));
-					setWaveformImageSrc(`${url}?t=${Date.now()}`);
-				}
+				await projectService.generateWaveformPng(mediaPath, outPng, 4096, 1024);
+				if (!cancelled) applyWaveformPng();
 			} catch (e) {
 				console.warn('[waveform] PNG (ffmpeg showwavespic):', e);
 			}
 			try {
-				const data = await projectService.generateWaveform(activeVideoAbsolutePath, outJson, 48);
-				if (!cancelled && data) {
-					if (data.peaks?.length) {
-						setWaveformPeaks(data.peaks.map((p) => Number(p)));
-					}
-					if (Number.isFinite(data.duration) && data.duration > 0) {
-						setProbedMediaDuration((prev) =>
-							prev != null && prev > 0 ? Math.max(prev, data.duration) : data.duration
-						);
-					}
-				}
+				const data = await projectService.generateWaveform(mediaPath, outJson, 48);
+				if (!cancelled && data) applyWaveformData(data);
 			} catch (e) {
 				console.warn('[waveform] peaks:', e);
 				if (!cancelled) setWaveformPeaks(null);
@@ -3998,7 +4277,7 @@ ${changesText}
 		return () => {
 			cancelled = true;
 		};
-	}, [activeVideoAbsolutePath, currentProject?.path, activeVideoFile?.id]);
+	}, [activeVideoFile?.id, currentProject?.path]);
 
 	useEffect(() => {
 		if (!videoSrc) return;
@@ -4061,30 +4340,30 @@ ${changesText}
 		thumb.style.left = `${(sl / maxScroll) * travel}%`;
 	}, []);
 
-	const syncSubtitleOverlayAtTime = useCallback((t: number, force = false) => {
-		const active = findActiveSegmentAtTime(segmentsRef.current, t);
-		let translation = '';
-		let original = '';
-		const idx = selectedSegmentIndexRef.current;
-		if (active) {
-			if (idx >= 0 && segmentsRef.current[idx]?.id === active.id) {
-				translation = segEditorTranslationRef.current;
-				original = segEditorOriginalRef.current;
-			} else {
-				translation = active.translation ?? '';
-				original = active.text ?? '';
+	const syncSubtitleOverlayAtTime = useCallback(
+		(t: number, force = false) => {
+			const active = findActiveSegmentAtTime(segmentsRef.current, t);
+
+			let translation = '';
+			let original = '';
+			if (active) {
+				const idx = selectedSegmentIndexRef.current;
+				const useEditor =
+					idx >= 0 && segmentsRef.current[idx]?.id === active.id;
+				if (useEditor) {
+					translation = segEditorTranslationRef.current;
+					original = segEditorOriginalRef.current;
+				} else {
+					translation = active.translation ?? '';
+					original = active.text ?? '';
+				}
 			}
-		}
-		const sig = `${active?.id ?? 'none'}|${translation}|${original}`;
-		if (!force && sig === lastPlaybackOverlaySigRef.current) return;
-		lastPlaybackOverlaySigRef.current = sig;
-		const trEl = videoTranslationOverlayRef.current;
-		if (trEl) trEl.textContent = translation.trim() || '\u00A0';
-		if (showOriginalVideoSubtitlesRef.current) {
-			const origEl = videoOriginalOverlayRef.current;
-			if (origEl) origEl.textContent = original.trim() || '\u00A0';
-		}
-	}, []);
+
+			const sig = `t|${active?.id ?? 'none'}|${translation}|${original}`;
+			pushSubtitleOverlayText(translation, original, sig, force);
+		},
+		[pushSubtitleOverlayText]
+	);
 	syncSubtitleOverlayRef.current = syncSubtitleOverlayAtTime;
 
 	const applyPlaybackUi = useCallback(
@@ -4791,19 +5070,28 @@ ${changesText}
 									<div className="w-[1px] bg-border-default shrink-0" />
 									<div className="flex flex-col gap-[8px] flex-1">
 										{treeFiles.config.map((file) => (
-											<div
+											<ProjectTreeFileRow
 												key={file.id}
+												file={file}
+												selected={
+													selectedTreeItem?.kind === 'file' &&
+													selectedTreeItem.id === file.id
+												}
+												active={isCompositionTreeFileActive(
+													currentProject,
+													activeSubtitleFileId,
+													file
+												)}
+												renaming={inlineRenameFileId === file.id}
+												renameDraft={
+													inlineRenameFileId === file.id ? inlineRenameDraft : ''
+												}
+												onRenameDraftChange={setInlineRenameDraft}
 												onClick={() => setSelectedTreeItem({ kind: 'file', id: file.id })}
-												className={`hover:text-primary-main cursor-pointer truncate h-4 flex items-center rounded-[3px] px-[2px] ${
-													selectedTreeItem?.kind === 'file' && selectedTreeItem.id === file.id
-														? 'bg-primary-main/15 ring-1 ring-primary-main/40'
-														: ''
-												}`}
-											>
-												<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-													{file.name}
-												</span>
-											</div>
+												onContextMenu={(e) => openProjectFileContextMenu(e, file)}
+												onCommitRename={() => void commitInlineRename()}
+												onCancelRename={cancelInlineRename}
+											/>
 										))}
 									</div>
 								</div>
@@ -4833,42 +5121,31 @@ ${changesText}
 										
 										<div className="flex flex-col gap-[8px] flex-1">
 											{treeFiles.video.map((file) => (
-												<div
+												<ProjectTreeFileRow
 													key={file.id}
-													role="button"
-													tabIndex={0}
+													file={file}
+													selected={
+														selectedTreeItem?.kind === 'file' &&
+														selectedTreeItem.id === file.id
+													}
+													active={isCompositionTreeFileActive(
+														currentProject,
+														activeSubtitleFileId,
+														file
+													)}
+													renaming={inlineRenameFileId === file.id}
+													renameDraft={
+														inlineRenameFileId === file.id ? inlineRenameDraft : ''
+													}
+													onRenameDraftChange={setInlineRenameDraft}
 													onClick={() => {
 														setSelectedTreeItem({ kind: 'file', id: file.id });
 														void activateProjectTrack(file);
 													}}
-													onContextMenu={(e) => {
-														e.preventDefault();
-														e.stopPropagation();
-														setSelectedTreeItem({ kind: 'file', id: file.id });
-														setProjectFileMenu({ x: e.clientX, y: e.clientY, file });
-													}}
-													onKeyDown={(e) => {
-														if (e.key === 'Enter' || e.key === ' ') {
-															e.preventDefault();
-															void activateProjectTrack(file);
-														}
-													}}
-													className={`hover:text-primary-main cursor-pointer truncate h-4 flex items-center rounded-[3px] px-[2px] ${
-														selectedTreeItem?.kind === 'file' && selectedTreeItem.id === file.id
-															? 'bg-primary-main/15 ring-1 ring-primary-main/40'
-															: ''
-													}`}
-												>
-													<span
-														className={`font-inter font-semibold text-[12px] leading-none tracking-normal ${
-															isCompositionTreeFileActive(currentProject, activeSubtitleFileId, file)
-																? 'text-primary-main'
-																: 'text-text-primary'
-														}`}
-													>
-														{file.name}
-													</span>
-												</div>
+													onContextMenu={(e) => openProjectFileContextMenu(e, file)}
+													onCommitRename={() => void commitInlineRename()}
+													onCancelRename={cancelInlineRename}
+												/>
 											))}
 										</div>
 									</div>
@@ -4898,36 +5175,31 @@ ${changesText}
 										<div className="w-[1px] bg-border-default shrink-0" />
 										<div className="flex flex-col gap-[8px] flex-1">
 											{treeFiles.subtitles.map((file) => (
-												<div
+												<ProjectTreeFileRow
 													key={file.id}
-													role="button"
-													tabIndex={0}
+													file={file}
+													selected={
+														selectedTreeItem?.kind === 'file' &&
+														selectedTreeItem.id === file.id
+													}
+													active={isCompositionTreeFileActive(
+														currentProject,
+														activeSubtitleFileId,
+														file
+													)}
+													renaming={inlineRenameFileId === file.id}
+													renameDraft={
+														inlineRenameFileId === file.id ? inlineRenameDraft : ''
+													}
+													onRenameDraftChange={setInlineRenameDraft}
 													onClick={() => {
 														setSelectedTreeItem({ kind: 'file', id: file.id });
 														void activateProjectTrack(file);
 													}}
-													onKeyDown={(e) => {
-														if (e.key === 'Enter' || e.key === ' ') {
-															e.preventDefault();
-															void activateProjectTrack(file);
-														}
-													}}
-													className={`hover:text-primary-main cursor-pointer truncate h-4 flex items-center rounded-[3px] px-[2px] ${
-														selectedTreeItem?.kind === 'file' && selectedTreeItem.id === file.id
-															? 'bg-primary-main/15 ring-1 ring-primary-main/40'
-															: ''
-													}`}
-												>
-													<span
-														className={`font-inter font-semibold text-[12px] leading-none tracking-normal ${
-															isCompositionTreeFileActive(currentProject, activeSubtitleFileId, file)
-																? 'text-primary-main'
-																: 'text-text-primary'
-														}`}
-													>
-														{file.name}
-													</span>
-												</div>
+													onContextMenu={(e) => openProjectFileContextMenu(e, file)}
+													onCommitRename={() => void commitInlineRename()}
+													onCancelRename={cancelInlineRename}
+												/>
 											))}
 										</div>
 									</div>
@@ -5598,7 +5870,6 @@ ${changesText}
 								beginTimelineSegmentMove={beginTimelineSegmentMove}
 								segmentBodyDragMovedRef={segmentBodyDragMovedRef}
 								clientXToTimelineTime={clientXToTimelineTime}
-								seekVideo={seekVideo}
 								iconZoomIn={iconZoomIn}
 								iconZoomOut={iconZoomOut}
 								zoomOutTitle={t('timeline.zoomOut')}
@@ -5880,6 +6151,17 @@ ${changesText}
 						style={{ left: projectFileMenu.x, top: projectFileMenu.y }}
 						onMouseDown={(e) => e.stopPropagation()}
 					>
+						<button
+							type="button"
+							onClick={() => {
+								const f = projectFileMenu.file;
+								setProjectFileMenu(null);
+								startInlineRename(f);
+							}}
+							className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover"
+						>
+							{t('projectTree.rename')}
+						</button>
 						<button
 							type="button"
 							onClick={() => {
