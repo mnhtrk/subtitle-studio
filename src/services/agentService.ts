@@ -18,15 +18,15 @@ export interface AgentContext {
   active_subtitle_file_name?: string | null;
   edit_scope?: AgentEditScope | null;
   subtitle_files?: SubtitleFileContext[];
-  /** Реплика из Спросить агента в промпт попадёт окно соседей. */
+  // реплика из спросить агента + соседи в промпте
   focus_segment_id?: number | null;
-  /** Сколько сегментов до/после focus включить полным текстом (по умолчанию 5) */
+  // соседей вокруг focus (дефолт 5)
   neighbor_radius?: number;
-  /** Пакетная обработка всего файла только эти id в полном виде */
+  // batch: полный текст только этих id
   batch_segment_ids?: number[] | null;
   batch_index?: number | null;
   batch_total?: number | null;
-  /** Режим задачи (определяет ии) general  bulk_replace  proofread  translation_fix  answer_only */
+  // task_mode: general bulk_replace proofread translation_fix answer_only
   task_mode?: string | null;
   replace_from?: string | null;
   replace_to?: string | null;

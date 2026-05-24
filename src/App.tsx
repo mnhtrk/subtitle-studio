@@ -81,6 +81,7 @@ import {
 	resolveIsoLanguage
 } from './utils/glossary';
 import { installVideoEditorKeyboardHandlers, isEditableKeyboardTarget } from './utils/videoKeyboard';
+import { clampContextMenuToViewport } from './utils/contextMenuPosition';
 
 import iconNewProject from './assets/icons/new-project.svg';
 import iconNewFile from './assets/icons/new-file.svg';
@@ -304,13 +305,13 @@ const TIMELINE_EDGE_SCROLL_MARGIN = 48;
 const TIMELINE_EDGE_SCROLL_BASE = 14;
 const ACTIVATION_COMPLETED_STORAGE_KEY = 'subtitle-studio-activation-completed';
 const SHOW_ORIGINAL_VIDEO_SUBTITLES_KEY = 'subtitle-studio-show-original-video-subtitles';
-/** Реже коммитим время в React во время play — UI идёт через DOM + requestVideoFrameCallback. */
+// реже пушим время в react при play, ui через rVFC
 const PLAYBACK_UI_STATE_COMMIT_MS = 400;
-/** Прокрутка таймлайна за плейхедом — не каждый кадр. */
+// скролл таймлайна за плейхедом не каждый кадр
 const PLAYBACK_TIMELINE_FOLLOW_MS = 200;
-/** Порог (с), ниже которого повторный seek к видео не делаем. */
+// seek к видео не дёргаем если меньше этого порога (с)
 const SEEK_TIME_EPSILON = 0.02;
-/** Допуск на границе реплики (мс): fastSeek/округление пикселей таймлайна. */
+// допуск на границе реплики (мс) fastSeek и пиксели таймлайна
 const SEGMENT_TIME_EPSILON = 0.001;
 const TIMELINE_CLICK_MOVE_PX = 5;
 function setVideoCurrentTime(v: HTMLVideoElement, time: number, fast = true) {
@@ -464,9 +465,9 @@ export default function App() {
 		fileName: string;
 		edits: ChatEditDiff[];
 		deletions: ChatDeleteDiff[];
-		/** Полный снимок субтитров файла до правок агента (для отмены). */
+		// снимок субтитров до правок агента
 		fileSnapshot: SubtitleSegment[];
-		/** @deprecated используйте fileSnapshot */
+		// deprecated snapshot
 		snapshot?: SubtitleSegment[];
 	};
 	type ChatEditStatus = 'pending' | 'kept' | 'reverted';
@@ -481,7 +482,7 @@ export default function App() {
 				id: string;
 				role: 'assistant';
 				text: string;
-				/** @deprecated используйте editBlocks */
+				// deprecated edits
 				edits?: ChatEditDiff[];
 				editBlocks?: ChatEditBlock[];
 				editSnapshot?: SubtitleSegment[];
@@ -504,10 +505,10 @@ export default function App() {
 	const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 	const agentSessionIdRef = useRef<string>(agentSessionIdForProject(undefined));
 
-	/** Минимальная высота текста в композере (~min-h-[96px] карточки минус padding) */
+	// мин высота текста в композере чата
 	const CHAT_INPUT_TEXT_MIN_PX = 72;
 	const CHAT_INPUT_TEXT_MAX_PX = 220;
-	/** Текст — gap — кнопка — (gap — скроллбар, если есть прокрутка) */
+	// композер: текст gap кнопка [gap скроллбар]
 	const CHAT_COMPOSER_GAP_PX = 12;
 	const CHAT_COMPOSER_SCROLLBAR_PX = 12;
 	const CHAT_COMPOSER_SEND_BTN_PX = 32;
@@ -685,9 +686,16 @@ export default function App() {
 		ids: number[];
 		range: { start: number; end: number } | null;
 	} | null>(null);
-	const [retranscribeBusy, setRetranscribeBusy] = useState<{ stage: 'audio' | 'transcribe' | 'translate' | 'apply' } | null>(null);
+	const timelineContextMenuRef = useRef<HTMLDivElement>(null);
+	const [retranscribeBusy, setRetranscribeBusy] = useState<{
+		stage: 'audio' | 'transcribe' | 'translate' | 'apply';
+		engine: 'whisper' | 'gpt4o';
+	} | null>(null);
 	const [retranscribeError, setRetranscribeError] = useState<string | null>(null);
-	const [retranscribeSetup, setRetranscribeSetup] = useState<{ range: { start: number; end: number } } | null>(null);
+	const [retranscribeSetup, setRetranscribeSetup] = useState<{
+		range: { start: number; end: number };
+		engine: 'whisper' | 'gpt4o';
+	} | null>(null);
 	const [retranscribeLanguage, setRetranscribeLanguage] = useState<string>('English');
 	const [retranscribePrompt, setRetranscribePrompt] = useState<string>('');
 	const [fullTranscribeSetup, setFullTranscribeSetup] = useState(false);
@@ -3096,6 +3104,17 @@ ${replaceNote}
 		);
 	}, [timelineRubberRange, activeVideoAbsolutePath]);
 
+	useLayoutEffect(() => {
+		const menu = timelineContextMenu;
+		const el = timelineContextMenuRef.current;
+		if (!menu || !el) return;
+		const { width, height } = el.getBoundingClientRect();
+		const { x, y } = clampContextMenuToViewport(menu.x, menu.y, width, height);
+		if (x !== menu.x || y !== menu.y) {
+			setTimelineContextMenu((prev) => (prev ? { ...prev, x, y } : null));
+		}
+	}, [timelineContextMenu]);
+
 	const handleOpenSpellCheck = useCallback(async () => {
 		if (!currentProjectRef.current || generatedSegments.length === 0) return;
 		setSpellCheckScanning(true);
@@ -3224,7 +3243,16 @@ ${replaceNote}
 						action: () => {
 							if (!canRetranscribeRangeMenu || !timelineRubberRange) return;
 							setRetranscribeError(null);
-							setRetranscribeSetup({ range: timelineRubberRange });
+							setRetranscribeSetup({ range: timelineRubberRange, engine: 'whisper' });
+						}
+					},
+					{
+						label: t('menu.retranscribeRangeGpt4o'),
+						disabled: !canRetranscribeRangeMenu,
+						action: () => {
+							if (!canRetranscribeRangeMenu || !timelineRubberRange) return;
+							setRetranscribeError(null);
+							setRetranscribeSetup({ range: timelineRubberRange, engine: 'gpt4o' });
 						}
 					},
 				],
@@ -3480,7 +3508,8 @@ ${replaceNote}
 	const handleRetranscribeRange = useCallback(
 		async (
 			range: { start: number; end: number },
-			opts: { sourceLanguage: string; userPrompt: string }
+			opts: { sourceLanguage: string; userPrompt: string },
+			engine: 'whisper' | 'gpt4o'
 		) => {
 			const cp = currentProjectRef.current;
 			const fileId = activeSubtitleFileId;
@@ -3513,9 +3542,9 @@ ${replaceNote}
 			const hi = Math.max(lo + MIN_SEGMENT_DURATION, range.end);
 
 			setRetranscribeError(null);
-			setRetranscribeBusy({ stage: 'audio' });
+			setRetranscribeBusy({ stage: 'audio', engine });
 
-			const audioFileName = `retranscribe_${Date.now()}.mp3`;
+			const audioFileName = `retranscribe_${engine}_${Date.now()}.mp3`;
 			const audioRelPath = `config/${audioFileName}`;
 			const audioOut = joinProjectPath(cp.path, audioRelPath);
 
@@ -3525,58 +3554,88 @@ ${replaceNote}
 
 				await projectService.extractAudioRange(videoAbsPath, lo, hi, audioOut);
 
-				setRetranscribeBusy({ stage: 'transcribe' });
+				setRetranscribeBusy({ stage: 'transcribe', engine });
 				const isoLang =
 					RETRANSCRIBE_LANGUAGE_ISO[opts.sourceLanguage] ??
 					(opts.sourceLanguage.trim().length === 2 ? opts.sourceLanguage.trim().toLowerCase() : undefined);
 				const userPromptTrimmed = opts.userPrompt.trim();
+				const projectForPrompt = await projectService.open(cp.path);
+				const glossary = projectForPrompt.glossary ?? [];
 
-				const rawSegments = await projectService.transcribeAudio(
-					audioOut,
-					isoLang,
-					userPromptTrimmed.length > 0 ? userPromptTrimmed : undefined,
-					cp.glossary ?? [],
-					true
-				);
+				const baseList = segmentsRef.current;
+				const remaining = baseList.filter((s) => !(s.start < hi && s.end > lo));
+				const maxId = remaining.reduce((m, s) => Math.max(m, s.id), 0);
 
-				if (rawSegments.length === 0) {
-					throw new Error('Whisper не вернул сегментов для выделенного диапазона.');
+				let newSegments: SubtitleSegment[];
+
+				if (engine === 'gpt4o') {
+					const text = await projectService.transcribeAudioGpt4o(
+						audioOut,
+						isoLang,
+						userPromptTrimmed.length > 0 ? userPromptTrimmed : undefined,
+						glossary
+					);
+					if (!text.trim()) {
+						throw new Error('GPT-4o Transcribe вернул пустой текст.');
+					}
+					newSegments = [
+						{
+							id: maxId + 1,
+							start: lo,
+							end: hi,
+							duration: Math.max(0, hi - lo),
+							text: text.trim(),
+							translation: null
+						}
+					];
+				} else {
+					const rawSegments = await projectService.transcribeAudio(
+						audioOut,
+						isoLang,
+						userPromptTrimmed.length > 0 ? userPromptTrimmed : undefined,
+						glossary,
+						true
+					);
+
+					if (rawSegments.length === 0) {
+						throw new Error('Whisper не вернул сегментов для выделенного диапазона.');
+					}
+
+					newSegments = rawSegments.map((s, i) => {
+						const start = Math.max(0, s.start + lo);
+						const end = Math.max(start + MIN_SEGMENT_DURATION, s.end + lo);
+						return {
+							...s,
+							id: maxId + 1 + i,
+							start,
+							end,
+							duration: Math.max(0, end - start),
+							translation: s.translation ?? null
+						};
+					});
 				}
 
-				setRetranscribeBusy({ stage: 'translate' });
+				setRetranscribeBusy({ stage: 'translate', engine });
 				const targetLang = (cp.target_language || '').trim();
-				let translatedMap = new Map<number, string>();
 				if (targetLang.length > 0) {
 					try {
 						const translations = await projectService.translateBatch(
-							rawSegments,
+							newSegments,
 							targetLang,
 							'Natural subtitle translation',
-							cp.glossary ?? []
+							glossary
 						);
-						translatedMap = new Map(translations.map((t) => [t.id, t.translated_text]));
+						const translatedMap = new Map(translations.map((t) => [t.id, t.translated_text]));
+						newSegments = newSegments.map((s) => {
+							const tr = translatedMap.get(s.id);
+							return tr && tr.length > 0 ? { ...s, translation: tr } : s;
+						});
 					} catch (e) {
 						console.error('Retranscribe translate failed', e);
 					}
 				}
 
-				setRetranscribeBusy({ stage: 'apply' });
-				const baseList = segmentsRef.current;
-				const remaining = baseList.filter((s) => !(s.start < hi && s.end > lo));
-				const maxId = remaining.reduce((m, s) => Math.max(m, s.id), 0);
-				const newSegments: SubtitleSegment[] = rawSegments.map((s, i) => {
-					const start = Math.max(0, s.start + lo);
-					const end = Math.max(start + MIN_SEGMENT_DURATION, s.end + lo);
-					const tr = translatedMap.get(s.id);
-					return {
-						...s,
-						id: maxId + 1 + i,
-						start,
-						end,
-						duration: Math.max(0, end - start),
-						translation: tr && tr.length > 0 ? tr : (s.translation ?? null)
-					};
-				});
+				setRetranscribeBusy({ stage: 'apply', engine });
 
 				const merged = [...remaining, ...newSegments].sort((a, b) => a.start - b.start);
 				pushSubtitleHistorySnapshot();
@@ -4238,7 +4297,7 @@ ${replaceNote}
 		redoSegmentsStackRef.current = [];
 	}, [activeSubtitleFileId]);
 
-	// ffprobe duration (как у волны)
+	// ffprobe duration
 	useEffect(() => {
 		setProbedMediaDuration(null);
 		if (!activeVideoAbsolutePath) return;
@@ -4838,7 +4897,7 @@ ${replaceNote}
 													}}
 												>
 													<span className="w-3 shrink-0 text-center leading-none">
-														{subItem.checked ? '✓' : ''}
+														{subItem.checked ? 'вњ“' : ''}
 													</span>
 													<span>{subItem.label}</span>
 												</button>
@@ -4900,7 +4959,7 @@ ${replaceNote}
 			{/* ОСНОВНОЙ КОНТЕНТ */}
 			<div className="flex h-screen w-full bg-surface-bg text-text-primary overflow-hidden font-inter min-h-0 select-none">
       
-				{/* ЛЕВАЯ ПАНЕЛЬ (САЙДБАР): overflow-visible, чтобы свечение кнопки мастера не резалось; скролл только у верх/ниж блоков */}
+				{/* ЛЕВАЯ ПАНЕЛЬ (САЙДБАР) */}
 				<div className="w-[60px] border-r border-border-default flex flex-col items-center py-6 bg-surface-panel shrink-0 h-full min-h-0 overflow-visible">
 					<div className="flex flex-1 min-h-0 w-full flex-col items-center overflow-visible">
 						<div className="flex flex-1 min-h-0 w-full flex-col items-center justify-end overflow-y-auto no-scrollbar pb-[14px]">
@@ -4947,7 +5006,7 @@ ${replaceNote}
 							</div>
 						</div>
 
-						{/* мастер - свечение снаружи overflow */}
+						{/* мастер  */}
 						<div
 							className={`relative flex h-[76px] w-[76px] shrink-0 items-center justify-center overflow-visible py-[14px] ${
 								shouldHighlightWizardCta ? 'z-[60]' : ''
@@ -5312,7 +5371,7 @@ ${replaceNote}
 						</div>
 					</div>
 
-					{/* Лента + композер: скролл на всю высоту, карточка ввода внизу без наложения */}
+					{/* Лента + композер*/}
 					<div className="flex-1 min-h-0 flex flex-col bg-surface-bg">
 					<div
 						ref={chatScrollRef}
@@ -5379,6 +5438,72 @@ ${replaceNote}
 								b.edits.length + (b.deletions?.length ?? 0);
 							const totalEdits = editBlocks.reduce((n, b) => n + blockChangeCount(b), 0);
 							const diffPanelExpanded = expandedDiffIds.has(msg.id);
+							const singleEditBlock = editBlocks.length === 1;
+
+							const renderBlockDiffContent = (block: ChatEditBlock) => (
+								<>
+									{block.deletions?.map((d, delIdx) => (
+										<div
+											key={`del-${d.fileId}-${d.start}-${d.end}-${delIdx}`}
+											className="flex flex-col gap-[6px] w-full min-w-0 rounded-[4px]"
+										>
+											<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60 min-w-0 w-full">
+												<span className="whitespace-nowrap text-text-primary/50">
+													{t('aiAgent.deletedLine')}
+												</span>
+												<span className="whitespace-nowrap">
+													[ {formatChatTimecode(d.start)} ]
+												</span>
+												<div className="flex-1 min-w-[8px] h-[1px] bg-border-default" />
+											</div>
+											<div className="flex flex-col gap-[4px] w-full min-w-0">
+												{d.text.trim() !== '' && (
+													<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center w-full min-w-0">
+														<span className="text-caption text-text-primary font-inter break-words">
+															{d.text}
+														</span>
+													</div>
+												)}
+												{d.translation.trim() !== '' && (
+													<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center w-full min-w-0">
+														<span className="text-caption text-text-primary font-inter break-words">
+															{d.translation}
+														</span>
+													</div>
+												)}
+											</div>
+										</div>
+									))}
+									{block.edits.map((d) => (
+										<button
+											type="button"
+											key={`${d.fileId}-${d.id}-${d.field}`}
+											onClick={() => void navigateToChatEdit(d.fileId, d.id, d.start)}
+											className="flex flex-col gap-[6px] text-left w-full min-w-0 p-0 border-0 bg-transparent rounded-[4px] transition-colors hover:bg-text-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40"
+										>
+											<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60 min-w-0 w-full">
+												<span className="whitespace-nowrap">#{d.id}</span>
+												<span className="whitespace-nowrap">
+													[ {formatChatTimecode(d.start)} ]
+												</span>
+												<div className="flex-1 min-w-[8px] h-[1px] bg-border-default" />
+											</div>
+											<div className="flex flex-col gap-[4px] w-full min-w-0">
+												<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center w-full min-w-0">
+													<span className="text-caption text-text-primary font-inter break-words">
+														{d.oldText}
+													</span>
+												</div>
+												<div className="min-h-[22px] bg-inline-success rounded-[2px] p-[4px] flex items-center w-full min-w-0">
+													<span className="text-caption text-text-primary font-inter break-words">
+														{d.newText}
+													</span>
+												</div>
+											</div>
+										</button>
+									))}
+								</>
+							);
 
 							return (
 								<div key={msg.id} className="self-start w-full min-w-0 flex flex-col items-stretch">
@@ -5453,121 +5578,67 @@ ${replaceNote}
 													<p className="text-caption font-inter text-text-primary/70 break-words w-full min-w-0">
 														{totalEdits}{' '}
 														{totalEdits === 1 ? t('aiAgent.change') : t('aiAgent.changes')}
-														{editBlocks.length > 1 ? ` · ${editBlocks.length} файлов` : ''}
+														{editBlocks.length > 1
+															? t('aiAgent.inFiles', { count: editBlocks.length })
+															: ''}
 													</p>
 												)}
 
 												{diffPanelExpanded && (
-													<div className="flex flex-col gap-[12px] w-full min-w-0">
-														{editBlocks.map((block) => {
-															const blockKey = `${msg.id}::${block.fileId}`;
-															const blockExpanded = expandedDiffIds.has(blockKey);
-															return (
-																<div
-																	key={blockKey}
-																	className="flex flex-col gap-[8px] border-t border-border-default/60 pt-[8px] first:border-t-0 first:pt-0 w-full min-w-0"
-																>
-																	<div className="flex items-start gap-2 w-full min-w-0">
-																		<button
-																			type="button"
-																			title={
-																				blockExpanded
-																					? t('aiAgent.collapse')
-																					: t('aiAgent.expand')
-																			}
-																			onClick={() => toggleDiffExpanded(blockKey)}
-																			className="group flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-primary transition-colors hover:bg-text-primary/15 mt-px"
-																		>
-																			<span
-																				className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
-																				style={sidebarIconMaskStyle(
-																					blockExpanded ? iconArrowUp : iconArrowDown
-																				)}
-																				aria-hidden
-																			/>
-																		</button>
-																		<span className="text-caption font-inter text-text-primary font-medium break-words min-w-0 flex-1 leading-snug">
-																			{block.fileName || block.fileId}
-																		</span>
-																		<span className="text-caption font-inter text-text-primary/50 shrink-0 whitespace-nowrap pt-px">
-																			{t('aiAgent.episodeChanges', {
-																				count: blockChangeCount(block)
-																			})}
-																		</span>
-																	</div>
-																	{blockExpanded && (
-																		<div className="flex flex-col gap-[10px] w-full min-w-0 mt-[10px]">
-																			{block.deletions?.map((d, delIdx) => (
-																				<div
-																					key={`del-${d.fileId}-${d.start}-${d.end}-${delIdx}`}
-																					className="flex flex-col gap-[6px] w-full min-w-0 rounded-[4px]"
-																				>
-																					<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60 min-w-0 w-full">
-																						<span className="whitespace-nowrap text-text-primary/50">
-																							{t('aiAgent.deletedLine')}
-																						</span>
-																						<span className="whitespace-nowrap">
-																							[ {formatChatTimecode(d.start)} ]
-																						</span>
-																						<div className="flex-1 min-w-[8px] h-[1px] bg-border-default" />
-																					</div>
-																					<div className="flex flex-col gap-[4px] w-full min-w-0">
-																						{d.text.trim() !== '' && (
-																							<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center w-full min-w-0">
-																								<span className="text-caption text-text-primary font-inter break-words">
-																									{d.text}
-																								</span>
-																							</div>
-																						)}
-																						{d.translation.trim() !== '' && (
-																							<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center w-full min-w-0">
-																								<span className="text-caption text-text-primary font-inter break-words">
-																									{d.translation}
-																								</span>
-																							</div>
-																						)}
-																					</div>
-																				</div>
-																			))}
-																			{block.edits.map((d) => (
-																				<button
-																					type="button"
-																					key={`${d.fileId}-${d.id}-${d.field}`}
-																					onClick={() =>
-																						void navigateToChatEdit(
-																							d.fileId,
-																							d.id,
-																							d.start
-																						)
-																					}
-																					className="flex flex-col gap-[6px] text-left w-full min-w-0 p-0 border-0 bg-transparent rounded-[4px] transition-colors hover:bg-text-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40"
-																				>
-																					<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60 min-w-0 w-full">
-																						<span className="whitespace-nowrap">#{d.id}</span>
-																						<span className="whitespace-nowrap">
-																							[ {formatChatTimecode(d.start)} ]
-																						</span>
-																						<div className="flex-1 min-w-[8px] h-[1px] bg-border-default" />
-																					</div>
-																					<div className="flex flex-col gap-[4px] w-full min-w-0">
-																						<div className="min-h-[22px] bg-inline-error rounded-[2px] p-[4px] flex items-center w-full min-w-0">
-																							<span className="text-caption text-text-primary font-inter break-words">
-																								{d.oldText}
-																							</span>
-																						</div>
-																						<div className="min-h-[22px] bg-inline-success rounded-[2px] p-[4px] flex items-center w-full min-w-0">
-																							<span className="text-caption text-text-primary font-inter break-words">
-																								{d.newText}
-																							</span>
-																						</div>
-																					</div>
-																				</button>
-																			))}
+													<div className="flex flex-col gap-[10px] w-full min-w-0">
+														{singleEditBlock ? (
+															renderBlockDiffContent(editBlocks[0])
+														) : (
+															editBlocks.map((block) => {
+																const blockKey = `${msg.id}::${block.fileId}`;
+																const blockExpanded = expandedDiffIds.has(blockKey);
+																const episodeLabel =
+																	block.fileName ||
+																	currentProject?.files.find((f) => f.id === block.fileId)
+																		?.name ||
+																	block.fileId;
+																return (
+																	<div
+																		key={blockKey}
+																		className="flex flex-col gap-[8px] border-t border-border-default/60 pt-[8px] first:border-t-0 first:pt-0 w-full min-w-0"
+																	>
+																		<div className="flex items-start gap-2 w-full min-w-0">
+																			<button
+																				type="button"
+																				title={
+																					blockExpanded
+																						? t('aiAgent.collapse')
+																						: t('aiAgent.expand')
+																				}
+																				onClick={() => toggleDiffExpanded(blockKey)}
+																				className="group flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-text-primary transition-colors hover:bg-text-primary/15 mt-px"
+																			>
+																				<span
+																					className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
+																					style={sidebarIconMaskStyle(
+																						blockExpanded ? iconArrowUp : iconArrowDown
+																					)}
+																					aria-hidden
+																				/>
+																			</button>
+																			<span className="text-caption font-inter text-text-primary font-medium break-words min-w-0 flex-1 leading-snug">
+																				{episodeLabel}
+																			</span>
+																			<span className="text-caption font-inter text-text-primary/50 shrink-0 whitespace-nowrap pt-px">
+																				{t('aiAgent.episodeChanges', {
+																					count: blockChangeCount(block)
+																				})}
+																			</span>
 																		</div>
-																	)}
-																</div>
-															);
-														})}
+																		{blockExpanded && (
+																			<div className="flex flex-col gap-[10px] w-full min-w-0 mt-[10px]">
+																				{renderBlockDiffContent(block)}
+																			</div>
+																		)}
+																	</div>
+																);
+															})
+														)}
 													</div>
 												)}
 											</div>
@@ -5718,7 +5789,7 @@ ${replaceNote}
 									className="absolute right-[-2px] top-0 w-[5px] h-full cursor-col-resize z-50 hover:bg-primary-main/40 transition-colors"
 							/>
 
-							{/* ПАНЕЛЬ РЕДАКТИРОВАНИЯ ОДИНОЧНОГО СУБТИТРА */}
+							{/* один субтитр */}
 							<div
 								ref={segmentEditorPanelRef}
 								className="h-[180px] bg-surface-panel border-t border-border-default p-[12px] flex gap-1 shrink-0 min-w-0 overflow-hidden"
@@ -6256,7 +6327,8 @@ ${replaceNote}
 							onContextMenu={(e) => { e.preventDefault(); setTimelineContextMenu(null); }}
 						/>
 						<div
-							className="fixed z-[10501] min-w-[220px] py-1 bg-surface-secondary border border-border-default rounded-[8px] shadow-2xl"
+							ref={timelineContextMenuRef}
+							className="fixed z-[10501] w-max max-w-[min(100vw-16px,24rem)] py-1 bg-surface-secondary border border-border-default rounded-[8px] shadow-2xl"
 							style={{ left: m.x, top: m.y }}
 							onMouseDown={(e) => e.stopPropagation()}
 						>
@@ -6267,9 +6339,9 @@ ${replaceNote}
 									if (!canRetranscribe || !m.range) return;
 									setTimelineContextMenu(null);
 									setRetranscribeError(null);
-									setRetranscribeSetup({ range: m.range });
+									setRetranscribeSetup({ range: m.range, engine: 'whisper' });
 								}}
-								className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
+								className="block text-left whitespace-nowrap px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
 								title={
 									!hasRange
 										? t('timeline.retranscribeSelectRange')
@@ -6282,13 +6354,33 @@ ${replaceNote}
 							</button>
 							<button
 								type="button"
+								disabled={!canRetranscribe}
+								onClick={() => {
+									if (!canRetranscribe || !m.range) return;
+									setTimelineContextMenu(null);
+									setRetranscribeError(null);
+									setRetranscribeSetup({ range: m.range, engine: 'gpt4o' });
+								}}
+								className="block text-left whitespace-nowrap px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
+								title={
+									!hasRange
+										? t('timeline.retranscribeSelectRange')
+										: !activeVideoAbsolutePath
+											? t('timeline.retranscribeNoVideo')
+											: t('timeline.retranscribeGpt4oHint')
+								}
+							>
+								{t('timeline.retranscribeRangeGpt4o')}
+							</button>
+							<button
+								type="button"
 								disabled={!canDelete}
 								onClick={() => {
 									if (!canDelete) return;
 									setTimelineContextMenu(null);
 									void handleDeleteSelectedSubtitle();
 								}}
-								className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
+								className="block text-left whitespace-nowrap px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
 								title={
 									!canDelete
 										? t('timeline.deleteSelectSubtitle')
@@ -6503,10 +6595,14 @@ ${replaceNote}
 						<div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
 							<div className="flex flex-col pt-0">
 								<h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">
-									{t('retranscribe.title')}
+									{retranscribeSetup.engine === 'gpt4o'
+										? t('retranscribe.gpt4oTitle')
+										: t('retranscribe.title')}
 								</h1>
 								<p className="text-body-reg text-text-secondary">
-									{t('retranscribe.desc')}
+									{retranscribeSetup.engine === 'gpt4o'
+										? t('retranscribe.gpt4oDesc')
+										: t('retranscribe.desc')}
 								</p>
 							</div>
 							<div className="flex flex-col gap-[12px] h-full">
@@ -6545,16 +6641,22 @@ ${replaceNote}
 							<button
 								type="button"
 								onClick={() => {
-									const range = retranscribeSetup.range;
+									const { range, engine } = retranscribeSetup;
 									setRetranscribeSetup(null);
-									void handleRetranscribeRange(range, {
-										sourceLanguage: retranscribeLanguage,
-										userPrompt: retranscribePrompt
-									});
+									void handleRetranscribeRange(
+										range,
+										{
+											sourceLanguage: retranscribeLanguage,
+											userPrompt: retranscribePrompt
+										},
+										engine
+									);
 								}}
 								className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
 							>
-								{t('retranscribe.retranscribe')}
+								{retranscribeSetup.engine === 'gpt4o'
+									? t('retranscribe.gpt4oStart')
+									: t('retranscribe.retranscribe')}
 							</button>
 						</div>
 					</div>
@@ -6571,9 +6673,15 @@ ${replaceNote}
 								</h1>
 								<p className="text-body-reg text-text-secondary">
 									{retranscribeBusy.stage === 'audio' && t('retranscribe.stageAudio')}
-									{retranscribeBusy.stage === 'transcribe' && t('retranscribe.stageTranscribe')}
+									{retranscribeBusy.stage === 'transcribe' &&
+										(retranscribeBusy.engine === 'gpt4o'
+											? t('retranscribe.stageTranscribeGpt4o')
+											: t('retranscribe.stageTranscribe'))}
 									{retranscribeBusy.stage === 'translate' && t('retranscribe.stageTranslate')}
-									{retranscribeBusy.stage === 'apply' && t('retranscribe.stageApply')}
+									{retranscribeBusy.stage === 'apply' &&
+										(retranscribeBusy.engine === 'gpt4o'
+											? t('retranscribe.stageApplyGpt4o')
+											: t('retranscribe.stageApply'))}
 								</p>
 							</div>
 							<div className="flex items-center justify-center h-full">

@@ -26,7 +26,7 @@ function normalizeTerm(term: string): string {
 	return term.trim().toLowerCase();
 }
 
-/** Строка похожа на водяной знак Whisper (не диалог). */
+// похоже на водяной знак whisper, не реплика
 export function segmentLooksLikeWhisperWatermark(seg: SubtitleSegment): boolean {
 	const text = seg.text.trim();
 	const tr = (seg.translation ?? '').trim();
@@ -64,7 +64,7 @@ export function fileContainsAnyTerm(file: SubtitleFileBundle, terms: string[]): 
 	return file.segments.some((s) => segmentContainsAnyTerm(s, terms));
 }
 
-/** Для отбора эпизодов при bulk replace — только искомая (старая) форма. */
+// bulk replace: в эпизод только если есть старая форма
 export function collectTermsFromIntent(intent: AgentIntent): string[] {
 	if (intent.task_mode === 'bulk_replace' && intent.replace_from?.trim()) {
 		return [intent.replace_from.trim()];
@@ -75,7 +75,7 @@ export function collectTermsFromIntent(intent: AgentIntent): string[] {
 	return [...new Set(terms)];
 }
 
-/** Для отбора эпизодов по глоссарию — только старые формулировки. */
+// глоссарий: фильтр эпизодов по старым формулировкам
 export function collectGlossaryEpisodeFilterTerms(changes: GlossaryReplacementChange[]): string[] {
 	const terms: string[] = [];
 	for (const c of changes) {

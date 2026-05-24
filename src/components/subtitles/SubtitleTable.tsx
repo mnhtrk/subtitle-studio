@@ -40,7 +40,7 @@ function SubtitleTableInner({
 		<div className="p-3 flex-1 flex flex-col min-h-0 overflow-hidden">
 			<div
 				ref={scrollRef as Ref<HTMLDivElement>}
-				className="flex-1 overflow-y-auto no-scrollbar subtitle-table-scroll bg-surface-secondary"
+				className="flex-1 overflow-y-auto subtitle-table-scroll bg-surface-secondary"
 			>
 				<table className="w-full border-collapse table-fixed bg-surface-secondary">
 					<colgroup>

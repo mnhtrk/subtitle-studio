@@ -33,6 +33,7 @@ const enMessages = {
 		transcribe: 'Transcribe',
 		translate: 'Translate',
 		retranscribeRange: 'Retranscribe range',
+		retranscribeRangeGpt4o: 'Retranscribe using GPT-4o (one line)',
 		about: 'About',
 		switchToDark: 'Switch to dark theme',
 		switchToLight: 'Switch to light theme'
@@ -109,6 +110,7 @@ const enMessages = {
 		changes: 'changes',
 		episodeProgress: 'Batch {current} of {total}: {name}',
 		episodeChanges: '{count} changes',
+		inFiles: ' · {count} file(s)',
 		deletedLine: 'Removed'
 	},
 	table: {
@@ -155,6 +157,9 @@ const enMessages = {
 		retranscribeSelectRange: 'Select a range on the timeline (click and drag)',
 		retranscribeNoVideo: 'No video available for audio extraction',
 		retranscribeHint: 'Retry a selected range.',
+		retranscribeRangeGpt4o: 'Retranscribe using GPT-4o (one line)',
+		retranscribeGpt4oHint:
+			'Transcribe the selected range with GPT-4o Transcribe (one subtitle for the selection).',
 		deleteSelectSubtitle: 'Select subtitle(s) on the timeline',
 		deleteSelectedPlural: 'Delete selected subtitles (Delete)',
 		deleteSelectedSingle: 'Delete selected subtitle (Delete)'
@@ -167,11 +172,18 @@ const enMessages = {
 		promptPlaceholder: 'In the series Velorian Echo, characters Arlen, Siva, Toren, and Miri investigate a strange signal in an abandoned complex. It is leading to unsettling events.',
 		cancel: 'Cancel',
 		retranscribe: 'Start',
+		gpt4oTitle: 'Retranscribe with GPT-4o',
+		gpt4oDesc:
+			'The selected time range is sent to GPT-4o Transcribe. One subtitle is created for that range (start and end of the selection).',
+		gpt4oStart: 'Start',
 		working: 'AI is working!',
 		stageAudio: 'Extracting audio from the selected range...',
 		stageTranscribe: 'Transcribing speech...',
+		stageTranscribeGpt4o:
+			'Whisper timings, then refining each line with GPT-4o Transcribe. This may take longer...',
 		stageTranslate: 'Translating...',
 		stageApply: 'Replacing subtitles in the selected area...',
+		stageApplyGpt4o: 'Inserting transcription into the selected range...',
 		errorTitle: 'Retranscription error',
 		ok: 'OK'
 	},
@@ -366,6 +378,7 @@ const ruMessages: Messages = {
 		transcribe: 'Транскрибировать',
 		translate: 'Перевести',
 		retranscribeRange: 'Перетранскрибировать',
+		retranscribeRangeGpt4o: 'Перетранскрибировать через GPT-4o (одна реплика)',
 		about: 'О программе',
 		switchToDark: 'Тёмная тема',
 		switchToLight: 'Светлая тема'
@@ -442,6 +455,7 @@ const ruMessages: Messages = {
 		changes: 'изменений',
 		episodeProgress: 'Пачка {current} из {total}: {name}',
 		episodeChanges: '{count} изм.',
+		inFiles: ' · {count} файла(ов)',
 		deletedLine: 'Удалено'
 	},
 	table: {
@@ -489,6 +503,9 @@ const ruMessages: Messages = {
 		retranscribeSelectRange: 'Выделите диапазон на таймлайне (зажмите ЛКМ и протяните)',
 		retranscribeNoVideo: 'Нет видео для извлечения аудио',
 		retranscribeHint: 'Заново транскрибировать выделенный диапазон',
+		retranscribeRangeGpt4o: 'Перетранскрибировать через GPT-4o (одна реплика)',
+		retranscribeGpt4oHint:
+			'Транскрипция выделенного диапазона через GPT-4o Transcribe (один субтитр на выделение).',
 		deleteSelectSubtitle: 'Выделите субтитр(ы) на таймлайне',
 		deleteSelectedPlural: 'Удалить выделенные субтитры (Delete)',
 		deleteSelectedSingle: 'Удалить выбранный субтитр (Delete)'
@@ -501,11 +518,18 @@ const ruMessages: Messages = {
 		promptPlaceholder: 'В сериале Velorian Echo персонажи Арлен, Сива, Торен и Мири исследуют странный сигнал в заброшенном комплексе. Это приводит к тревожным событиям.',
 		cancel: 'Отмена',
 		retranscribe: 'Начать',
+		gpt4oTitle: 'Перетранскрипция GPT-4o',
+		gpt4oDesc:
+			'Выделенный участок отправляется в GPT-4o Transcribe. Создаётся один субтитр на весь диапазон (начало и конец выделения).',
+		gpt4oStart: 'Начать',
 		working: 'ИИ работает!',
 		stageAudio: 'Извлекаем аудио из выделенного диапазона...',
 		stageTranscribe: 'Распознаём речь...',
+		stageTranscribeGpt4o:
+			'Тайминги Whisper, затем уточнение каждой строки через GPT-4o Transcribe. Может занять дольше...',
 		stageTranslate: 'Переводим...',
 		stageApply: 'Заменяем субтитры в выделенной области...',
+		stageApplyGpt4o: 'Вставляем транскрипцию в выделенный диапазон...',
 		errorTitle: 'Ошибка ретранскрипции',
 		ok: 'ОК'
 	},

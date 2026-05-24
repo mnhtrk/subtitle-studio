@@ -47,6 +47,7 @@ fn main() {
             commands::ai::save_api_key,
             commands::ai::get_api_key_status,
             commands::ai::transcribe_audio,
+            commands::ai::transcribe_audio_gpt4o,
             commands::ai::translate_batch,
             commands::ai::cancel_ai_operation,
             commands::project::create_project,

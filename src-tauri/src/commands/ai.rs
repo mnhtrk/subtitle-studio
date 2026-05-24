@@ -481,6 +481,91 @@ pub async fn transcribe_audio(
     Ok(final_segments)
 }
 
+fn build_gpt4o_transcription_prompt(
+    prompt: Option<String>,
+    glossary: Option<Vec<GlossaryEntry>>,
+) -> Option<String> {
+    let glossary_entries = glossary.unwrap_or_default();
+    let mut glossary_originals: Vec<String> = Vec::new();
+    for entry in &glossary_entries {
+        let source = entry.source.trim();
+        if source.is_empty() {
+            continue;
+        }
+        if !glossary_originals
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(source))
+        {
+            glossary_originals.push(source.to_string());
+        }
+    }
+
+    let base_prompt = prompt
+        .as_ref()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string());
+    let base_prompt_lower = base_prompt.as_deref().unwrap_or("").to_lowercase();
+    let missing: Vec<String> = glossary_originals
+        .into_iter()
+        .filter(|source| !base_prompt_lower.contains(&source.to_lowercase()))
+        .collect();
+    let glossary_prompt = if missing.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Important names/terms to keep exactly:\n{}",
+            missing.join(", ")
+        ))
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(base) = base_prompt {
+        parts.push(base);
+    }
+    if let Some(glossary_block) = glossary_prompt {
+        parts.push(glossary_block);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+// gpt-4o transcribe на кусок аудио, без таймкодов
+#[tauri::command]
+pub async fn transcribe_audio_gpt4o(
+    file_path: String,
+    language: Option<String>,
+    prompt: Option<String>,
+    glossary: Option<Vec<GlossaryEntry>>,
+) -> Result<String, String> {
+    println!("📝 GPT-4o Transcribe: {}", file_path);
+    ai_cancel::reset_ai_operation_cancel();
+    ai_cancel::check_ai_operation_cancelled()?;
+
+    let api_key = get_api_key()?;
+    let language_code = normalize_whisper_language(&language)?;
+    let gpt4o_prompt = build_gpt4o_transcription_prompt(prompt, glossary);
+
+    let file_data = std::fs::read(&file_path).map_err(|e| format!("Ошибка чтения файла: {}", e))?;
+    if file_data.is_empty() {
+        return Err("Аудиофайл пуст".into());
+    }
+
+    let client = reqwest::Client::new();
+    gpt4o_transcribe_call(
+        &client,
+        &api_key,
+        file_data,
+        &language_code,
+        gpt4o_prompt.as_deref(),
+        "range",
+    )
+    .await
+}
+
 fn whisper_style_anchor(language_code: &str) -> String {
     let lang = language_code.trim().to_lowercase();
     match lang.as_str() {
@@ -613,6 +698,91 @@ prompt (опционально):\n{}",
     );
 
     parse_whisper_response(response)
+}
+
+// gpt-4o transcribe, в ответе только текст
+async fn gpt4o_transcribe_call(
+    client: &reqwest::Client,
+    api_key: &str,
+    file_data: Vec<u8>,
+    language_code: &str,
+    prompt: Option<&str>,
+    log_label: &str,
+) -> Result<String, String> {
+    use reqwest::multipart;
+
+    let file_size_bytes = file_data.len();
+
+    let file_part = multipart::Part::bytes(file_data)
+        .file_name("segment.mp3")
+        .mime_str("audio/mpeg")
+        .map_err(|e| e.to_string())?;
+
+    let mut form = multipart::Form::new()
+        .text("model", "gpt-4o-transcribe")
+        .text("language", language_code.to_string())
+        .text("response_format", "json")
+        .part("file", file_part);
+
+    if let Some(p) = prompt {
+        if !p.trim().is_empty() {
+            form = form.text("prompt", p.to_string());
+        }
+    }
+
+    log_debug_block(
+        &format!("gpt-4o-transcribe [{log_label}]: запрос"),
+        &format!(
+            "model: gpt-4o-transcribe\n\
+language: {language_code}\n\
+response_format: json\n\
+file: ({file_size_bytes} байт)\n\
+\n\
+prompt (опционально):\n{}",
+            prompt.unwrap_or("(не задан)")
+        ),
+    );
+
+    let res = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к OpenAI: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let error_text = res
+            .text()
+            .await
+            .unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+        return Err(format!("OpenAI gpt-4o-transcribe ({}): {}", status, error_text));
+    }
+
+    let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let response_pretty = serde_json::to_string_pretty(&response).unwrap_or_else(|e| e.to_string());
+    log_debug_block(
+        &format!("gpt-4o-transcribe [{log_label}]: ответ API"),
+        &response_pretty,
+    );
+
+    if let Some(text) = response.get("text").and_then(|v| v.as_str()) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err("gpt-4o-transcribe вернул пустой текст".into());
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    if let Some(text) = response.as_str() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    Err("gpt-4o-transcribe: не удалось извлечь текст из ответа".into())
 }
 
 fn shift_segment_times(segments: &mut [SubtitleSegment], offset_seconds: f64) {

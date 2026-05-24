@@ -149,6 +149,15 @@ export const projectService = {
     return await invoke('transcribe_audio', { filePath, language, prompt, glossary, skipVad });
   },
 
+  transcribeAudioGpt4o: async (
+    filePath: string,
+    language?: string,
+    prompt?: string,
+    glossary?: GlossaryEntry[]
+  ): Promise<string> => {
+    return await invoke('transcribe_audio_gpt4o', { filePath, language, prompt, glossary });
+  },
+
   cancelAiOperation: async (): Promise<void> => {
     await invoke('cancel_ai_operation');
   },

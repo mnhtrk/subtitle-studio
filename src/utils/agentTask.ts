@@ -1,7 +1,7 @@
 import type { SubtitleSegment, GlossaryEntry } from '../services/projectService';
 import type { AgentIntent } from '../services/agentService';
 
-/** Подстановка термина в сегментах */
+// подстановка термина в сегментах
 export function applyBulkReplaceToSegments(
 	segments: SubtitleSegment[],
 	from: string,
