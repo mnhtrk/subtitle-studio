@@ -126,3 +126,10 @@ export function agentSessionIdForProject(projectId: string | null | undefined): 
   }
   return `session-${crypto.randomUUID()}`;
 }
+
+export function newAgentChatSessionId(projectId: string | null | undefined): string {
+  if (projectId && projectId.trim().length > 0) {
+    return `project-${projectId.trim()}-${crypto.randomUUID()}`;
+  }
+  return `session-${crypto.randomUUID()}`;
+}

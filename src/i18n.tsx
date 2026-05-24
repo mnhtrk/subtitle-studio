@@ -90,7 +90,7 @@ const enMessages = {
 	},
 	aiAgent: {
 		title: 'AI-agent',
-		add: 'Add',
+		add: 'New chat',
 		more: 'More',
 		emptyHint: 'Chat with the agent to get tips and help.',
 		thinking: 'Agent is thinking...',
@@ -435,7 +435,7 @@ const ruMessages: Messages = {
 	},
 	aiAgent: {
 		title: 'ИИ-агент',
-		add: 'Добавить',
+		add: 'Новый чат',
 		more: 'Ещё',
 		emptyHint: 'Задайте вопрос агенту или попросите изменить реплики',
 		thinking: 'Агент думает...',

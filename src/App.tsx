@@ -47,6 +47,7 @@ import {
 	agentService,
 	AgentAction,
 	agentSessionIdForProject,
+	newAgentChatSessionId,
 	type ConversationTurn
 } from './services/agentService';
 import {
@@ -84,16 +85,16 @@ import { installVideoEditorKeyboardHandlers, isEditableKeyboardTarget } from './
 import { clampContextMenuToViewport } from './utils/contextMenuPosition';
 
 import iconNewProject from './assets/icons/new-project.svg';
-import iconNewFile from './assets/icons/new-file.svg';
+// import iconNewFile from './assets/icons/new-file.svg';
 import iconOpenProject from './assets/icons/open-project.svg';
 import iconSave from './assets/icons/save.svg';
 import iconWizard from './assets/icons/wizard.svg';
 import iconExport from './assets/icons/export.svg';
 import iconGlossary from './assets/icons/glossary.svg';
 import iconSearch from './assets/icons/search.svg';
-import iconNewFolder from './assets/icons/new-folder.svg';
+// import iconNewFolder from './assets/icons/new-folder.svg';
 import iconAdd from './assets/icons/add.svg';
-import iconMore from './assets/icons/more.svg';
+// import iconMore from './assets/icons/more.svg';
 import iconArrowUp from './assets/icons/arrow-up.svg';
 import iconArrowDown from './assets/icons/arrow-down.svg';
 import iconSend from './assets/icons/send.svg';
@@ -2055,18 +2056,10 @@ export default function App() {
 		[]
 	);
 
-	const handleDeleteSelectedTreeItem = useCallback(async () => {
-		const cp = currentProjectRef.current;
-		if (!cp) return;
-		const sel = selectedTreeItem;
-		if (!sel) return;
-
-		if (sel.kind === 'file') {
-			const file = cp.files.find((f) => f.id === sel.id);
-			if (!file) {
-				setSelectedTreeItem(null);
-				return;
-			}
+	const handleDeleteProjectFile = useCallback(
+		async (file: ProjectFile) => {
+			const cp = currentProjectRef.current;
+			if (!cp) return;
 			if (file.file_type === 'Video') {
 				await handleDeleteEpisode(file);
 				setSelectedTreeItem(null);
@@ -2101,6 +2094,23 @@ export default function App() {
 					title: t('dialog.deleteFileTitle')
 				});
 			}
+		},
+		[activeSubtitleFileId, handleDeleteEpisode, pushProjectHistorySnapshot, t]
+	);
+
+	const handleDeleteSelectedTreeItem = useCallback(async () => {
+		const cp = currentProjectRef.current;
+		if (!cp) return;
+		const sel = selectedTreeItem;
+		if (!sel) return;
+
+		if (sel.kind === 'file') {
+			const file = cp.files.find((f) => f.id === sel.id);
+			if (!file) {
+				setSelectedTreeItem(null);
+				return;
+			}
+			await handleDeleteProjectFile(file);
 			return;
 		}
 
@@ -2158,7 +2168,7 @@ export default function App() {
 				title: t('dialog.deleteFolderTitle')
 			});
 		}
-	}, [selectedTreeItem, activeSubtitleFileId, handleDeleteEpisode, pushProjectHistorySnapshot, t]);
+	}, [selectedTreeItem, activeSubtitleFileId, handleDeleteEpisode, handleDeleteProjectFile, pushProjectHistorySnapshot, t]);
 
 	const handleSelectProject = useCallback(async (path: string) => {
 		const canProceed = await maybeSaveBeforeSwitchingProject();
@@ -2326,23 +2336,29 @@ export default function App() {
 		}
 	}, [handleSelectProject]);
 
-	const handleProjectTreeNewFile = useCallback(() => {
-		if (!currentProject) return;
-		// TODO: новый файл в выбранной папке дерева проекта
-	}, [currentProject]);
+	// const handleProjectTreeNewFile = useCallback(() => {
+	// 	if (!currentProject) return;
+	// 	// TODO: новый файл в выбранной папке дерева проекта
+	// }, [currentProject]);
 
-	const handleProjectTreeNewFolder = useCallback(() => {
-		if (!currentProject) return;
-		// TODO: новая папка в выбранном месте дерева
-	}, [currentProject]);
+	// const handleProjectTreeNewFolder = useCallback(() => {
+	// 	if (!currentProject) return;
+	// 	// TODO: новая папка в выбранном месте дерева
+	// }, [currentProject]);
 
 	const handleAiAgentAdd = useCallback(() => {
-		// TODO: действие кнопки «Добавить» в чате агента
-	}, []);
+		if (isAgentBusy) return;
+		agentSessionIdRef.current = newAgentChatSessionId(currentProjectRef.current?.id);
+		setChatMessages([]);
+		setChatInput('');
+		setPendingAttachedSegment(null);
+		setExpandedDiffIds(new Set());
+		setAgentBatchProgress(null);
+	}, [isAgentBusy]);
 
-	const handleAiAgentMore = useCallback(() => {
-		// TODO: дополнительные опции чата
-	}, []);
+	// const handleAiAgentMore = useCallback(() => {
+	// 	// TODO: дополнительные опции чата
+	// }, []);
 
 	const toggleDiffExpanded = useCallback((messageId: string) => {
 		setExpandedDiffIds((prev) => {
@@ -5096,6 +5112,7 @@ ${replaceNote}
 							{currentProject?.name ?? t('app.noProject')}
 						</span>
 						
+						{/* пока не нужны
 						<div className="flex items-center gap-[12px] shrink-0">
 							<button
 								type="button"
@@ -5125,6 +5142,7 @@ ${replaceNote}
 								/>
 							</button>
 						</div>
+						*/}
 					</div>
 
 					{/* Список файлов */}
@@ -5347,7 +5365,8 @@ ${replaceNote}
 								type="button"
 								title={t('aiAgent.add')}
 								onClick={handleAiAgentAdd}
-								className="group w-4 h-4 flex items-center justify-center shrink-0"
+								disabled={isAgentBusy}
+								className="group w-4 h-4 flex items-center justify-center shrink-0 disabled:opacity-40 disabled:pointer-events-none"
 							>
 								<span
 									className={`${PANEL_HEADER_ICON_CLASS} bg-text-primary`}
@@ -5356,6 +5375,7 @@ ${replaceNote}
 								/>
 							</button>
 
+							{/* пока не нужна
 							<button
 								type="button"
 								title={t('aiAgent.more')}
@@ -5368,6 +5388,7 @@ ${replaceNote}
 									aria-hidden
 								/>
 							</button>
+							*/}
 						</div>
 					</div>
 
@@ -6425,7 +6446,7 @@ ${replaceNote}
 							onClick={() => {
 								const f = projectFileMenu.file;
 								setProjectFileMenu(null);
-								void handleDeleteEpisode(f);
+								void handleDeleteProjectFile(f);
 							}}
 							className="w-full text-left px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover"
 						>
