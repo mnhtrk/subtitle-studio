@@ -74,10 +74,10 @@ def main() -> None:
                 emit({"type": "error", "error": "detect: audio_path missing"})
                 continue
             try:
-                speech_pad_ms = int(req.get("speech_pad_ms", 400))
+                speech_pad_ms = int(req.get("speech_pad_ms", 550))
                 min_silence_duration_ms = int(req.get("min_silence_duration_ms", 1200))
-                min_speech_duration_ms = int(req.get("min_speech_duration_ms", 250))
-                threshold = float(req.get("threshold", 0.25))
+                min_speech_duration_ms = int(req.get("min_speech_duration_ms", 200))
+                threshold = float(req.get("threshold", 0.22))
 
                 t_load = time.time()
                 wav = read_audio(path, sampling_rate=SAMPLE_RATE)

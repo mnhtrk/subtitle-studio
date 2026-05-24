@@ -367,10 +367,10 @@ pub async fn transcribe_audio(
         let raw_vad =
             vad::detect_speech_segments(audio_path, vad::VadParams::default()).await?;
         ai_cancel::check_ai_operation_cancelled()?;
-        const VAD_MARGIN_PRE_SEC: f64 = 0.15;
+        const VAD_MARGIN_PRE_SEC: f64 = 0.45;
         const VAD_MARGIN_POST_SEC: f64 = 2.0;
-        const VAD_CHUNK_GAP_SEC: f64 = 0.08;
-        let merged = vad::merge_nearby_speech_segments(&raw_vad, 0.45);
+        const VAD_CHUNK_GAP_SEC: f64 = 0.05;
+        let merged = vad::merge_nearby_speech_segments(&raw_vad, 0.55);
         let speech_segments = vad::expand_speech_margins(
             &merged,
             VAD_MARGIN_PRE_SEC,
@@ -793,6 +793,35 @@ fn shift_segment_times(segments: &mut [SubtitleSegment], offset_seconds: f64) {
     }
 }
 
+/// Whisper часто ставит первое слово на 0.2–0.6 с внутри VAD-куска; подтягиваем к началу куска.
+fn snap_vad_chunk_lead_timing(segments: &mut [SubtitleSegment], chunk_timeline_start: f64) {
+    const MAX_LOCAL_LEAD_SEC: f64 = 0.22;
+    const SNAP_LOCAL_SEC: f64 = 0.04;
+    if segments.is_empty() {
+        return;
+    }
+    segments.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let first = &mut segments[0];
+    let local = first.start - chunk_timeline_start;
+    if local <= MAX_LOCAL_LEAD_SEC {
+        return;
+    }
+    let new_start = chunk_timeline_start + SNAP_LOCAL_SEC;
+    if new_start >= first.end - MIN_SUBTITLE_DURATION {
+        return;
+    }
+    println!(
+        "[whisper] lead snap: start {:.3} → {:.3} (кусок @ {:.3}, local было {:.3}s)",
+        first.start, new_start, chunk_timeline_start, local
+    );
+    first.start = new_start;
+    first.duration = (first.end - first.start).max(MIN_SUBTITLE_DURATION);
+}
+
 // retranscribe: весь файл в whisper, vad выкл
 async fn transcribe_whisper_direct(
     client: &reqwest::Client,
@@ -991,6 +1020,7 @@ async fn transcribe_vad_speech_segments(
             )
             .await?;
             shift_segment_times(&mut segs, timeline_start);
+            snap_vad_chunk_lead_timing(&mut segs, timeline_start);
             println!(
                 "[whisper] VAD-кусок {}: {} субтитр(ов)",
                 chunk_index,
@@ -1037,7 +1067,9 @@ async fn transcribe_vad_speech_segments(
                     &label,
                 )
                 .await?;
-                shift_segment_times(&mut segs, timeline_start + local_start);
+                let sub_timeline = timeline_start + local_start;
+                shift_segment_times(&mut segs, sub_timeline);
+                snap_vad_chunk_lead_timing(&mut segs, sub_timeline);
                 all_segments.extend(segs);
                 let _ = std::fs::remove_file(&sub_path);
             }

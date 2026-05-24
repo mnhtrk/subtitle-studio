@@ -23,13 +23,13 @@ pub struct VadParams {
 }
 
 impl Default for VadParams {
-    // threshold ниже = раньше старт речи; speech_pad и min_silence — запас по краям и меньше ранних обрывов
+    // threshold ниже = раньше старт речи; speech_pad — запас до/после Silero (первые слоги не обрезаются)
     fn default() -> Self {
         Self {
-            speech_pad_ms: 400,
+            speech_pad_ms: 550,
             min_silence_duration_ms: 1200,
-            min_speech_duration_ms: 250,
-            threshold: 0.25,
+            min_speech_duration_ms: 200,
+            threshold: 0.22,
         }
     }
 }
@@ -295,6 +295,23 @@ fn parse_event(line: &str) -> Option<Value> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_speech_margins_adds_pre_without_overlap() {
+        let raw = vec![
+            SpeechSegment { start: 1.0, end: 2.0 },
+            SpeechSegment { start: 3.0, end: 4.0 },
+        ];
+        let out = expand_speech_margins(&raw, 0.45, 0.5, 0.05);
+        assert!((out[0].start - 0.55).abs() < 0.001, "pre margin: {}", out[0].start);
+        assert!(out[0].end > raw[0].end);
+        assert!(out[1].start >= out[0].end + 0.05 - 0.001);
+    }
+}
+
 async fn send_cmd(stdin: &mut ChildStdin, value: Value) -> Result<(), String> {
     let line = value.to_string() + "\n";
     stdin
@@ -323,16 +340,17 @@ pub async fn extract_segment_audio(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
+    // -ss после -i: точнее начало куска (важно для первых слогов реплики)
     let status = Command::new("ffmpeg")
         .arg("-y")
         .arg("-loglevel")
         .arg("error")
-        .arg("-ss")
-        .arg(format!("{:.3}", start_seconds.max(0.0)))
-        .arg("-t")
-        .arg(format!("{:.3}", duration_seconds.max(0.05)))
         .arg("-i")
         .arg(source)
+        .arg("-ss")
+        .arg(format!("{:.6}", start_seconds.max(0.0)))
+        .arg("-t")
+        .arg(format!("{:.6}", duration_seconds.max(0.05)))
         .arg("-vn")
         .arg("-ac")
         .arg("1")
