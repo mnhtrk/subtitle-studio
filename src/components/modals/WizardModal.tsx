@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { DraggableModalShell } from './DraggableModalShell';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -6,7 +6,8 @@ import {
   projectService,
   ProjectData,
   ProjectFile,
-  SubtitleSegment
+  SubtitleSegment,
+  isAiOperationCancelled
 } from '../../services/projectService';
 import {
   applyAutoGlossaryToProject,
@@ -124,6 +125,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
   const [workingSegments, setWorkingSegments] = useState<SubtitleSegment[]>([]);
   const [workingFileId, setWorkingFileId] = useState<string | null>(null);
   const totalSteps = 7;
+  const cancelRef = useRef(false);
 
   const isFileMode = sourceType === 'file';
 
@@ -140,6 +142,25 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
 
   const progressWidth = `${(currentStep / totalSteps) * 100}%`;
   const isLoaderStep = currentStep === 4 || currentStep === 6;
+
+  const canProceedFromStep =
+    currentStep === 1
+      ? Boolean(videoPath.trim())
+      : currentStep === 2 && isFileMode
+        ? Boolean(subtitlePath.trim())
+        : true;
+
+  const handleCancelLoader = () => {
+    cancelRef.current = true;
+    void projectService.cancelAiOperation();
+    setIsProcessing(false);
+    setErrorText('');
+    if (currentStep === 4) {
+      setCurrentStep(isFileMode ? 2 : 3);
+    } else if (currentStep === 6) {
+      setCurrentStep(5);
+    }
+  };
 
   const ensureProject = () => {
     if (!projectPath) {
@@ -203,6 +224,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     }
 
     console.log('[Wizard] Step 3.5: transcription started');
+    cancelRef.current = false;
     setIsProcessing(true);
     setErrorText('');
     setCurrentStep(4);
@@ -211,6 +233,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     try {
       console.log('[Wizard][subtitle-file] importing video to project');
       const importedVideo: ProjectFile = await projectService.importMedia(projectPath!, videoPath);
+      if (cancelRef.current) return;
       console.log('[Wizard][subtitle-file] video imported:', importedVideo.id);
 
       let segments: SubtitleSegment[] = [];
@@ -225,6 +248,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
         const outputAudioPath = `${projectPath!}/${tempAudioRel}`;
         console.log('[Wizard] Extracting audio', outputAudioPath);
         const audioPath = await projectService.extractAudioFromVideo(videoPath, outputAudioPath);
+        if (cancelRef.current) return;
 
         const whisperLanguage = whisperLanguageCodes[sourceLanguage] ?? 'en';
         const projectForPrompt = await projectService.open(projectPath!);
@@ -243,8 +267,11 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
         }
         console.log('[Wizard][subtitle-file] parsing subtitle file:', subtitlePath);
         segments = await projectService.parseSubtitleFile(subtitlePath);
+        if (cancelRef.current) return;
         console.log('[Wizard][subtitle-file] parsed segments:', segments.length);
       }
+
+      if (cancelRef.current) return;
 
       console.log('[Wizard][subtitle-file] creating paired subtitle track');
       const { project: pairedProject, subtitleFileId } = await finalizeEpisodePairInProject(
@@ -269,10 +296,15 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
         });
       }
 
+      if (cancelRef.current) return;
+
       setWorkingSegments(segments);
       console.log('[Wizard] Transcription done, segments:', segments.length);
       setCurrentStep(5);
       onComplete({ project: updatedProject, segments, subtitleFileId });
+    } catch (error) {
+      if (cancelRef.current || isAiOperationCancelled(error)) return;
+      throw error;
     } finally {
       if (tempAudioRel && projectPath) {
         projectService
@@ -290,6 +322,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     }
 
     console.log('[Wizard] Step 4.5: translation started');
+    cancelRef.current = false;
     setIsProcessing(true);
     setErrorText('');
     setCurrentStep(6);
@@ -318,12 +351,14 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       if (promptHints.length > 0) {
         await projectService.save({ ...projectForGlossary, glossary });
       }
+      if (cancelRef.current) return;
       const translations = await projectService.translateBatch(
         workingSegments,
         targetLanguage,
         prompt,
         glossary
       );
+      if (cancelRef.current) return;
 
       const translatedSegments = workingSegments.map((segment) => {
         const translation = translations.find((item) => item.id === segment.id);
@@ -338,6 +373,9 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       console.log('[Wizard] Translation done, translated segments:', translatedSegments.length);
       setCurrentStep(7);
       onComplete({ project: updatedProject, segments: translatedSegments, subtitleFileId: workingFileId });
+    } catch (error) {
+      if (cancelRef.current || isAiOperationCancelled(error)) return;
+      throw error;
     } finally {
       setIsProcessing(false);
     }
@@ -376,6 +414,9 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       }
       nextStep();
     } catch (error) {
+      if (cancelRef.current || isAiOperationCancelled(error)) {
+        return;
+      }
       const message =
         error instanceof Error
           ? error.message
@@ -521,19 +562,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     },
     7: {
       title: t('wizard.step7Title'),
-      desc: t('wizard.step7Desc'),
-      rightCol: (
-        <div className="flex-1 border border-border-default rounded-[12px] bg-secondary-main flex items-center justify-center overflow-hidden">
-          <div className="text-text-secondary opacity-20 flex flex-col items-center gap-2">
-            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-              <path d="M12 2L2 7L12 12L22 7L12 2Z" />
-              <path d="M2 17L12 22L22 17" />
-              <path d="M2 12L12 17L22 12" />
-            </svg>
-            <span className="text-caption">{t('wizard.placeholder')}</span>
-          </div>
-        </div>
-      )
+      desc: t('wizard.step7Desc')
     }
   }), [t, videoPath, sourceType, sourceLanguage, subtitlePath, contextPrompt, targetLanguage, translationPrompt]);
 
@@ -558,7 +587,11 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
           </button>
         </div>
 
-        <div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
+        <div
+          className={`grid gap-[32px] flex-1 min-h-0 items-start ${
+            currentStep === 7 ? 'grid-cols-1' : 'grid-cols-[1fr_1.2fr]'
+          }`}
+        >
           {isLoaderStep ? (
             <>
               <div className="flex flex-col pt-0">
@@ -587,9 +620,11 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                   {currentContent.desc}
                 </p>
               </div>
-              <div className="flex flex-col h-full min-h-0 min-w-0">
-                {currentContent.rightCol}
-              </div>
+              {currentStep !== 7 && 'rightCol' in currentContent && currentContent.rightCol ? (
+                <div className="flex flex-col h-full min-h-0 min-w-0">
+                  {currentContent.rightCol}
+                </div>
+              ) : null}
             </>
           )}
         </div>
@@ -604,8 +639,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
           {isLoaderStep ? (
             <>
               <button 
-                onClick={prevStep}
-                disabled={isProcessing}
+                onClick={handleCancelLoader}
                 className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover text-text-primary text-body-reg rounded-[5px] transition-colors"
               >
                 {t('wizard.cancel')}
@@ -650,8 +684,8 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                 onClick={() => {
                   handleNext().catch(console.error);
                 }}
-                disabled={isProcessing}
-                className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
+                disabled={isProcessing || !canProceedFromStep}
+                className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover disabled:bg-primary-disabled disabled:text-white/60 disabled:cursor-not-allowed text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
               >
                 {t('wizard.nextStep')}
               </button>

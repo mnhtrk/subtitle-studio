@@ -5051,7 +5051,7 @@ ${changesText}
 							<div 
 								className={`flex items-center gap-[8px] cursor-pointer group h-4 rounded-[3px] ${
 									selectedTreeItem?.kind === 'folder' && selectedTreeItem.name === 'config'
-										? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+										? 'bg-inline-bg'
 										: ''
 								}`}
 								onClick={() => {
@@ -5101,7 +5101,7 @@ ${changesText}
 								<div 
 									className={`flex items-center gap-[8px] cursor-pointer h-4 rounded-[3px] ${
 										selectedTreeItem?.kind === 'folder' && selectedTreeItem.name === 'video'
-											? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+											? 'bg-inline-bg'
 											: ''
 									}`}
 									onClick={() => {
@@ -5156,7 +5156,7 @@ ${changesText}
 								<div 
 									className={`flex items-center gap-[8px] cursor-pointer group h-4 rounded-[3px] ${
 										selectedTreeItem?.kind === 'folder' && selectedTreeItem.name === 'subtitles'
-											? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+											? 'bg-inline-bg'
 											: ''
 									}`}
 									onClick={() => {
@@ -5212,7 +5212,7 @@ ${changesText}
 									onClick={() => setSelectedTreeItem({ kind: 'file', id: file.id })}
 									className={`hover:text-primary-main cursor-pointer truncate h-4 flex items-center rounded-[3px] px-[2px] ${
 										selectedTreeItem?.kind === 'file' && selectedTreeItem.id === file.id
-											? 'bg-primary-main/15 ring-1 ring-primary-main/40'
+											? 'bg-inline-bg'
 											: ''
 									}`}
 								>

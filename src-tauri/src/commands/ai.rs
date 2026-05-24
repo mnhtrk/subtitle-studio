@@ -12,6 +12,7 @@ use crate::speaker_gender_rules::{
     segment_speaker_gender_str, speaker_gender_translation_rules,
 };
 use crate::postprocessing;
+use crate::commands::ai_cancel;
 use crate::vad;
 
 const DEBUG_LOG_MAX_CHARS: usize = 24_000;
@@ -230,6 +231,11 @@ fn get_api_key() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn cancel_ai_operation() {
+    ai_cancel::request_ai_operation_cancel();
+}
+
+#[tauri::command]
 pub async fn transcribe_audio(
     file_path: String,
     language: Option<String>,
@@ -239,6 +245,7 @@ pub async fn transcribe_audio(
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<SubtitleSegment>, String> {
     println!("📝 Транскрибация файла: {}", file_path);
+    ai_cancel::reset_ai_operation_cancel();
 
     let api_key = get_api_key()?;
     let language_code = normalize_whisper_language(&language)?;
@@ -356,8 +363,10 @@ pub async fn transcribe_audio(
             })
             .await;
 
+        ai_cancel::check_ai_operation_cancelled()?;
         let raw_vad =
             vad::detect_speech_segments(audio_path, vad::VadParams::default()).await?;
+        ai_cancel::check_ai_operation_cancelled()?;
         const VAD_MARGIN_PRE_SEC: f64 = 0.15;
         const VAD_MARGIN_POST_SEC: f64 = 2.0;
         const VAD_CHUNK_GAP_SEC: f64 = 0.08;
@@ -395,6 +404,8 @@ pub async fn transcribe_audio(
         .await?
     };
 
+    ai_cancel::check_ai_operation_cancelled()?;
+
     let _ = progress_tx
         .send(ProgressEvent::InProgress {
             step: 3,
@@ -404,6 +415,8 @@ pub async fn transcribe_audio(
         .await;
 
     let segments = apply_subtitle_timing_postprocess(sanitize_whisper_segments(raw_segments));
+
+    ai_cancel::check_ai_operation_cancelled()?;
 
     let postprocessed_result = postprocessing::postprocess_transcription(
         segments,
@@ -421,21 +434,34 @@ pub async fn transcribe_audio(
     )
     .await?;
 
+    ai_cancel::check_ai_operation_cancelled()?;
+
     let mut final_segments = postprocessed_result.corrected_segments;
 
     let file_path_buf = Path::new(&file_path);
-    if let Err(e) =
-        gender_detection::assign_speaker_genders(file_path_buf, &mut final_segments).await
-    {
-        println!("[gender] пропущено: {}", e);
+    let _ = progress_tx
+        .send(ProgressEvent::InProgress {
+            step: 4,
+            progress: 0.92,
+            description: "Определение пола говорящих".to_string(),
+        })
+        .await;
+    match gender_detection::assign_speaker_genders(file_path_buf, &mut final_segments).await {
+        Err(e) if ai_cancel::is_cancelled_error(&e) => return Err(e),
+        Err(e) => println!("[gender] пропущено: {}", e),
+        Ok(()) => {}
     }
 
+    ai_cancel::check_ai_operation_cancelled()?;
+
     let _auto_glossary = if final_segments.len() > 5 {
+        ai_cancel::check_ai_operation_cancelled()?;
         match auto_generate_glossary_from_segments(&final_segments, "ru", &api_key).await {
             Ok(glossary) => {
                 println!("[glossary] автоглоссарий: {} терминов", glossary.len());
                 Some(glossary)
             }
+            Err(e) if ai_cancel::is_cancelled_error(&e) => return Err(e),
             Err(e) => {
                 println!("[glossary] ошибка генерации: {}", e);
                 None
@@ -648,6 +674,7 @@ async fn transcribe_whisper_direct(
     let mut all_segments: Vec<SubtitleSegment> = Vec::new();
 
     for i in 0..chunk_count {
+        ai_cancel::check_ai_operation_cancelled()?;
         let chunk_start = (i as f64) * chunk_seconds;
         let chunk_path = temp_dir.join(format!("chunk_{:03}.mp3", i));
 
@@ -752,6 +779,7 @@ async fn transcribe_vad_speech_segments(
     );
 
     for (i, speech) in speech_segments.iter().enumerate() {
+        ai_cancel::check_ai_operation_cancelled()?;
         let chunk_index = i + 1;
         let timeline_start = speech.start;
         let duration = (speech.end - speech.start).max(0.05);
@@ -811,6 +839,7 @@ async fn transcribe_vad_speech_segments(
                 sub_count
             );
             for j in 0..sub_count {
+                ai_cancel::check_ai_operation_cancelled()?;
                 let local_start = j as f64 * sub_seconds;
                 let sub_path = temp_dir.join(format!("vad_{:04}_sub{:03}.mp3", i, j));
                 vad::extract_segment_audio(
@@ -933,7 +962,9 @@ async fn auto_generate_glossary_from_segments(
     if selected_words.is_empty() {
         return Ok(Vec::new());
     }
-    
+
+    ai_cancel::check_ai_operation_cancelled()?;
+
     // промпт глоссария
     let terms_list = selected_words.join(", ");
     let prompt = format!(
@@ -1057,6 +1088,7 @@ pub async fn translate_batch(
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<crate::types::TranslationResult>, String> {
     println!("Перевод {} сегментов на {}...", segments.len(), target_language);
+    ai_cancel::reset_ai_operation_cancel();
 
     let api_key = get_api_key()?;
 
@@ -1184,6 +1216,7 @@ pub async fn translate_batch(
     let mut merged_by_id: HashMap<u32, String> = HashMap::new();
 
     for (i, chunk) in chunks.iter().enumerate() {
+        ai_cancel::check_ai_operation_cancelled()?;
         let progress = 0.55 + (i as f64 / total_chunks as f64) * 0.30;
         let _ = progress_tx
             .send(ProgressEvent::InProgress {
@@ -1215,6 +1248,7 @@ pub async fn translate_batch(
     const RETRY_CHUNK_WAVES: &[usize] = &[14, 12, 10, 8, 6, 4, 3, 2, 1];
 
     for (wave_idx, &chunk_sz) in RETRY_CHUNK_WAVES.iter().enumerate() {
+        ai_cancel::check_ai_operation_cancelled()?;
         let missing: Vec<SubtitleSegment> = segments
             .iter()
             .filter(|s| !merged_by_id.contains_key(&s.id))
@@ -1236,6 +1270,7 @@ pub async fn translate_batch(
         let sub_total = (missing.len() + actual_sz - 1) / actual_sz;
 
         for (j, subchunk) in missing.chunks(actual_sz).enumerate() {
+            ai_cancel::check_ai_operation_cancelled()?;
             let batch = translate_segments_chunk(
                 &client,
                 &api_key,

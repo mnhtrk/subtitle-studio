@@ -3,8 +3,10 @@ use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdin, Command};
+
+use crate::commands::ai_cancel::{self, SidecarPidGuard};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SpeechSegment {
@@ -123,6 +125,8 @@ pub async fn detect_speech_segments(
         .spawn()
         .map_err(|e| format!("Не удалось запустить VAD sidecar: {}", e))?;
 
+    let _pid_guard = SidecarPidGuard::new(&child);
+
     let mut stdin = child.stdin.take().ok_or("нет stdin у VAD sidecar")?;
     let stdout = child.stdout.take().ok_or("нет stdout у VAD sidecar")?;
     let stderr = child.stderr.take().ok_or("нет stderr у VAD sidecar")?;
@@ -141,7 +145,8 @@ pub async fn detect_speech_segments(
     // ждем пока silero подгрузится
     let t_init = std::time::Instant::now();
     loop {
-        let line = read_line(&mut reader).await?;
+        ai_cancel::check_ai_operation_cancelled()?;
+        let line = ai_cancel::read_sidecar_line(&mut reader, &mut child).await?;
         let event = match parse_event(&line) {
             Some(v) => v,
             None => continue,
@@ -171,6 +176,8 @@ pub async fn detect_speech_segments(
         }
     }
 
+    ai_cancel::check_ai_operation_cancelled()?;
+
     let req = json!({
         "cmd": "detect",
         "audio_path": audio_path.to_string_lossy(),
@@ -184,7 +191,8 @@ pub async fn detect_speech_segments(
     let t_detect = std::time::Instant::now();
     let segments: Vec<SpeechSegment>;
     loop {
-        let line = read_line(&mut reader).await?;
+        ai_cancel::check_ai_operation_cancelled()?;
+        let line = ai_cancel::read_sidecar_line(&mut reader, &mut child).await?;
         let event = match parse_event(&line) {
             Some(v) => v,
             None => continue,
@@ -300,14 +308,6 @@ async fn send_cmd(stdin: &mut ChildStdin, value: Value) -> Result<(), String> {
     Ok(())
 }
 
-async fn read_line(reader: &mut Lines<BufReader<ChildStdout>>) -> Result<String, String> {
-    reader
-        .next_line()
-        .await
-        .map_err(|e| format!("Ошибка чтения VAD sidecar: {}", e))?
-        .ok_or_else(|| "VAD sidecar закрылся неожиданно".to_string())
-}
-
 pub async fn extract_segment_audio(
     source: &Path,
     output: &Path,
@@ -316,6 +316,8 @@ pub async fn extract_segment_audio(
 ) -> Result<(), String> {
     use std::process::Stdio;
     use tokio::process::Command;
+
+    ai_cancel::check_ai_operation_cancelled()?;
 
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;

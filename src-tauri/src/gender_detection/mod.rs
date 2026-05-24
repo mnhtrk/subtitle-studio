@@ -2,8 +2,10 @@ use std::path::Path;
 use std::process::Stdio;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdin, Command};
+
+use crate::commands::ai_cancel::{self, SidecarPidGuard};
 
 use crate::project::{SpeakerGender, SubtitleSegment};
 
@@ -45,6 +47,8 @@ pub async fn assign_speaker_genders(
         .spawn()
         .map_err(|e| format!("Не удалось запустить gender sidecar: {}", e))?;
 
+    let _pid_guard = SidecarPidGuard::new(&child);
+
     let mut stdin = child.stdin.take().ok_or("нет stdin у sidecar")?;
     let stdout = child.stdout.take().ok_or("нет stdout у sidecar")?;
     let stderr = child.stderr.take().ok_or("нет stderr у sidecar")?;
@@ -69,7 +73,8 @@ pub async fn assign_speaker_genders(
     let mut audio_duration = 0.0_f64;
     let t_init = std::time::Instant::now();
     loop {
-        let line = read_line(&mut reader).await?;
+        ai_cancel::check_ai_operation_cancelled()?;
+        let line = ai_cancel::read_sidecar_line(&mut reader, &mut child).await?;
         let event = match parse_event(&line) {
             Some(v) => v,
             None => continue,
@@ -121,6 +126,7 @@ pub async fn assign_speaker_genders(
     let mut total_inf_ms = 0.0f64;
 
     for seg in segments.iter_mut() {
+        ai_cancel::check_ai_operation_cancelled()?;
         let (clip_start, clip_end) = exact_clip_range(seg.start, seg.end, audio_duration);
         let req = json!({
             "cmd": "classify",
@@ -131,7 +137,8 @@ pub async fn assign_speaker_genders(
         send_cmd(&mut stdin, req).await?;
 
         loop {
-            let line = read_line(&mut reader).await?;
+            ai_cancel::check_ai_operation_cancelled()?;
+            let line = ai_cancel::read_sidecar_line(&mut reader, &mut child).await?;
             let event = match parse_event(&line) {
                 Some(v) => v,
                 None => continue,
@@ -240,12 +247,4 @@ async fn send_cmd(stdin: &mut ChildStdin, value: Value) -> Result<(), String> {
         .await
         .map_err(|e| format!("Ошибка flush sidecar: {}", e))?;
     Ok(())
-}
-
-async fn read_line(reader: &mut Lines<BufReader<ChildStdout>>) -> Result<String, String> {
-    reader
-        .next_line()
-        .await
-        .map_err(|e| format!("Ошибка чтения sidecar: {}", e))?
-        .ok_or_else(|| "sidecar закрылся неожиданно".to_string())
 }

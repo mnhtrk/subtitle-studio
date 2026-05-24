@@ -1,5 +1,6 @@
 pub mod files;
 pub mod ai;
+pub mod ai_cancel;
 pub mod project;
 pub mod media;
 pub mod audio;

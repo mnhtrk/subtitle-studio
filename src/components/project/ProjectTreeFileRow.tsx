@@ -59,7 +59,7 @@ export function ProjectTreeFileRow({
 				}
 			}}
 			className={`hover:text-primary-main cursor-pointer truncate h-4 flex items-center min-w-0 rounded-[3px] px-[2px] ${
-				selected ? 'bg-primary-main/15 ring-1 ring-primary-main/40' : ''
+				selected ? 'bg-inline-bg' : ''
 			}`}
 		>
 			{renaming ? (

@@ -84,7 +84,7 @@ function SubtitleTableInner({
 								data-subtitle-row-index={idx}
 								onClick={() => onSelectRow(idx)}
 								className={`h-[25px] hover:bg-black/5 transition-colors group text-table cursor-pointer scroll-mt-[25px] ${
-									selectedSegmentIndex === idx ? 'bg-black/10' : ''
+									selectedSegmentIndex === idx ? 'bg-inline-bg' : ''
 								} ${findHighlight?.segmentIndex === idx ? 'bg-primary-main/15 ring-1 ring-inset ring-primary-main' : ''}`}
 							>
 								<td className="py-1 px-2 border-b border-border-default whitespace-nowrap overflow-hidden text-overflow-ellipsis min-w-0 select-text">

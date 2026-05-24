@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::project::GlossaryEntry;
+use crate::commands::ai_cancel;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PostProcessingOptions {
@@ -72,6 +73,7 @@ pub async fn postprocess_transcription(
                 );
                 corrected = updated;
             }
+            Err(err) if ai_cancel::is_cancelled_error(&err) => return Err(err),
             Err(err) => {
                 eprintln!(
                     "[postprocess] !!! GPT-постобработка ПРОПУЩЕНА: {}\n[postprocess] возвращаю сырые сегменты от Whisper",
@@ -226,6 +228,7 @@ async fn fix_with_gpt(
     let total_chunks = (total + POSTPROCESS_CHUNK_SIZE - 1) / POSTPROCESS_CHUNK_SIZE;
 
     for (chunk_idx, chunk) in segments.chunks(POSTPROCESS_CHUNK_SIZE).enumerate() {
+        ai_cancel::check_ai_operation_cancelled()?;
         println!(
             "[postprocess] пакет {}/{} ({} сегм., id {}..{})",
             chunk_idx + 1,

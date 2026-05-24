@@ -1,5 +1,17 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export const AI_OPERATION_CANCELLED = 'AI_OPERATION_CANCELLED';
+
+export function isAiOperationCancelled(error: unknown): boolean {
+  const msg =
+    typeof error === 'string'
+      ? error
+      : error instanceof Error
+        ? error.message
+        : '';
+  return msg === AI_OPERATION_CANCELLED || msg.includes(AI_OPERATION_CANCELLED);
+}
+
 export interface RecentProject {
   path: string;
   name: string;
@@ -135,6 +147,10 @@ export const projectService = {
     skipVad?: boolean
   ): Promise<SubtitleSegment[]> => {
     return await invoke('transcribe_audio', { filePath, language, prompt, glossary, skipVad });
+  },
+
+  cancelAiOperation: async (): Promise<void> => {
+    await invoke('cancel_ai_operation');
   },
 
   importExistingSubtitles: async (
