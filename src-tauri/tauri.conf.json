@@ -38,17 +38,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis"],
-    "resources": [
-      "sidecar/ml/vad.py",
-      "sidecar/ml/classify.py",
-      "sidecar/ml/requirements.txt",
-      "sidecar/ml/README.md"
-    ],
+    "targets": ["msi"],
+    "resources": {
+      "bundle-extra/bin/": "bin/",
+      "bundle-extra/runtime/ml/": "sidecar/ml/"
+    },
     "icon": ["icons/icon.ico"],
     "windows": {
       "webviewInstallMode": {
-        "type": "skip"
+        "type": "downloadBootstrapper"
       },
       "allowDowngrades": false
     }

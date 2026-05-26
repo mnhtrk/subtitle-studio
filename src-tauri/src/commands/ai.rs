@@ -8,7 +8,7 @@ use std::collections::{HashMap};
 use std::path::Path;
 use crate::gender_detection;
 use crate::speaker_gender_rules::{
-    dialogue_context_translation_rules, normalize_target_language_iso,
+    collect_character_genders, dialogue_context_translation_rules, normalize_target_language_iso,
     segment_speaker_gender_str, speaker_gender_translation_rules,
 };
 use crate::postprocessing;
@@ -20,6 +20,8 @@ const DEBUG_LOG_MAX_CHARS: usize = 24_000;
 const WHISPER_MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
 // кусок при нарезке жирного файла
 const WHISPER_CHUNK_TARGET_BYTES: u64 = 18 * 1024 * 1024;
+const KEYRING_SERVICE: &str = "subtitle-studio";
+const KEYRING_USER: &str = "openai-api-key";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ApiKeyValidation {
@@ -35,6 +37,11 @@ pub struct AutoGlossaryOptions {
     pub target_language: String,
     #[serde(default, alias = "contextPrompt")]
     pub context_prompt: Option<String>,
+    // язык поля meaning_context (если не задан = target_language)
+    // в wizard'е первая генерация делается с target_language=source (имена остаются как в оригинале),
+    // но meaning_context всё равно должен быть на языке UI проекта - вот сюда его и кладём
+    #[serde(default, alias = "meaningContextLanguage")]
+    pub meaning_context_language: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -44,6 +51,9 @@ pub struct GlossaryTerm {
     pub frequency: u32,
     pub confidence: f64,
     pub category: Option<String>,
+    // готовая строка вида "Персонаж, мужской пол, склоняется"
+    // которую кладём в колонку context глоссария
+    pub meaning_context: Option<String>,
 }
 
 #[tauri::command]
@@ -149,7 +159,7 @@ fn format_segments_for_debug(segments: &[SubtitleSegment]) -> String {
     let mut lines: Vec<String> = Vec::with_capacity(segments.len() + 1);
     lines.push(format!(
         "  {:>3}  {:>11}  {:>7}  {}",
-        "id", "time", "gender", "text"
+        "id", "time", "speaker", "text"
     ));
     lines.push("  ---  -----------  -------  ----".to_string());
     for s in segments {
@@ -793,7 +803,7 @@ fn shift_segment_times(segments: &mut [SubtitleSegment], offset_seconds: f64) {
     }
 }
 
-/// Whisper часто ставит первое слово на 0.2–0.6 с внутри VAD-куска; подтягиваем к началу куска.
+// whisper часто ставит первое слово на 0.2-0.6 с внутри vad куска - подтягиваем к началу куска
 fn snap_vad_chunk_lead_timing(segments: &mut [SubtitleSegment], chunk_timeline_start: f64) {
     const MAX_LOCAL_LEAD_SEC: f64 = 0.22;
     const SNAP_LOCAL_SEC: f64 = 0.04;
@@ -927,8 +937,8 @@ async fn extract_audio_chunk(
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let status = Command::new("ffmpeg")
-        .arg("-y")
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
+    cmd.arg("-y")
         .arg("-loglevel")
         .arg("error")
         .arg("-ss")
@@ -941,7 +951,9 @@ async fn extract_audio_chunk(
         .arg("copy")
         .arg(output_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
+    let status = cmd
         .status()
         .await
         .map_err(|e| format!("ffmpeg: {}", e))?;
@@ -1216,16 +1228,17 @@ async fn translate_segments_chunk(
     chunk: &[SubtitleSegment],
     log_label: &str,
 ) -> Result<Vec<crate::types::TranslationResult>, String> {
+    // в API уходит только акустический speaker_gender и текст
+    // адресата GPT сам определит по контексту диалога и блоку ПЕРСОНАЖИ
     let segments_text = serde_json::json!({
         "segments": chunk.iter().map(|s| {
-            let mut obj = serde_json::json!({
+            serde_json::json!({
                 "id": s.id,
                 "text": s.text,
                 "start": s.start,
-                "end": s.end
-            });
-            obj["speaker_gender"] = serde_json::json!(segment_speaker_gender_str(s));
-            obj
+                "end": s.end,
+                "speaker_gender": segment_speaker_gender_str(s),
+            })
         }).collect::<Vec<_>>()
     });
 
@@ -1384,31 +1397,96 @@ pub async fn translate_batch(
         )
     };
 
+    // персонажи с полом из глоссария - и для промпта, и для расчёта addressee_gender_hint
+    let character_genders = collect_character_genders(&glossary);
+    if !character_genders.is_empty() {
+        let preview: Vec<String> = character_genders
+            .iter()
+            .take(20)
+            .map(|(n, g)| format!("{}={}", n, g))
+            .collect();
+        println!("[translate] персонажи из глоссария: {}", preview.join(", "));
+        crate::debug_log::log_line(&format!(
+            "[translate] персонажи с полом из глоссария: {}",
+            preview.join(", ")
+        ));
+    }
+
+    let characters_block = if character_genders.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = character_genders
+            .iter()
+            .map(|(name, g)| format!("• {} — {}", name, g))
+            .collect();
+        format!(
+            "ПЕРСОНАЖИ И ИХ ПОЛ (из глоссария проекта — приоритет над speaker_gender из акустики):\n\
+             Если в реплике звучит имя из этого списка как обращение (\"Aelita, ...\", \"Ulrich!\", \"Hi, Jeremy\") — это пол АДРЕСАТА.\n\
+             Если реплику произносит этот персонаж (по контексту/диалогу) — это пол ГОВОРЯЩЕГО, даже когда speaker_gender=unknown или подозрительно противоречит сцене.\n\
+             {}\n\n",
+            lines.join("\n")
+        )
+    };
+
     let prompt = format!(
-        "Ты профессиональный переводчик субтитров. Переведи текст на {target_language}.\n\n\
+        "Ты профессиональный переводчик субтитров. Переводишь на язык: {target_language}.\n\n\
+        ВХОД. На вход придёт JSON: {{\"segments\": [...]}}. У каждого элемента поля:\n\
+          - id            — числовой идентификатор реплики, его надо сохранить в ответе.\n\
+          - text          — оригинал реплики (это её и надо перевести).\n\
+          - start, end    — таймкоды в секундах (только для понимания порядка).\n\
+          - speaker_gender — пол того, кто произносит эту реплику: \"male\", \"female\" или \"unknown\".\n\
+                             Это акустическая оценка, иногда ошибается (особенно на детских/высоких голосах).\n\
+                             Если speaker_gender противоречит блоку ПЕРСОНАЖИ или явному контексту диалога — верь контексту, а не speaker_gender.\n\n\
+        {characters_block}\
+        КАК ОПРЕДЕЛЯТЬ КТО ГОВОРИТ И КТО АДРЕСАТ:\n\
+          - Адресат не дан в JSON. Определяй его самостоятельно по контексту: прямое обращение по имени в реплике (\"Aelita, ...\", \"Hi, Jeremy\", \"Ulrich!\"), смысл соседних реплик (вопрос -> ответ обычно между двумя разными персонажами), сюжет.\n\
+          - Если в реплике звучит имя из блока ПЕРСОНАЖИ как обращение — это пол АДРЕСАТА.\n\
+          - Если имени нет — смотри 1-2 соседних реплики; кто отвечает по смыслу, тот и адресат.\n\
+          - Не делай выводы только по speaker_gender соседей: акустика может ошибаться.\n\n\
+        СОГЛАСОВАНИЕ РОДА (для языков, где это важно — русский, украинский, польский и т.п.). ЭТО КРИТИЧНО:\n\
+          1. Первое лицо (я, мы, мой, одна/один) — по полу ГОВОРЯЩЕГО.\n\
+             Если ты однозначно определил говорящего по контексту/обращениям/именам — бери пол персонажа из блока ПЕРСОНАЖИ (приоритетнее speaker_gender).\n\
+             Иначе опирайся на speaker_gender.\n\
+             Пример (Jeremy=male): \"I saw it too\" → «Я тоже его видел».\n\
+             Пример (Aelita=female): \"I'm tired\" → «Я устала».\n\
+          2. Второе лицо (ты, твой, обращение к собеседнику) — по полу АДРЕСАТА.\n\
+             Это НЕ грамматический род существительного в оригинале и НЕ обязательно пол говорящего.\n\
+             Пример (Jeremy обращается к Aelita): \"Have you noticed anything?\" → «Ты что-нибудь заметила?».\n\
+             Пример (Aelita обращается к Ulrich): \"Are you ready?\" → «Ты готов?».\n\
+          3. В одной фразе формы говорящего и адресата могут отличаться:\n\
+             female говорит мужчине: \"I told you so\" → «Я тебе говорила».\n\
+          4. Если контекст не позволяет однозначно определить пол — переформулируй гендерно-нейтрально, не выбирай мужской род по умолчанию.\n\
+          5. Английское \"you saw\", \"you ready\" нейтральные — на русском род ВСЁ РАВНО проставляется, опирайся на контекст и ПЕРСОНАЖЕЙ.\n\n\
         {mandatory_block}\
         {glossary_text}\
         СТИЛЬ ПЕРЕВОДА: {style_prompt}\n\n\
         {dialogue_hint}\
-        Требования к переводу:\n\
-        {gender_hint}\
-        - Сохраняй естественность речи на целевом языке\n\
-        - Субтитры обычно для дубляжа: перевод произносят вслух за время реплики — не удлиняй без нужды\n\
-        - Ориентир длины: поле text в JSON (исходник); перевод не длиннее оригинала, если смысл сохраняется\n\
-        - Не добавляй лишние вступления и не дроби одну короткую фразу на два вопроса; одна мысль в источнике → одна компактная фраза\n\
-        - Предпочитай короткие синонимы; лишние слова убирай, но не жертвуй смыслом и грамматикой\n\
-        - Соблюдай глоссарий терминов (если указан); в глоссарии может быть пол персонажей, о которых идет речь в третьем лице\n\
-        - Имена персонажей, прозвища, названия мест и другие имена собственные локализуй на целевой язык, если это уместно\n\
-        - Если в глоссарии есть конкретная форма имени/термина, используй строго её\n\n\
-        Пример локализации имени: \"My name is Alex.\" -> \"Меня зовут Алекс.\"\n\n\
-        Верни JSON-объект с ключом \"translations\": массив объектов \
-        {{\"id\": число, \"translated_text\": \"текст\"}} по одному на каждый сегмент из запроса.",
+        ДОПОЛНИТЕЛЬНЫЕ ПРАВИЛА:\n\
+        - Естественная речь на целевом языке, как в дубляже.\n\
+        - Субтитры произносят вслух за время реплики — перевод не длиннее оригинала, если смысл сохраняется.\n\
+        - Одна мысль источника → одна компактная фраза. Не разбивай и не объединяй реплики.\n\
+        - Лишние вступления и междометия не добавляй; короткие синонимы предпочтительнее.\n\
+        - Соблюдай глоссарий: формы имён, термины, рекомендуемый пол персонажей в третьем лице — строго как указано.\n\
+        - speaker_gender может быть НЕВЕРНЫМ (акустика ошибается на высоких/детских голосах). При противоречии с контекстом диалога, обращениями по имени или блоком ПЕРСОНАЖИ — выбирай род по контексту, а не по speaker_gender. Пример: если male говорит female-персонажу, форма к адресату — женского рода («ты не такая смелая», не «не такой смелый»).\n\
+        - Имена собственные локализуй (\"Alex\" → \"Алекс\"); склонение по падежу и предлогу в реплике.\n\
+        - НОРМАЛИЗАЦИЯ ИМЁН: если в text встречается слово, которое очевидно вариант или опечатка термина из глоссария (Whisper мог исказить имя), переводи его так же, как переведён канонический термин. Пример: в глоссарии \"Griselda\" → \"Гризельда\", в text звучит \"Gritselda\" / \"Grizelda\" — всё равно переводи как «Гризельда».\n\
+        - {gender_hint_inline}\n\n\
+        ФОРМАТ ОТВЕТА. Верни СТРОГО JSON-объект:\n\
+        {{\"translations\": [{{\"id\": <число из входа>, \"translated_text\": \"<перевод реплики>\"}}, ...]}}\n\
+        Один элемент на каждый сегмент из запроса. id строго те же. Никакого текста вне JSON.",
         target_language = target_language,
+        characters_block = characters_block,
         mandatory_block = mandatory_block,
         glossary_text = glossary_text,
         style_prompt = style_prompt,
         dialogue_hint = dialogue_hint,
-        gender_hint = gender_hint,
+        // gender_hint у нас уже содержит подробные правила для конкретного языка
+        // вставляем его как один пункт списка, чтобы не дублировать большие блоки выше
+        gender_hint_inline = if gender_hint.trim().is_empty() {
+            String::from("Если язык перевода требует согласования по полу — следуй разделу СОГЛАСОВАНИЕ РОДА выше.")
+        } else {
+            gender_hint.trim().replace('\n', "\n  ")
+        },
     );
 
     let client = reqwest::Client::new();
@@ -1625,6 +1703,30 @@ const SENTENCE_END_EXCEPTIONS: &[&str] = &[
     "vs", "etc", "vol", "no", "fig",
 ];
 
+// инициал или акроним - одна буква типа X. или цепочка с точками X.A.N.A.
+// тогда точка часть имени, не конец фразы
+fn looks_like_initial_or_acronym(word: &str) -> bool {
+    let trimmed = word.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let stem: String = trimmed.chars().filter(|c| c.is_alphabetic()).collect();
+    if stem.is_empty() {
+        return false;
+    }
+    // одна буква + точка - X. А.
+    if stem.chars().count() == 1 {
+        return true;
+    }
+    // X.A.N.A. - все заглавные и точек внутри >= 2
+    let dot_count = trimmed.chars().filter(|c| *c == '.').count();
+    let all_upper = stem.chars().all(|c| c.is_uppercase());
+    if all_upper && dot_count >= 2 && stem.chars().count() >= 2 {
+        return true;
+    }
+    false
+}
+
 // режем сегмент whisper по . ! ? (тайминги из words)
 fn split_segment_into_sentences(
     seg_text: &str,
@@ -1635,7 +1737,8 @@ fn split_segment_into_sentences(
     }
 
     let lower_text = seg_text.to_lowercase();
-    // lower_text другой длины (ß и тп) - не трогать, уйдет в fallback
+
+    // если ß или подобные и lower другой длины - не лезем, упадём в fallback
     if lower_text.len() != seg_text.len() {
         return None;
     }
@@ -1682,10 +1785,18 @@ fn split_segment_into_sentences(
             continue;
         };
 
-        // mr dr vs - точку не считаем концом
         let lw = words[i].text.to_lowercase();
         let stem: String = lw.chars().filter(|c| c.is_alphabetic()).collect();
         if SENTENCE_END_EXCEPTIONS.contains(&stem.as_str()) {
+            continue;
+        }
+
+        // инициалы и акронимы например X. A. N. A.
+        if looks_like_initial_or_acronym(&words[i].text) {
+            continue;
+        }
+        // следующее слово тоже инициал - значит идёт цепочка имени
+        if i + 1 < words.len() && looks_like_initial_or_acronym(&words[i + 1].text) {
             continue;
         }
 
@@ -1733,11 +1844,11 @@ fn split_segment_into_sentences(
 }
 
 const MIN_SUBTITLE_DURATION: f64 = 0.05;
-/// Минимальное время на экране (короткие реплики из одного слова).
+// минимум сколько субтитр висит на экране, чтобы успеть прочесть короткое
 const MIN_SUBTITLE_DISPLAY_SEC: f64 = 1.25;
-/// Небольшой хвост после последнего слова Whisper.
+// небольшой хвост после последнего слова whisper
 const SUBTITLE_END_PAD_SEC: f64 = 0.30;
-/// Ориентир скорости чтения (символов/с) для длинных строк.
+// средняя скорость чтения - для длинных реплик
 const SUBTITLE_CHARS_PER_SEC: f64 = 17.0;
 const SUBTITLE_MIN_GAP_SEC: f64 = 0.05;
 
@@ -1751,7 +1862,7 @@ fn subtitle_min_display_duration(text: &str) -> f64 {
     by_reading
 }
 
-/// Удлиняет короткие субтитры и убирает пересечения таймингов после Whisper.
+// удлиняем слишком короткие субтитры и чиним пересечения после whisper
 fn apply_subtitle_timing_postprocess(mut segments: Vec<SubtitleSegment>) -> Vec<SubtitleSegment> {
     if segments.is_empty() {
         return segments;
@@ -2049,6 +2160,7 @@ pub async fn auto_generate_glossary(
         max_terms: 50,
         target_language: "ru".to_string(),
         context_prompt: None,
+        meaning_context_language: None,
     });
     let _ = options.min_frequency;
 
@@ -2060,7 +2172,25 @@ pub async fn auto_generate_glossary(
     let api_key = get_api_key()?;
 
     let max_terms = options.max_terms.clamp(5, 80);
-    let target_lang = options.target_language.trim();
+    // нормализуем язык до iso-кода, иначе пришедшее "russian" / "Русский" не попадёт в match ниже
+    let target_lang_raw = options.target_language.trim().to_string();
+    let target_lang_iso = normalize_target_language_iso(&target_lang_raw).unwrap_or_else(|| target_lang_raw.clone());
+    let target_lang = target_lang_iso.as_str();
+    // язык meaning_context: если задан отдельный - берём его, иначе совпадает с target_lang
+    // нужно для wizard'а где target=исходный (имена не переводятся), а meaning_context должен быть на UI-языке
+    let meaning_lang_raw = options
+        .meaning_context_language
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(target_lang_raw.as_str())
+        .to_string();
+    let meaning_lang_iso = normalize_target_language_iso(&meaning_lang_raw).unwrap_or_else(|| meaning_lang_raw.clone());
+    let meaning_lang = meaning_lang_iso.as_str();
+    println!(
+        "[glossary] target_language raw=\"{}\" iso=\"{}\", meaning_context_language raw=\"{}\" iso=\"{}\"",
+        target_lang_raw, target_lang, meaning_lang_raw, meaning_lang
+    );
 
     let creator_notes = options
         .context_prompt
@@ -2072,6 +2202,42 @@ pub async fn auto_generate_glossary(
         "\n\nIf the user message includes a \"Creator / translator notes\" section above the subtitle text, treat names, spellings, factions, and lore listed there as authoritative. Prefer those exact spellings in \"source\" when they also appear (or clearly correspond) in the subtitle transcript. Merge hints from notes with terms found in the subtitles."
     } else {
         ""
+    };
+
+    // готовый текст meaning_context на языке UI проекта - тип + пол + склонение
+    // язык meaning_context отдельный от target_lang - в wizard'е target может быть исходным
+    // а meaning_context всё равно должен быть на языке проекта (target language)
+    let meaning_lang_hint = match meaning_lang {
+        "ru" => "Заполни поле meaning_context по-русски одной короткой фразой по шаблону:\n\
+                 - character: \"Персонаж, <мужской|женский|неизвестен> пол, <склоняется|не склоняется>\"\n\
+                 - location:  \"Локация, <склоняется|не склоняется>\"\n\
+                 - organization: \"Организация, <склоняется|не склоняется>\"\n\
+                 - concept/title/other: \"<Понятие|Название|Прочее>, <склоняется|не склоняется>\"\n\
+                 Пол по имени или роли (Aelita = женский, Jeremy = мужской, X.A.N.A. = неизвестен).\n\
+                 Склонение угадывай по форме target в русском (русские имена на -а/-я склоняются, иностранные неизменяемые - не склоняются).\n\
+                 НИКОГДА не пиши meaning_context на английском или французском - только по-русски.".to_string(),
+        "uk" => "Заповни поле meaning_context українською одним коротким рядком: <тип (Персонаж/Локація/Організація/Назва)>, <чоловічий|жіночий|невідомо> рід, <відмінюється|не відмінюється>.\n\
+                 ТІЛЬКИ українською мовою, не іншою.".to_string(),
+        "pl" => "Wypełnij pole meaning_context po polsku krótko: <typ (Postać/Lokacja/Organizacja/Nazwa)>, <męski|żeński|nieznany> rodzaj, <odmienia się|nie odmienia się>.\n\
+                 Tylko po polsku, nie innym językiem.".to_string(),
+        "en" => "Fill meaning_context in English as a short label: <type (Character/Location/Organization/Title/Concept)>, <male|female|unknown> gender if applicable.\n\
+                 Inflection in English is not relevant, omit it.\n\
+                 Write meaning_context ONLY in English, never in the source language of subtitles.".to_string(),
+        "fr" => "Remplis meaning_context en français, courte étiquette : <type (Personnage/Lieu/Organisation/Titre/Concept)>, <masculin|féminin|inconnu> si pertinent, <variable|invariable>.\n\
+                 Uniquement en français, jamais dans la langue d'origine.".to_string(),
+        "de" => "Fülle meaning_context auf Deutsch als kurze Beschreibung: <Typ (Figur/Ort/Organisation/Titel/Konzept)>, <männlich|weiblich|unbekannt> falls relevant, <flektiert|unveränderlich>.\n\
+                 Nur auf Deutsch, nicht in der Originalsprache.".to_string(),
+        "es" => "Rellena meaning_context en español breve: <tipo (Personaje/Lugar/Organización/Título/Concepto)>, <masculino|femenino|desconocido> si aplica, <se declina|invariable>.\n\
+                 Solo en español, no en el idioma original.".to_string(),
+        "it" => "Compila meaning_context in italiano breve: <tipo (Personaggio/Luogo/Organizzazione/Titolo/Concetto)>, <maschile|femminile|sconosciuto> se rilevante, <flesso|invariabile>.\n\
+                 Solo in italiano.".to_string(),
+        "pt" => "Preencha meaning_context em português curto: <tipo>, <masculino|feminino|desconhecido> se aplicável, <flexiona|invariável>.\n\
+                 Apenas em português.".to_string(),
+        _ => format!(
+            "Fill meaning_context as a short label written in the language with ISO 639-1 code \"{meaning_lang}\" (the UI / TARGET language of the project).\n\
+             Format: <type: character/location/organization/title/concept>, <gender if applicable>, <inflects: yes/no if applicable>.\n\
+             Write meaning_context ONLY in that language, never in any other language."
+        ),
     };
 
     let system_prompt = format!(
@@ -2090,16 +2256,19 @@ pub async fn auto_generate_glossary(
         - isolated frequent words; prefer multi-word names when relevant\n\
         If you are unsure whether something is a proper term for this show, omit it.\n\
         For each term, \"source\" must appear verbatim (or canonical capitalization) as in the text when possible.\n\
-        \"target\" must be the correct translation into the language identified by ISO 639-1 code: {}.\n\
+        \"target\" must be the correct translation into the language identified by ISO 639-1 code: {target_lang}.\n\
         \"target\" must be localized, not a blind copy of \"source\"; for names, provide natural localization/transliteration for the target language.\n\
         If \"target\" would be identical to \"source\" without a strong reason, choose a localized form.\n\
         \"category\" is one of: character | location | organization | concept | title | other.\n\
         \"confidence\" is 0.0-1.0 (how sure this is a glossary-worthy term for THIS material).\n\
-        Return a single JSON object: {{\"terms\":[{{\"source\":\"...\",\"target\":\"...\",\"confidence\":0.9,\"category\":\"character\"}},...]}}.\n\
-        At most {} terms, sorted by importance for consistency (most important first).{}",
-        target_lang,
-        max_terms,
-        notes_instruction
+        \"meaning_context\" — short human-readable description that the translator will see in the glossary UI:\n\
+        {meaning_lang_hint}\n\
+        Return a single JSON object: {{\"terms\":[{{\"source\":\"...\",\"target\":\"...\",\"confidence\":0.9,\"category\":\"character\",\"meaning_context\":\"...\"}},...]}}.\n\
+        At most {max_terms} terms, sorted by importance for consistency (most important first).{notes_instruction}",
+        target_lang = target_lang,
+        max_terms = max_terms,
+        notes_instruction = notes_instruction,
+        meaning_lang_hint = meaning_lang_hint,
     );
 
     let user_content = if let Some(notes) = creator_notes {
@@ -2190,9 +2359,13 @@ fn parse_glossary_response(response: serde_json::Value) -> Result<Vec<GlossaryTe
         .or_else(|| parsed.get("terms").and_then(|v| v.as_array()))
         .or_else(|| parsed.get("glossary").and_then(|v| v.as_array()))
         .or_else(|| parsed.get("entries").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("result").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("results").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("items").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("data").and_then(|v| v.as_array()))
         .ok_or_else(|| {
             format!(
-                "Ожидается массив терминов или объект с ключом terms/glossary/entries. Ответ: {}",
+                "Ожидается массив терминов или объект с ключом terms/glossary/entries/result. Ответ: {}",
                 content.chars().take(600).collect::<String>()
             )
         })?;
@@ -2207,6 +2380,12 @@ fn parse_glossary_response(response: serde_json::Value) -> Result<Vec<GlossaryTe
             }
             let confidence = item["confidence"].as_f64().unwrap_or(0.5);
             let category = item["category"].as_str().map(|s| s.to_string());
+            let meaning_context = item["meaning_context"]
+                .as_str()
+                .or_else(|| item["context"].as_str())
+                .or_else(|| item["meaning"].as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
 
             Some(GlossaryTerm {
                 source,
@@ -2214,6 +2393,7 @@ fn parse_glossary_response(response: serde_json::Value) -> Result<Vec<GlossaryTe
                 frequency: 0,
                 confidence,
                 category,
+                meaning_context,
             })
         })
         .collect();
@@ -2315,5 +2495,334 @@ fn should_drop_glossary_candidate(source: &str, target: &str) -> bool {
     )
 }
 
-const KEYRING_SERVICE: &str = "subtitle-studio";
-const KEYRING_USER: &str = "openai-api-key";
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GlossaryTermInput {
+    pub source: String,
+    #[serde(default)]
+    pub context: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GlossaryTermTranslation {
+    pub source: String,
+    pub target: String,
+}
+
+// переводит / транслитерирует список терминов глоссария на target_language
+// гарантирует, что имена собственные транслитерируются (Griselda -> Гризельда), а не остаются на исходном языке
+// translate_batch для одиночных слов работал ненадёжно: gpt оставлял латинские имена как есть
+#[tauri::command]
+pub async fn translate_glossary_terms(
+    terms: Vec<GlossaryTermInput>,
+    target_language: String,
+    style_prompt: Option<String>,
+    _app_handle: tauri::AppHandle,
+) -> Result<Vec<GlossaryTermTranslation>, String> {
+    println!(
+        "[glossary-translate] терминов={}, target={}",
+        terms.len(),
+        target_language
+    );
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let cleaned: Vec<GlossaryTermInput> = terms
+        .into_iter()
+        .filter_map(|t| {
+            let src = t.source.trim().to_string();
+            if src.is_empty() {
+                None
+            } else {
+                Some(GlossaryTermInput {
+                    source: src,
+                    context: t.context.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()),
+                })
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let target_iso = normalize_target_language_iso(&target_language)
+        .unwrap_or_else(|| target_language.trim().to_lowercase());
+    // полное имя языка — модель лучше реагирует на «Russian», чем на «ru»
+    let target_full = match target_iso.as_str() {
+        "ru" => "Russian",
+        "en" => "English",
+        "es" => "Spanish",
+        "fr" => "French",
+        "de" => "German",
+        "it" => "Italian",
+        "pt" => "Portuguese",
+        "uk" => "Ukrainian",
+        "pl" => "Polish",
+        "tr" => "Turkish",
+        "zh" => "Chinese",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "ar" => "Arabic",
+        "hi" => "Hindi",
+        _ => target_language.trim(),
+    };
+
+    let api_key = get_api_key()?;
+
+    let style = style_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Natural subtitle translation");
+
+    let user_payload = serde_json::json!({
+        "target_language": target_full,
+        "target_iso": target_iso,
+        "style": style,
+        "terms": cleaned.iter().enumerate().map(|(i, t)| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".to_string(), serde_json::json!(i));
+            obj.insert("source".to_string(), serde_json::json!(t.source));
+            if let Some(ctx) = &t.context {
+                obj.insert("context".to_string(), serde_json::json!(ctx));
+            }
+            serde_json::Value::Object(obj)
+        }).collect::<Vec<_>>()
+    });
+
+    let system_prompt = format!(
+        "Ты переводчик глоссария субтитров. На входе JSON со списком терминов с исходного языка.\n\
+         Переведи КАЖДЫЙ термин на {target_full} (ISO {target_iso}).\n\
+         Правила:\n\
+         - Имена собственные (персонажи, локации, названия) — ТРАНСЛИТЕРИРУЙ согласно нормам языка перевода.\n\
+           Примеры (target=Russian): Griselda → Гризельда, Tecna → Текна, Callisto → Каллисто, Wizgiz → Визгиз, Stella → Стелла, Bloom → Блум, Riven → Ривен, Ares Prisma → Арес Призма, Big Eye Team → Команда «Большой глаз».\n\
+         - Многословные термины и фразы — переводи целиком, склонение и согласование по нормам target.\n\
+           Примеры (target=Russian): \"Sfera di Stasi\" → \"Сфера Стазиса\", \"scettro del potere\" → \"скипетр силы\", \"college delle fate di Alfea\" → \"колледж фей Алфеи\", \"maghi cavalieri di Fonterossa\" → \"маги-рыцари Фонтерроссы\".\n\
+         - Поле context (если есть) — подсказка о роде/значении, обязательно учитывай её.\n\
+         - КРИТИЧНО: target ОБЯЗАН быть на языке {target_full}, НЕ на латинице (если target кириллический). НЕ копируй source как target.\n\
+         - Никогда не оставляй target пустым. Если не уверен — транслитерируй буквы.\n\
+         - Выдавай форму lemma (именительный падеж, единственное число).\n\n\
+         Формат ответа — строго один JSON-объект, без markdown:\n\
+         {{\"translations\": [{{\"id\": <число>, \"source\": \"<оригинал>\", \"target\": \"<перевод>\"}}]}}\n\
+         id и source — те же, что во входе. По одной записи на каждый термин из входа.",
+        target_full = target_full,
+        target_iso = target_iso,
+    );
+
+    let user_content = serde_json::to_string(&user_payload).map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "model": "gpt-5.4",
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_content }
+        ],
+        "response_format": { "type": "json_object" },
+        "reasoning_effort": "medium",
+        "max_completion_tokens": 4096
+    });
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(&api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к OpenAI: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("OpenAI ответил {status}: {text}"));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "Пустой ответ OpenAI при переводе глоссария".to_string())?
+        .to_string();
+
+    println!(
+        "[glossary-translate] ответ модели ({} симв.): {}",
+        content.len(),
+        content.chars().take(500).collect::<String>()
+    );
+
+    #[derive(Deserialize)]
+    struct OneTr {
+        #[serde(default)]
+        id: Option<u32>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        target: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        translations: Vec<OneTr>,
+    }
+
+    let parsed: Resp = serde_json::from_str(&content)
+        .map_err(|e| format!("Глоссарий: невалидный JSON ({e}): {content}"))?;
+
+    let mut by_idx: HashMap<u32, String> = HashMap::new();
+    let mut by_src: HashMap<String, String> = HashMap::new();
+    for t in parsed.translations {
+        let tgt = t.target.as_deref().map(str::trim).unwrap_or("").to_string();
+        if tgt.is_empty() {
+            continue;
+        }
+        if let Some(idx) = t.id {
+            by_idx.insert(idx, tgt.clone());
+        }
+        if let Some(src) = t.source.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            by_src.insert(src.to_lowercase(), tgt);
+        }
+    }
+
+    let mut out: Vec<GlossaryTermTranslation> = Vec::with_capacity(cleaned.len());
+    let mut not_found = 0;
+    for (i, term) in cleaned.iter().enumerate() {
+        let tgt = by_idx
+            .get(&(i as u32))
+            .cloned()
+            .or_else(|| by_src.get(&term.source.to_lowercase()).cloned());
+        match tgt {
+            Some(t) => out.push(GlossaryTermTranslation {
+                source: term.source.clone(),
+                target: t,
+            }),
+            None => {
+                not_found += 1;
+                // фоллбэк - возвращаем source чтобы фронт видел этот термин в ответе
+                // (но потом фронт отфильтрует target=source как «не переведено»)
+                out.push(GlossaryTermTranslation {
+                    source: term.source.clone(),
+                    target: term.source.clone(),
+                });
+            }
+        }
+    }
+    println!(
+        "[glossary-translate] вернули переводов: {} (не нашлось в ответе модели: {})",
+        out.len(),
+        not_found
+    );
+    Ok(out)
+}
+
+// генерирует краткий пересказ эпизода (3-4 предложения) на языке target_language
+// нужен агенту чтобы понимать о чём эпизод без полной выгрузки реплик в промпт
+// берёт перевод если он есть, иначе оригинал
+#[tauri::command]
+pub async fn summarize_episode(
+    segments: Vec<SubtitleSegment>,
+    target_language: Option<String>,
+    _app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    println!(
+        "[summary] генерируем пересказ эпизода: {} сегментов, target={}",
+        segments.len(),
+        target_language.as_deref().unwrap_or("?")
+    );
+    if segments.is_empty() {
+        return Ok(String::new());
+    }
+
+    let lines: Vec<String> = segments
+        .iter()
+        .filter_map(|s| {
+            let translated = s
+                .translation
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty());
+            let text_trim = s.text.trim();
+            let payload = translated.unwrap_or(text_trim);
+            if payload.is_empty() {
+                None
+            } else {
+                Some(payload.to_string())
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return Ok(String::new());
+    }
+
+    // ограничиваем размер чтобы не выйти за лимит контекста
+    // 80k символов хватит даже на двойной эпизод
+    const MAX_CHARS: usize = 80_000;
+    let mut corpus = String::new();
+    for line in &lines {
+        if corpus.len() + line.len() + 1 > MAX_CHARS {
+            break;
+        }
+        if !corpus.is_empty() {
+            corpus.push('\n');
+        }
+        corpus.push_str(line);
+    }
+
+    // нормализуем язык: на фронте таргет может быть как "ru" так и "russian" / "Русский"
+    let target_raw = target_language
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("ru")
+        .to_string();
+    let target_iso = normalize_target_language_iso(&target_raw).unwrap_or_else(|| target_raw.clone());
+    let target = target_iso.as_str();
+
+    let api_key = get_api_key()?;
+
+    let system_prompt = format!(
+        "Ты помощник по субтитрам. Прочитай транскрипт серии и напиши КРАТКИЙ пересказ из 3-5 предложений.\n\
+         Пиши пересказ на языке с кодом ISO 639-1 \"{target}\".\n\
+         В пересказе укажи: где происходит действие, кто главные персонажи и что они делают, \
+         основной конфликт/событие, чем эпизод заканчивается. Без оценок, без \"в этой серии мы видим\".\n\
+         Без вступлений. Только сам пересказ как обычный абзац текста. Никакого JSON, никакого markdown."
+    );
+
+    let body = serde_json::json!({
+        "model": "gpt-5.4",
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": corpus }
+        ],
+        "reasoning_effort": "low",
+        "max_completion_tokens": 1024
+    });
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(&api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к OpenAI: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("OpenAI ответил {status}: {text}"));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "Пустой ответ OpenAI при пересказе".to_string())?
+        .trim()
+        .to_string();
+
+    println!(
+        "[summary] готов пересказ ({} симв.): {}",
+        content.chars().count(),
+        content.lines().next().unwrap_or("").chars().take(120).collect::<String>()
+    );
+
+    Ok(content)
+}

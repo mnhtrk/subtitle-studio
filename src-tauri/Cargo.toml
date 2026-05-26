@@ -27,3 +27,4 @@ printpdf = "0.7"
 tempfile = "3.10" 
 uuid = { version = "1.8", features = ["v4"] }  
 lazy_static = "1.4"
+once_cell = "1.19"

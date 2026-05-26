@@ -1,4 +1,4 @@
-/** Поля ввода / слайдеры — не перехватывать Alt и Space. */
+// в полях ввода и слайдерах не перехватываем alt и space
 export function isEditableKeyboardTarget(target: EventTarget | null): boolean {
 	if (!target || !(target instanceof Element)) return false;
 	const el = target as HTMLElement;
@@ -14,14 +14,13 @@ export type VideoKeyboardHandlers = {
 	isModalOpen: () => boolean;
 	hasVideo: () => boolean;
 	onTogglePlay: () => void;
-	/** Сбросить подсветку меню после Alt (Windows menu mode). */
+	// сброс подсветки меню после alt - windows menu mode
 	onDismissAppMenu?: () => void;
 };
 
-/**
- * Alt+wheel зум + Space play: без перехвата Windows открывает системное меню (Alt+Space).
- * Слушатели в capture, чтобы опередить обработчик окна.
- */
+// alt+wheel это зум, space это play
+// без перехвата винда откроет системное меню по alt+space
+// слушаем в capture чтобы опередить обработчик окна
 function isAltKey(e: KeyboardEvent): boolean {
 	return e.key === 'Alt' || e.code === 'AltLeft' || e.code === 'AltRight';
 }
@@ -41,7 +40,7 @@ export function installVideoEditorKeyboardHandlers(handlers: VideoKeyboardHandle
 		if (isEditableKeyboardTarget(e.target)) return;
 		if (!handlers.hasVideo()) return;
 
-		// Alt+Space — системное меню окна; Space — play/pause
+		// alt+space - системное меню окна, space - play/pause
 		e.preventDefault();
 		e.stopImmediatePropagation();
 		handlers.onTogglePlay();

@@ -38,6 +38,8 @@ export interface ProjectFile {
   duration?: number | null;
   subtitle_segments?: SubtitleSegment[] | null;
   linked_file_id?: string | null; // видео <-> саб
+  // краткий пересказ эпизода (3-4 предложения), нужен агенту для контекста
+  summary?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -69,6 +71,7 @@ export interface GlossaryTermGenerated {
   frequency: number;
   confidence: number;
   category?: string;
+  meaning_context?: string | null;
 }
 
 export interface AutoGlossaryOptions {
@@ -76,6 +79,8 @@ export interface AutoGlossaryOptions {
   max_terms?: number;
   target_language: string;
   contextPrompt?: string;
+  // язык поля meaning_context (если не задан - совпадает с target_language)
+  meaningContextLanguage?: string;
 }
 
 export interface TranslationResult {
@@ -222,8 +227,37 @@ export const projectService = {
         target_language: options.target_language,
         ...(options.contextPrompt?.trim()
           ? { context_prompt: options.contextPrompt.trim() }
+          : {}),
+        ...(options.meaningContextLanguage?.trim()
+          ? { meaning_context_language: options.meaningContextLanguage.trim() }
           : {})
       }
+    });
+  },
+
+  // пересказ эпизода (3-4 предложения) на target language
+  // нужен агенту чтобы не выгружать полный текст эпизода в каждый запрос
+  summarizeEpisode: async (
+    segments: SubtitleSegment[],
+    targetLanguage: string | null
+  ): Promise<string> => {
+    return await invoke('summarize_episode', {
+      segments,
+      targetLanguage: targetLanguage ?? null
+    });
+  },
+
+  // явный перевод/транслитерация терминов глоссария
+  // translate_batch на одиночных словах оставлял имена в латинице, отдельная команда надёжнее
+  translateGlossaryTerms: async (
+    terms: { source: string; context?: string | null }[],
+    targetLanguage: string,
+    stylePrompt?: string | null
+  ): Promise<{ source: string; target: string }[]> => {
+    return await invoke('translate_glossary_terms', {
+      terms,
+      targetLanguage,
+      stylePrompt: stylePrompt ?? null
     });
   },
 
@@ -329,7 +363,7 @@ export const projectService = {
 
   listProjectDirectoryFiles: async (
     projectPath: string
-  ): Promise<{ relative_path: string; name: string }[]> => {
+  ): Promise<{ relative_path: string; name: string; is_dir?: boolean }[]> => {
     return await invoke('list_project_directory_files', { projectPath });
   }
 };

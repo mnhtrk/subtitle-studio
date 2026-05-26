@@ -4946,6 +4946,7 @@ dependencies = [
  "chrono",
  "keyring",
  "lazy_static",
+ "once_cell",
  "printpdf",
  "regex",
  "reqwest 0.12.28",

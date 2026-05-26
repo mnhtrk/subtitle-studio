@@ -40,11 +40,11 @@ export function renamedFileMeta(
 }
 
 export function patchDiskFilesAfterRename(
-	disk: { relative_path: string; name: string }[],
+	disk: { relative_path: string; name: string; is_dir?: boolean }[],
 	files: { id: string; name: string; path: string; linked_file_id?: string | null }[],
 	fileId: string,
 	newBase: string
-): { relative_path: string; name: string }[] {
+): { relative_path: string; name: string; is_dir?: boolean }[] {
 	const targets = new Map<string, { name: string; path: string }>();
 	const primary = files.find((f) => f.id === fileId);
 	if (!primary) return disk;
@@ -65,7 +65,7 @@ export function patchDiskFilesAfterRename(
 	for (const meta of targets.values()) {
 		const key = normalizeProjectRelativePath(meta.path);
 		if (!seen.has(key)) {
-			next.push({ relative_path: meta.path, name: meta.name });
+			next.push({ relative_path: meta.path, name: meta.name, is_dir: false });
 			seen.add(key);
 		}
 	}

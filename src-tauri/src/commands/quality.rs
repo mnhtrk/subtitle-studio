@@ -5,7 +5,7 @@ use crate::project::SubtitleSegment;
 pub struct QualityCheckOptions {
     pub check_length_ratio: bool,
     pub check_meaning_preservation: bool,
-    pub length_tolerance: f64, // Допустимое отклонение длины (0.0-1.0)
+    pub length_tolerance: f64, // допустимое отклонение длины 0..1
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,7 +29,7 @@ pub struct QualityReport {
     pub total_segments: u32,
     pub issues_found: u32,
     pub issues: Vec<QualityIssue>,
-    pub quality_score: f64, // 0.0-100.0
+    pub quality_score: f64, // 0..100
 }
 
 #[tauri::command]
@@ -43,7 +43,7 @@ pub async fn check_translation_quality(
     let options = options.unwrap_or(QualityCheckOptions {
         check_length_ratio: true,
         check_meaning_preservation: true,
-        length_tolerance: 0.3, // ±30% допустимо
+        length_tolerance: 0.3, // плюс минус 30% ок
     });
     
     let mut issues = Vec::new();
@@ -51,7 +51,7 @@ pub async fn check_translation_quality(
     
     for segment in &segments {
         if let Some(ref translation) = segment.translation {
-            // Проверка соотношения длин
+            // считаем соотношение длин
             if options.check_length_ratio {
                 let length_issue = check_length_ratio(&segment.text, translation, options.length_tolerance);
                 if let Some(issue) = length_issue {
@@ -60,7 +60,7 @@ pub async fn check_translation_quality(
                 }
             }
             
-            // Проверка сохранения смысла (упрощённая)
+            // упрощённый чек что смысл сохранился
             if options.check_meaning_preservation {
                 let meaning_issue = check_meaning_preservation(&segment.text, translation);
                 if let Some(issue) = meaning_issue {
@@ -71,7 +71,7 @@ pub async fn check_translation_quality(
         }
     }
     
-    // Рассчитываем общий балл качества
+    // общий балл качества
     let quality_score = if segments.is_empty() {
         100.0
     } else {
@@ -120,7 +120,7 @@ fn check_length_ratio(original: &str, translation: &str, tolerance: f64) -> Opti
         };
         
         return Some(QualityIssue {
-            segment_id: 0, // Будет установлен позже
+            segment_id: 0, // выставится позже
             issue_type: "length_ratio".to_string(),
             description,
             severity,
@@ -131,12 +131,12 @@ fn check_length_ratio(original: &str, translation: &str, tolerance: f64) -> Opti
 }
 
 fn check_meaning_preservation(original: &str, translation: &str) -> Option<QualityIssue> {
-    // Простая проверка: наличие ключевых слов
+    // простая эвристика - смотрим на ключевые слова
     
     let original_lower = original.to_lowercase();
     let translation_lower = translation.to_lowercase();
     
-    // Проверяем наличие общих слов
+    // ищем общие слова
     let original_words: Vec<&str> = original_lower.split_whitespace().collect();
     let translation_words: Vec<&str> = translation_lower.split_whitespace().collect();
     
@@ -150,7 +150,7 @@ fn check_meaning_preservation(original: &str, translation: &str) -> Option<Quali
     
     let similarity = common_words as f64 / original_words.len() as f64;
     
-    if similarity < 0.2 { // Менее 20% общих слов
+    if similarity < 0.2 { // меньше 20% общих слов уже подозрительно
         let description = format!(
             "Низкое сходство текстов: {:.1}% общих слов",
             similarity * 100.0

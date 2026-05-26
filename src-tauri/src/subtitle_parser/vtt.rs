@@ -6,14 +6,14 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
     
-    // Пропускаем заголовок WebVTT
+    // скипаем заголовок webvtt
     while i < lines.len() && lines[i].trim().is_empty() {
         i += 1;
     }
     
     if i < lines.len() && lines[i].contains("WEBVTT") {
         i += 1;
-        // Пропускаем пустые строки после заголовка
+        // и пустые строки после него
         while i < lines.len() && lines[i].trim().is_empty() {
             i += 1;
         }
@@ -55,7 +55,7 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
             i += 1;
             let mut text_lines = Vec::new();
             
-            // Собираем текст сегмента
+            // собираем текст сегмента
             while i < lines.len() && !lines[i].trim().is_empty() {
                 text_lines.push(lines[i]);
                 i += 1;

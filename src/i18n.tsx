@@ -4,6 +4,28 @@ export type Locale = 'en' | 'ru';
 
 const LOCALE_STORAGE_KEY = 'subtitle-studio-locale';
 
+function detectSystemLocale(): Locale {
+	const sources: string[] = [];
+	if (typeof navigator !== 'undefined') {
+		if (Array.isArray(navigator.languages)) {
+			sources.push(...navigator.languages);
+		}
+		if (typeof navigator.language === 'string') {
+			sources.push(navigator.language);
+		}
+	}
+	for (const tag of sources) {
+		const lower = String(tag).toLowerCase();
+		if (lower.startsWith('ru') || lower.startsWith('be') || lower.startsWith('uk') || lower.startsWith('kk')) {
+			return 'ru';
+		}
+		if (lower.startsWith('en')) {
+			return 'en';
+		}
+	}
+	return 'en';
+}
+
 type DeepStringRecord<T> = {
 	[K in keyof T]: T[K] extends string ? string : DeepStringRecord<T[K]>;
 };
@@ -337,6 +359,8 @@ const enMessages = {
 			'You can select a language and give instructions to the agent. Style, tone and context matter for the result.',
 		targetLanguage: 'Target language',
 		step5Placeholder: 'Professional localization for a sci-fi drama series.',
+		editGlossary: 'Edit glossary',
+		preparingGlossary: 'Preparing glossary...',
 		step7Title: 'Everything is ready!',
 		step7Desc: 'You can review the result in the main editor window.',
 		placeholder: 'PLACEHOLDER',
@@ -684,6 +708,8 @@ const ruMessages: Messages = {
 			'Выберите язык и дайте инструкции агенту. Стиль, тон и контекст влияют на результат.',
 		targetLanguage: 'Целевой язык',
 		step5Placeholder: 'Профессиональная локализация научно-фантастического сериала.',
+		editGlossary: 'Редактировать глоссарий',
+		preparingGlossary: 'Готовим глоссарий...',
 		step7Title: 'Всё готово!',
 		step7Desc: 'Вы можете проверить результат в основном окне редактора.',
 		placeholder: 'ЗАГЛУШКА',
@@ -739,7 +765,8 @@ const I18nContext = createContext<I18nContextValue | null>(null);
 export function I18nProvider({ children }: { children: React.ReactNode }) {
 	const [locale, setLocaleState] = useState<Locale>(() => {
 		const saved = localStorage.getItem(LOCALE_STORAGE_KEY);
-		return saved === 'ru' ? 'ru' : 'en';
+		if (saved === 'ru' || saved === 'en') return saved;
+		return detectSystemLocale();
 	});
 
 	useEffect(() => {

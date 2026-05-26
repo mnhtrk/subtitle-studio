@@ -24,7 +24,9 @@ pub async fn open_project(
 
     update_recent_projects(&path, &app_handle)?;
 
+    crate::debug_log::set_active_project(project_path);
     println!("Проект '{}' открыт", project.name);
+    crate::debug_log::log_line(&format!("Проект '{}' открыт", project.name));
     Ok(project)
 }
 
@@ -100,6 +102,7 @@ pub async fn import_media(
         duration,
         subtitle_segments: None,
         linked_file_id: None,
+        summary: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
@@ -298,7 +301,7 @@ fn link_video_subtitle(project: &mut Project, video_id: &str, subtitle_id: &str)
     }
 }
 
-// Функции генерации субтитров
+// функции для генерации файлов субтитров
 fn generate_srt(segments: &[SubtitleSegment]) -> String {
     let mut result = String::new();
     for (i, seg) in segments.iter().enumerate() {
@@ -482,16 +485,16 @@ pub async fn remove_file_from_project(
     let project_path_buf = Path::new(&project_path);
     let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
     
-    // Находим файл для удаления (клонируем данные перед мутабельным заимствованием)
+    // ищем файл, клонируем чтобы не держать &mut на projects
     let file_to_remove = if let Some(file_index) = project.files.iter().position(|f| f.id == file_id) {
-        Some(project.files[file_index].clone()) // ← Клонируем структуру файла
+        Some(project.files[file_index].clone())
     } else {
         None
     };
     
     if let Some(file) = file_to_remove {
         let partner_id = file.linked_file_id.clone();
-        // Удаляем физический файл если требуется
+        // если попросили - удаляем сам файл с диска
         if delete_physical_file {
             let full_file_path = Path::new(&project.path).join(&file.path);
             if full_file_path.exists() {
@@ -509,12 +512,12 @@ pub async fn remove_file_from_project(
             }
         }
         
-        // Удаляем запись из проекта
+        // удаляем запись из проекта
         if let Some(file_index) = project.files.iter().position(|f| f.id == file_id) {
             project.files.remove(file_index);
             project.updated_at = chrono::Utc::now().to_rfc3339();
             
-            // Сохраняем проект
+            // и сохраняем
             project.save_to_file(&app_handle)?;
             println!("Файл '{}' удалён из проекта", file.name);
             
@@ -577,7 +580,7 @@ pub async fn delete_episode_from_project(
         cfg_dir.join(format!("waveform_{}.json", video.id)),
         cfg_dir.join(format!("waveform_cache_{}.json", video.id)),
     ];
-    // Удаляем также общую вейвформу, если она была сгенерирована до перехода на per-episode
+    // удаляем общую вейвформу, если осталась со старых сборок до per-episode
     if project
         .files
         .iter()
@@ -847,7 +850,7 @@ pub async fn import_existing_subtitles(
         return Err(format!("Файл субтитров не найден: {}", subtitle_path));
     }
     
-    // Определяем формат
+    // определяем формат
     let detected_format = if let Some(fmt) = format {
         match fmt.to_lowercase().as_str() {
             "srt" => subtitle_parser::SubtitleFormat::SRT,
@@ -860,16 +863,16 @@ pub async fn import_existing_subtitles(
         subtitle_parser::detect_format(subtitle_path_buf)?
     };
     
-    // Читаем содержимое файла
+    // читаем файл
     let content = fs::read_to_string(subtitle_path_buf)
         .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
     
-    // Парсим субтитры
+    // парсим субтитры
     let segments = subtitle_parser::parse_subtitles(&content, detected_format)?;
     
     println!("Импортировано {} сегментов", segments.len());
     
-    // Обновляем файл в проекте
+    // привязываем к файлу проекта
     let project_path_buf = Path::new(&project_path);
     let mut project = Project::load_from_file(project_path_buf, &app_handle)?;
     
@@ -912,12 +915,12 @@ pub async fn backup_project(
         backup_name: None,
     });
     
-    // Создаём директорию для резервной копии если её нет
+    // делаем папку под бэкап если её ещё нет
     let backup_dir = Path::new(&backup_path);
     std::fs::create_dir_all(backup_dir)
         .map_err(|e| format!("Ошибка создания директории резервной копии: {}", e))?;
     
-    // Генерируем имя файла резервной копии
+    // имя файла бэкапа
     let project_name = project_path_buf.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("project");
@@ -931,7 +934,7 @@ pub async fn backup_project(
     let backup_file = std::fs::File::create(&backup_file_path)
         .map_err(|e| format!("Ошибка создания файла резервной копии: {}", e))?;
     
-    // Создаём ZIP архив
+    // делаем zip архив
     let mut zip = zip::ZipWriter::new(backup_file);
     let zip_opts = if opts.compression {
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
@@ -939,7 +942,7 @@ pub async fn backup_project(
         zip::write::FileOptions::default()
     };
     
-    // Рекурсивно добавляем файлы в архив
+    // рекурсивно льём файлы в архив
     add_directory_to_zip(&mut zip, project_path_buf, project_path_buf, &zip_opts, opts.include_media)
         .map_err(|e| format!("Ошибка создания архива: {}", e))?;
     
@@ -967,7 +970,7 @@ fn add_directory_to_zip(
         let path = entry.path();
         
         if path.is_file() {
-            // Проверяем, нужно ли включать медиа файлы
+            // если медиа не нужно - скипаем
             if !include_media {
                 let ext = path.extension()
                     .and_then(|s| s.to_str())
@@ -975,7 +978,7 @@ fn add_directory_to_zip(
                     .to_lowercase();
                 
                 if matches!(ext.as_str(), "mp4" | "mkv" | "mov" | "avi" | "mp3" | "wav") {
-                    continue; // Пропускаем медиа файлы
+                    continue; // мимо медиа
                 }
             }
             
@@ -1002,9 +1005,13 @@ fn add_directory_to_zip(
 pub struct ProjectDiskFile {
     pub relative_path: String,
     pub name: String,
+    #[serde(default)]
+    pub is_dir: bool,
 }
 
 // список файлов проекта на диске
+// обходим любые подпапки верхнего уровня и корневые файлы
+// возвращаем и сами папки тоже, чтобы пустые папки показывались в дереве
 #[tauri::command]
 pub async fn list_project_directory_files(project_path: String) -> Result<Vec<ProjectDiskFile>, String> {
     let base = Path::new(&project_path);
@@ -1012,28 +1019,71 @@ pub async fn list_project_directory_files(project_path: String) -> Result<Vec<Pr
         return Err("Папка проекта не найдена".to_string());
     }
     let mut out: Vec<ProjectDiskFile> = Vec::new();
-    for sub in ["config", "video", "subtitles"] {
-        let dir = base.join(sub);
-        if !dir.is_dir() {
+
+    let top_entries = fs::read_dir(base).map_err(|e| e.to_string())?;
+    for entry in top_entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name.is_empty() {
             continue;
         }
-        let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if path.is_file() {
-                let name = path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let relative_path = format!("{}/{}", sub, name);
-                out.push(ProjectDiskFile {
-                    relative_path,
-                    name,
-                });
+        if path.is_file() {
+            // project.json служебный, в дереве не нужен
+            if name == "project.json" {
+                continue;
             }
+            out.push(ProjectDiskFile {
+                relative_path: name.clone(),
+                name,
+                is_dir: false,
+            });
+        } else if path.is_dir() {
+            // сам каталог тоже пишем, чтобы пустые папки были видны
+            out.push(ProjectDiskFile {
+                relative_path: name.clone(),
+                name: name.clone(),
+                is_dir: true,
+            });
+            walk_project_subdir(&path, &name, &mut out)?;
         }
     }
+
     out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(out)
+}
+
+// рекурсивный обход одной подпапки, относительный путь считаем от корня проекта
+fn walk_project_subdir(dir: &Path, rel_prefix: &str, out: &mut Vec<ProjectDiskFile>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let rel = format!("{}/{}", rel_prefix, name);
+        if path.is_file() {
+            out.push(ProjectDiskFile {
+                relative_path: rel,
+                name,
+                is_dir: false,
+            });
+        } else if path.is_dir() {
+            out.push(ProjectDiskFile {
+                relative_path: rel.clone(),
+                name: name.clone(),
+                is_dir: true,
+            });
+            walk_project_subdir(&path, &rel, out)?;
+        }
+    }
+    Ok(())
 }

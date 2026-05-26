@@ -10,6 +10,10 @@ export default defineConfig(async () => ({
     tailwindcss(),
   ],
 
+  // tauri 2 на винде отдаёт фронт через tauri://localhost
+  // абсолютные /assets/... иногда не резолвятся в webview2 (особенно в mask-image)
+  // относительные пути работают стабильнее и в dev и в release
+  base: "./",
   assetsInclude: ["**/*.aff", "**/*.dic"],
   clearScreen: false,
   server: {

@@ -40,7 +40,7 @@ function spellLog(message: string) {
 	const line = `[spellcheck] ${message}`;
 	console.log(line);
 	void invoke('log_message', { level: 'info', message: line, context: null }).catch(() => {
-		/* веб без Tauri */
+		// если запустили в браузере без tauri - просто молчим
 	});
 }
 
@@ -163,7 +163,7 @@ function pickSpellsForWord(checkers: SpellCheckers, word: string): ReturnType<ty
 	return [checkers.en, checkers.ru];
 }
 
-/** Сохранить регистр исходного слова в подсказке. */
+// сохраняем регистр исходного слова в подсказке
 export function applySuggestionCasing(original: string, suggestion: string): string {
 	if (!suggestion) return suggestion;
 	const hasLetters = /[\p{L}]/u.test(original);
@@ -181,7 +181,7 @@ export function applySuggestionCasing(original: string, suggestion: string): str
 	return suggestion;
 }
 
-/** Все подсказки hunspell, отсортированные по близости к слову. */
+// все подсказки от hunspell, отсортированные по близости к слову
 export function rankSpellSuggestions(
 	spell: ReturnType<typeof nspell>,
 	word: string,
@@ -223,7 +223,7 @@ function bestTypoSuggestion(spell: ReturnType<typeof nspell>, word: string): str
 		}
 	}
 
-	// Словарь уверенно предлагает замену, но расстояние чуть больше порога — берём лучшую.
+	// словарь уверенно что-то предложил, но расстояние чуть больше порога - берём лучшую
 	return ranked[0];
 }
 

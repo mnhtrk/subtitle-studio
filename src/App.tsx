@@ -57,7 +57,7 @@ import {
 	splitSegmentAt,
 	sortAndRenumberSubtitleIds
 } from './utils/subtitleSegmentsLocal';
-import { formatSpeakerGenderForAgent } from './utils/agentChat';
+import { formatSpeakerGenderForAgent, isWholeFileAgentRequest, AGENT_BATCH_SIZE } from './utils/agentChat';
 import { glossaryUpdatesForBulkReplace } from './utils/agentTask';
 import type { AgentEditScope, AgentIntent } from './services/agentService';
 import {
@@ -240,11 +240,12 @@ function isCompositionTreeFileActive(
 
 function mergeProjectFilesWithDisk(
 	projectFiles: ProjectFile[],
-	disk: { relative_path: string; name: string }[]
+	disk: { relative_path: string; name: string; is_dir?: boolean }[]
 ): ProjectFile[] {
 	const seen = new Set(projectFiles.map((f) => f.path.replace(/\\/g, '/').toLowerCase()));
 	const extra: ProjectFile[] = [];
 	for (const d of disk) {
+		if (d.is_dir) continue;
 		const key = d.relative_path.replace(/\\/g, '/').toLowerCase();
 		if (seen.has(key)) continue;
 		seen.add(key);
@@ -579,6 +580,7 @@ export default function App() {
 	const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<number>>(() => new Set());
 	const [isConfigFolderOpen, setIsConfigFolderOpen] = useState(false);
 	const [isSubtitlesFolderOpen, setIsSubtitlesFolderOpen] = useState(false);
+	const [openExtraFolders, setOpenExtraFolders] = useState<Set<string>>(() => new Set());
 	// подсветка мастера 1 раз на проект
 	const [wizardSpotlightDismissed, setWizardSpotlightDismissed] = useState(false);
 
@@ -663,8 +665,12 @@ export default function App() {
 	const [isVideoPlaying, setIsVideoPlaying] = useState(false);
 	const [waveformPeaks, setWaveformPeaks] = useState<number[] | null>(null);
 	const [waveformImageSrc, setWaveformImageSrc] = useState<string | null>(null);
-	const [projectDiskFiles, setProjectDiskFiles] = useState<{ relative_path: string; name: string }[]>([]);
-	const projectDiskFilesRef = useRef<{ relative_path: string; name: string }[]>([]);
+	const [projectDiskFiles, setProjectDiskFiles] = useState<
+		{ relative_path: string; name: string; is_dir?: boolean }[]
+	>([]);
+	const projectDiskFilesRef = useRef<{ relative_path: string; name: string; is_dir?: boolean }[]>(
+		[]
+	);
 	const [probedMediaDuration, setProbedMediaDuration] = useState<number | null>(null);
 	// controlled - иначе delete + blur пишет мусор
 	const [segEditorTranslation, setSegEditorTranslation] = useState('');
@@ -710,7 +716,7 @@ export default function App() {
 	const [inlineRenameDraft, setInlineRenameDraft] = useState('');
 	const [selectedTreeItem, setSelectedTreeItem] = useState<
 		| { kind: 'file'; id: string }
-		| { kind: 'folder'; name: 'config' | 'video' | 'subtitles' }
+		| { kind: 'folder'; name: string }
 		| null
 	>(null);
 
@@ -1115,18 +1121,53 @@ export default function App() {
 			config: [] as ProjectFile[],
 			video: [] as ProjectFile[],
 			subtitles: [] as ProjectFile[],
-			root: [] as ProjectFile[]
+			root: [] as ProjectFile[],
+			other: [] as { folder: string; files: ProjectFile[] }[]
 		};
 		if (!currentProject) return empty;
 		const merged = mergeProjectFilesWithDisk(currentProject.files, projectDiskFiles);
-		const out = { ...empty };
+		const out = {
+			config: [] as ProjectFile[],
+			video: [] as ProjectFile[],
+			subtitles: [] as ProjectFile[],
+			root: [] as ProjectFile[],
+			other: [] as { folder: string; files: ProjectFile[] }[]
+		};
+		const otherMap = new Map<string, ProjectFile[]>();
 		for (const f of merged) {
-			const p = f.path.replace(/\\/g, '/').toLowerCase();
-			if (p.startsWith('config/')) out.config.push(f);
-			else if (p.startsWith('video/')) out.video.push(f);
-			else if (p.startsWith('subtitles/')) out.subtitles.push(f);
-			else out.root.push(f);
+			const p = f.path.replace(/\\/g, '/');
+			const pLower = p.toLowerCase();
+			// .config и config считаем одной папкой - в новых проектах всё в config
+			if (pLower.startsWith('config/') || pLower.startsWith('.config/')) out.config.push(f);
+			else if (pLower.startsWith('video/')) out.video.push(f);
+			else if (pLower.startsWith('subtitles/')) out.subtitles.push(f);
+			else if (p.includes('/')) {
+				const folder = p.split('/')[0] ?? '';
+				if (!folder) {
+					out.root.push(f);
+					continue;
+				}
+				const arr = otherMap.get(folder) ?? [];
+				arr.push(f);
+				otherMap.set(folder, arr);
+			} else {
+				out.root.push(f);
+			}
 		}
+		// добавляем пустые папки верхнего уровня (через проводник создали и пока без файлов)
+		for (const d of projectDiskFiles) {
+			if (!d.is_dir) continue;
+			const rel = d.relative_path.replace(/\\/g, '/');
+			if (rel.includes('/')) continue;
+			const lower = rel.toLowerCase();
+			if (lower === 'config' || lower === '.config' || lower === 'video' || lower === 'subtitles') {
+				continue;
+			}
+			if (!otherMap.has(rel)) otherMap.set(rel, []);
+		}
+		out.other = Array.from(otherMap.entries())
+			.map(([folder, files]) => ({ folder, files }))
+			.sort((a, b) => a.folder.localeCompare(b.folder));
 		return out;
 	}, [currentProject, projectDiskFiles]);
 
@@ -1206,6 +1247,56 @@ export default function App() {
 		const out = joinProjectPath(project.path, 'subtitles', `${stem}.srt`);
 		await projectService.exportSubtitles(project.path, fileId, 'srt', out);
 	}, []);
+
+	// сохраняет готовый пересказ эпизода в state + project.json
+	// общая часть для всех мест где пересказ уже есть (не нужно звать gpt повторно)
+	const persistEpisodeSummary = useCallback(async (fileId: string, summary: string) => {
+		const clean = summary.trim();
+		if (!clean) return;
+		const latest = currentProjectRef.current;
+		if (!latest) return;
+		const file = latest.files.find((f) => f.id === fileId);
+		if (!file || file.file_type !== 'Subtitle') return;
+		const now = new Date().toISOString();
+		const next: ProjectData = {
+			...latest,
+			files: latest.files.map((f) =>
+				f.id === fileId ? { ...f, summary: clean, updated_at: now } : f
+			)
+		};
+		try {
+			await projectService.save(next);
+			currentProjectRef.current = next;
+			setCurrentProject(next);
+		} catch (e) {
+			console.warn('[summary] не удалось сохранить пересказ эпизода', fileId, e);
+		}
+	}, []);
+
+	// генерирует краткий пересказ эпизода через gpt и сохраняет в проект
+	// нужен агенту чтобы не получать полный текст эпизода в системный промпт каждый раз
+	// force=true перегенерирует даже если пересказ уже есть
+	const summarizeAndPersistEpisode = useCallback(
+		async (fileId: string, opts?: { force?: boolean }) => {
+			const cp = currentProjectRef.current;
+			if (!cp) return;
+			const file = cp.files.find((f) => f.id === fileId);
+			if (!file || file.file_type !== 'Subtitle') return;
+			const segments = file.subtitle_segments ?? [];
+			if (segments.length === 0) return;
+			if (!opts?.force && (file.summary ?? '').trim().length > 0) return;
+			try {
+				const summary = (
+					await projectService.summarizeEpisode(segments, cp.target_language ?? null)
+				).trim();
+				if (!summary) return;
+				await persistEpisodeSummary(fileId, summary);
+			} catch (e) {
+				console.warn('[summary] не удалось сгенерировать пересказ эпизода', fileId, e);
+			}
+		},
+		[persistEpisodeSummary]
+	);
 
 	const handleSaveProject = useCallback(async (): Promise<boolean> => {
 		flushSubtitleEditorToProject();
@@ -1730,18 +1821,19 @@ export default function App() {
 				}
 				await projectService.extractAudioFromVideo(videoPath, audioOut);
 				setAiBusy({ operation: 'transcribe', stage: 'transcribe' });
-				const projectForPrompt = await projectService.open(cp.path);
 				const isoLang =
 					RETRANSCRIBE_LANGUAGE_ISO[opts.sourceLanguage] ??
 					(opts.sourceLanguage.trim().length === 2
 						? opts.sourceLanguage.trim().toLowerCase()
 						: undefined);
 				const userPrompt = opts.userPrompt.trim();
+				// глоссарий из памяти - чтобы несохранённые правки тоже шли в промпт
+				const glossaryForPrompt = (currentProjectRef.current?.glossary ?? cp.glossary ?? []).slice();
 				const rawSegments = await projectService.transcribeAudio(
 					audioOut,
 					isoLang,
 					userPrompt.length > 0 ? userPrompt : undefined,
-					projectForPrompt.glossary ?? []
+					glossaryForPrompt
 				);
 				if (rawSegments.length === 0) {
 					throw new Error('Whisper returned no segments.');
@@ -1787,11 +1879,15 @@ export default function App() {
 					resolveIsoLanguage(opts.sourceLanguage) ??
 					resolveIsoLanguage(projectWithSegments.target_language) ??
 					'en';
+				// meaning_context всегда на target-языке проекта
+				const meaningCtxIso =
+					resolveIsoLanguage(projectWithSegments.target_language) ?? 'en';
 				const projectWithGlossary = await applyAutoGlossaryToProject(
 					cp.path,
 					segments,
 					{
 						targetLanguageIso: glossaryLangIso,
+						meaningContextLanguageIso: meaningCtxIso,
 						contextPrompt: opts.userPrompt,
 						fillTranslation: false
 					}
@@ -1917,6 +2013,8 @@ export default function App() {
 			setGeneratedSegments(nextSegments);
 			markProjectDirty();
 			void exportSrtForProject(next, fileId).catch((e) => console.error('SRT export after translate', e));
+			// перегенерируем пересказ эпизода - перевод изменил содержание
+			void summarizeAndPersistEpisode(fileId, { force: true });
 			setAiBusy(null);
 		} catch (err) {
 			const detail = err instanceof Error ? err.message : String(err);
@@ -1924,7 +2022,7 @@ export default function App() {
 			setAiBusy(null);
 		}
 	},
-		[activeSubtitleFileId, ensureApiKeyForAi, exportSrtForProject, markProjectDirty, pushSubtitleHistorySnapshot, t]
+		[activeSubtitleFileId, ensureApiKeyForAi, exportSrtForProject, markProjectDirty, pushSubtitleHistorySnapshot, summarizeAndPersistEpisode, t]
 	);
 
 	const handleDeleteEpisode = useCallback(async (videoFile: ProjectFile) => {
@@ -2710,48 +2808,69 @@ export default function App() {
 				return;
 			}
 
-			const changesText = changes
-				.map((change, index) => {
-					const parts: string[] = [];
-					if (change.oldSource && change.newSource && change.oldSource !== change.newSource) {
-						parts.push(`Original text: "${change.oldSource}" -> "${change.newSource}"`);
-					}
-					if (change.oldTarget && change.newTarget && change.oldTarget !== change.newTarget) {
-						parts.push(`Translation: "${change.oldTarget}" -> "${change.newTarget}"`);
-					}
-					if (parts.length === 0) return '';
-					const ctx = change.newContext || change.oldContext;
-					if (ctx) parts.push(`Context: ${ctx}`);
-					return `${index + 1}. ${parts.join('; ')}`;
+			// берем контекст (meaning/context) из изменения глоссария
+			// приоритет у нового значения, fallback на старое - на случай если пользователь
+			// его не менял а только переименовал термин
+			const pickContext = (c: GlossaryReplacementChange): string => {
+				const nc = (c.newContext ?? '').trim();
+				if (nc) return nc;
+				return (c.oldContext ?? '').trim();
+			};
+			const translationReplacements = changes
+				.filter(
+					(c) => c.oldTarget && c.newTarget && c.oldTarget.trim() !== c.newTarget.trim()
+				)
+				.map((c) => ({
+					from: c.oldTarget.trim(),
+					to: c.newTarget.trim(),
+					context: pickContext(c)
+				}));
+			const originalReplacements = changes
+				.filter(
+					(c) => c.oldSource && c.newSource && c.oldSource.trim() !== c.newSource.trim()
+				)
+				.map((c) => ({
+					from: c.oldSource.trim(),
+					to: c.newSource.trim(),
+					context: pickContext(c)
+				}));
+
+			const allPairs = [
+				...translationReplacements.map((r) => ({ ...r, field: 'translation' as const })),
+				...originalReplacements.map((r) => ({ ...r, field: 'text' as const }))
+			];
+			const pairsBlock = allPairs
+				.map((r, i) => {
+					const ctx = r.context ? `  | контекст: ${r.context}` : '';
+					return `${i + 1}. "${r.from}" → "${r.to}"${ctx}`;
 				})
-				.filter((line) => line.length > 0)
 				.join('\n');
 
 			const glossaryIntent = intentFromGlossaryChanges(changes);
 
-			const replaceNote =
-				glossaryIntent.task_mode === 'bulk_replace' &&
-				glossaryIntent.replace_from &&
-				glossaryIntent.replace_to
-					? `\nГлавная замена в переводе: «${glossaryIntent.replace_from}» → «${glossaryIntent.replace_to}» (все падежи и словоформы этого имени/термина).${
-							glossaryIntent.translation_only
-								? ' Только поле translation; text (оригинал) не менять.'
-								: ''
-						}\n`
-					: '';
+			const hiddenPrompt = `Замени слова в поле translation реплик пакета. Никаких других правок.
 
-			const hiddenPrompt = `Примени изменения глоссария ко всем подходящим репликам в этом эпизоде.
+Список замен:
+${pairsBlock}
 
-Изменения глоссария:
-${changesText}
-${replaceNote}
+После пары может идти "| контекст: ..." с подсказкой о термине (тип, пол/род персонажа, склоняется/не склоняется, особенности). Используй её при подборе формы Y И при согласовании окружающих слов в фразе.
+
+Алгоритм (повтори для каждой реплики из списка пакета):
+1. Возьми текущее значение translation у этой реплики (из контекста выше).
+2. Проверь по очереди каждую пару из списка. X в реплике может стоять В ЛЮБОЙ ФОРМЕ: с другим окончанием, в другом падеже, числе, роде. Если базовая часть слова (корень X) совпадает - это вхождение X, его НАДО заменить.
+3. При замене ставь Y вместо X. Если в контексте сказано "не склоняется" (или Y - другая письменность/аббревиатура/заимствование без типичных окончаний) - подставь Y как есть, без окончаний. Иначе согласуй Y по падежу, числу и роду с фразой.
+4. ОБНОВЛЕНИЕ РОДА. Если в контексте указан род/пол термина (мужской/женский/средний или male/female), а в исходной реплике глаголы, прилагательные, причастия, местоимения согласованы с ДРУГИМ родом - перепиши их под род из контекста. Меняй именно те слова, которые грамматически относятся к этому термину. Не трогай слова, относящиеся к другим действующим лицам реплики.
+5. Если ни одна пара ничего не поменяла И никакого согласования рода не потребовалось - реплику НЕ включай в ответ. Если что-то поменяла - верни {"id": <id>, "translation": "<новое значение>"}.
+
 Правила:
-- Меняй ТОЛЬКО реплики, где встречается старая формулировка из глоссария (или её словоформа/падеж).
-- Не подставляй новый термин вместо других слов (никто, другие имена, похожие по звучанию слова — не трогать).
-- Учитывай Context термина (имя, род, склонение).
-- Для имён в переводе: правильное склонение по фразе (падеж, с/со), особые формы языка, не «lemma + окончание».
-- Если в изменении указан только Translation — меняй только translation; только Original — только text.
-- Верни только изменённые сегменты (id + изменённые поля). message оставь пустым.`;
+- Возвращай НОВОЕ значение translation целиком (с уже подставленными Y и переработанными согласованиями). Не возвращай старое значение.
+- В ответе только id и translation. Поле text не указывай никогда.
+- Язык translation после замены - такой же как до замены. Не переводи фразу на другой язык, не перефразируй, не сокращай.
+- Не трогай похожие слова, частичные совпадения, другие имена.
+- Пройдись ПО ВСЕМ репликам пакета по очереди, не пропускай.
+
+Формат ответа: один JSON {"message":"","actions":[{"type":"edit_segments","file_id":"<file_id>","segments":[ ... ]}]}.
+После JSON ничего не пиши.`;
 
 			setIsAgentBusy(true);
 			setAgentBatchProgress(null);
@@ -2781,7 +2900,8 @@ ${replaceNote}
 								current: c,
 								total: t,
 								label: file.name
-							})
+							}),
+						onSummaryReady: (fid, sum) => persistEpisodeSummary(fid, sum)
 					});
 					allActions.push(...fileActions);
 				}
@@ -2963,13 +3083,29 @@ ${replaceNote}
 			const allActions: AgentAction[] = [];
 			let assistantMessage = '';
 
+			// для обычного диалога (привет, как дела, объясни) пакеты не нужны - там один файл и одно сообщение
+			// показывать пачку 1 из 1 только когда реально пакетная задача или мультиэпизод
+			// внутри runAgentChatOnSubtitleFile useBatch=true если запрос whole-file (например "удали галлюцинации")
+			// или если эпизод большой - тогда тоже включаем прогресс
+			const isWholeFile = isWholeFileAgentRequest(messageForAgent);
+			const anyBigFile = targetFiles.some((f) => f.segments.length > AGENT_BATCH_SIZE);
+			const showBatchProgress =
+				targetFiles.length > 1 ||
+				intent.task_mode === 'bulk_replace' ||
+				intent.task_mode === 'glossary_sync' ||
+				intent.task_mode === 'proofread' ||
+				intent.task_mode === 'translation_fix' ||
+				(isWholeFile && anyBigFile);
+
 			for (let fi = 0; fi < targetFiles.length; fi++) {
 				const file = targetFiles[fi];
-				setAgentBatchProgress({
-					current: fi + 1,
-					total: targetFiles.length,
-					label: file.name
-				});
+				if (showBatchProgress) {
+					setAgentBatchProgress({
+						current: fi + 1,
+						total: targetFiles.length,
+						label: file.name
+					});
+				}
 				const { actions, message } = await runAgentChatOnSubtitleFile({
 					messageForAgent,
 					file,
@@ -2983,12 +3119,15 @@ ${replaceNote}
 					conversationHistory: history,
 					hasAttachedSegment: !!attached,
 					focusSegmentId: attached?.id ?? null,
-					onBatchProgress: (c, t) =>
+					onBatchProgress: (c, t) => {
+						if (!showBatchProgress) return;
 						setAgentBatchProgress({
 							current: c,
 							total: t,
 							label: file.name
-						})
+						});
+					},
+					onSummaryReady: (fid, sum) => persistEpisodeSummary(fid, sum)
 				});
 				if (message.trim()) assistantMessage = message.trim();
 				allActions.push(...actions);
@@ -3575,8 +3714,8 @@ ${replaceNote}
 					RETRANSCRIBE_LANGUAGE_ISO[opts.sourceLanguage] ??
 					(opts.sourceLanguage.trim().length === 2 ? opts.sourceLanguage.trim().toLowerCase() : undefined);
 				const userPromptTrimmed = opts.userPrompt.trim();
-				const projectForPrompt = await projectService.open(cp.path);
-				const glossary = projectForPrompt.glossary ?? [];
+				// глоссарий из памяти - в нём свежие правки которые ещё не на диске
+				const glossary = (currentProjectRef.current?.glossary ?? cp.glossary ?? []).slice();
 
 				const baseList = segmentsRef.current;
 				const remaining = baseList.filter((s) => !(s.start < hi && s.end > lo));
@@ -3671,6 +3810,8 @@ ${replaceNote}
 				setTimelineInsertRange(null);
 				const firstNewIdx = merged.findIndex((s) => s.id === newSegments[0]?.id);
 				if (firstNewIdx >= 0) setSelectedSegmentIndex(firstNewIdx);
+				// после ретранскрипции/перевода кусков обновляем пересказ
+				void summarizeAndPersistEpisode(fileId, { force: true });
 				setRetranscribeBusy(null);
 			} catch (err) {
 				console.error('retranscribe range', err);
@@ -4912,8 +5053,12 @@ ${replaceNote}
 														subItem.onChange(!subItem.checked);
 													}}
 												>
-													<span className="w-3 shrink-0 text-center leading-none">
-														{subItem.checked ? 'вњ“' : ''}
+													<span className="w-3 shrink-0 text-center leading-none flex items-center justify-center">
+														{subItem.checked ? (
+															<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+																<path d="M3 8.5l3.5 3.5L13 5" />
+															</svg>
+														) : null}
 													</span>
 													<span>{subItem.label}</span>
 												</button>
@@ -5172,7 +5317,7 @@ ${replaceNote}
 							>
 								{isConfigFolderOpen ? <ChevronDown size={12} className="text-text-primary/70 shrink-0" /> : <ChevronRight size={12} className="text-text-primary/70 shrink-0" />}
 								<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
-									.config
+									config
 								</span>
 							</div>
 
@@ -5316,6 +5461,79 @@ ${replaceNote}
 									</div>
 								)}
 							</div>
+
+							{treeFiles.other.map((bucket) => {
+								const open = openExtraFolders.has(bucket.folder);
+								return (
+									<div className="flex flex-col gap-[8px]" key={`extra_${bucket.folder}`}>
+										<div
+											className={`flex items-center gap-[8px] cursor-pointer h-4 rounded-[3px] ${
+												selectedTreeItem?.kind === 'folder' &&
+												selectedTreeItem.name === bucket.folder
+													? 'bg-inline-bg'
+													: ''
+											}`}
+											onClick={() => {
+												setOpenExtraFolders((prev) => {
+													const next = new Set(prev);
+													if (next.has(bucket.folder)) next.delete(bucket.folder);
+													else next.add(bucket.folder);
+													return next;
+												});
+												setSelectedTreeItem({ kind: 'folder', name: bucket.folder });
+											}}
+										>
+											{open ? (
+												<ChevronDown
+													size={12}
+													className="text-text-primary/70 shrink-0"
+												/>
+											) : (
+												<ChevronRight
+													size={12}
+													className="text-text-primary/70 shrink-0"
+												/>
+											)}
+											<span className="font-inter font-semibold text-[12px] leading-none text-text-primary tracking-normal">
+												{bucket.folder}
+											</span>
+										</div>
+										{open && bucket.files.length > 0 && (
+											<div className="flex gap-[11px] ml-[5px]">
+												<div className="w-[1px] bg-border-default shrink-0" />
+												<div className="flex flex-col gap-[8px] flex-1">
+													{bucket.files.map((file) => (
+														<ProjectTreeFileRow
+															key={file.id}
+															file={file}
+															selected={
+																selectedTreeItem?.kind === 'file' &&
+																selectedTreeItem.id === file.id
+															}
+															active={isCompositionTreeFileActive(
+																currentProject,
+																activeSubtitleFileId,
+																file
+															)}
+															renaming={inlineRenameFileId === file.id}
+															renameDraft={
+																inlineRenameFileId === file.id ? inlineRenameDraft : ''
+															}
+															onRenameDraftChange={setInlineRenameDraft}
+															onClick={() =>
+																setSelectedTreeItem({ kind: 'file', id: file.id })
+															}
+															onContextMenu={(e) => openProjectFileContextMenu(e, file)}
+															onCommitRename={() => void commitInlineRename()}
+															onCancelRename={cancelInlineRename}
+														/>
+													))}
+												</div>
+											</div>
+										)}
+									</div>
+								);
+							})}
 
 							{treeFiles.root.map((file) => (
 								<div
@@ -6212,6 +6430,8 @@ ${replaceNote}
 												joinProjectPath(project.path, 'subtitles', `${stem}.srt`)
 											)
 											.catch((e) => console.error('Initial SRT export failed', e));
+										// в конце мастера генерируем пересказ эпизода - нужен агенту
+										void summarizeAndPersistEpisode(withSeg.id, { force: true });
 									}
 								}}
 							/>

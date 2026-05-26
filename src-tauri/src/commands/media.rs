@@ -16,19 +16,18 @@ pub async fn extract_audio_from_video(
         return Err(format!("Видео файл не найден: {}", video_path));
     }
     
-    // Создаём директорию для выходного файла
+    // создаём папку под выходной файл
     let output_path_buf = Path::new(&output_path);
     if let Some(parent) = output_path_buf.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     
-    // ffmpeg?
-    let ffmpeg_available = is_ffmpeg_available().await;
-    if !ffmpeg_available {
-        return Err("FFmpeg не установлен в системе".to_string());
+    // ffmpeg есть?
+    if !crate::ffmpeg_util::is_ffmpeg_available().await {
+        return Err(crate::ffmpeg_util::ffmpeg_missing_message());
     }
-    
-    let mut cmd = Command::new("ffmpeg");
+
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
     cmd.arg("-i")
         .arg(&video_path)
         .arg("-vn")
@@ -44,22 +43,23 @@ pub async fn extract_audio_from_video(
         .arg(&output_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
 
     println!(
         "Выполнение команды: ffmpeg -i {} -vn -ac 1 -ar 16000 -acodec libmp3lame -b:a 64k -y {}",
         video_path, output_path
     );
     
-    // Запускаем процесс
+    // запускаем
     let output = cmd.output().await.map_err(|e| {
         format!("Ошибка запуска FFmpeg: {}", e)
     })?;
     
-    // ok?
+    // ок?
     if output.status.success() {
         println!("Аудио успешно извлечено: {}", output_path);
         
-        // не пустой файл
+        // файл не пустой
         if output_path_buf.exists() {
             let metadata = std::fs::metadata(&output_path).map_err(|e| e.to_string())?;
             if metadata.len() > 0 {
@@ -105,14 +105,14 @@ pub async fn extract_audio_range(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    if !is_ffmpeg_available().await {
-        return Err("FFmpeg не установлен в системе".to_string());
+    if !crate::ffmpeg_util::is_ffmpeg_available().await {
+        return Err(crate::ffmpeg_util::ffmpeg_missing_message());
     }
 
     let safe_start = start_seconds.max(0.0);
     let duration = (end_seconds - safe_start).max(0.05);
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
     cmd.arg("-ss")
         .arg(format!("{:.3}", safe_start))
         .arg("-i")
@@ -132,6 +132,7 @@ pub async fn extract_audio_range(
         .arg(&output_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
 
     let output = cmd
         .output()
@@ -159,22 +160,7 @@ pub async fn extract_audio_range(
     }
 }
 
-// ffmpeg есть?
-async fn is_ffmpeg_available() -> bool {
-    let output = Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-    
-    match output {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
-    }
-}
-
-// ffprobe инфо
+// инфо через ffprobe
 #[tauri::command]
 pub async fn get_media_info(video_path: String) -> Result<MediaInfo, String> {
     let video_path_buf = Path::new(&video_path);
@@ -182,13 +168,12 @@ pub async fn get_media_info(video_path: String) -> Result<MediaInfo, String> {
         return Err(format!("Файл не найден: {}", video_path));
     }
     
-    // ffprobe?
-    let ffprobe_available = is_ffprobe_available().await;
-    if !ffprobe_available {
-        return Err("FFprobe не доступен. Убедитесь, что FFmpeg установлен.".to_string());
+    // ffprobe есть?
+    if !crate::ffmpeg_util::is_ffprobe_available().await {
+        return Err(crate::ffmpeg_util::ffmpeg_missing_message());
     }
-    
-    let mut cmd = Command::new("ffprobe");
+
+    let mut cmd = Command::new(crate::ffmpeg_util::ffprobe_program());
     cmd.arg("-v")
         .arg("quiet")
         .arg("-print_format")
@@ -198,7 +183,8 @@ pub async fn get_media_info(video_path: String) -> Result<MediaInfo, String> {
         .arg(&video_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
+
     let output = cmd.output().await.map_err(|e| format!("Ошибка ffprobe: {}", e))?;
     
     if output.status.success() {
@@ -211,19 +197,6 @@ pub async fn get_media_info(video_path: String) -> Result<MediaInfo, String> {
     }
 }
 
-async fn is_ffprobe_available() -> bool {
-    let output = Command::new("ffprobe")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-    
-    match output {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
-    }
-}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaInfo {

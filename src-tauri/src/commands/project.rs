@@ -15,8 +15,10 @@ pub async fn create_project(
     
     let project = Project::create_new(name, path, target_language)?;
     project.save_to_file(&app_handle)?;
-    
+
+    crate::debug_log::set_active_project(Path::new(&project.path));
     println!("Проект '{}' создан", project.name);
+    crate::debug_log::log_line(&format!("Проект '{}' создан", project.name));
     Ok(project)
 }
 
@@ -241,7 +243,7 @@ pub async fn insert_subtitle_segment(
             .position(|s| (s.start - start).abs() < 1e-9 && (s.end - end).abs() < 1e-9)
             .ok_or_else(|| "Не удалось сопоставить вставленный сегмент".to_string())?;
 
-        // id 1..n по start после вставки
+        // перенумеровываем 1..n по start после вставки
         for (i, seg) in segments.iter_mut().enumerate() {
             seg.id = (i + 1) as u32;
         }

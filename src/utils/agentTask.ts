@@ -92,12 +92,14 @@ export function agentContextFromIntent(intent: AgentIntent): {
 	replace_from?: string | null;
 	replace_to?: string | null;
 	translation_only?: boolean;
+	replace_pairs?: { from: string; to: string }[] | null;
 } {
 	return {
 		task_mode: intent.task_mode,
 		replace_from: intent.replace_from ?? null,
 		replace_to: intent.replace_to ?? null,
-		translation_only: intent.translation_only ?? false
+		translation_only: intent.translation_only ?? false,
+		replace_pairs: intent.replace_pairs ?? null
 	};
 }
 

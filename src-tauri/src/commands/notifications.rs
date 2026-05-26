@@ -15,8 +15,8 @@ pub struct Notification {
     pub title: String,
     pub message: String,
     pub notification_type: NotificationType,
-    pub duration: Option<u32>, // В миллисекундах
-    pub progress: Option<f64>, // 0.0-1.0
+    pub duration: Option<u32>, // в мс
+    pub progress: Option<f64>, // 0..1
 }
 
 #[tauri::command]
@@ -24,7 +24,7 @@ pub async fn show_notification(
     notification: Notification,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Отправляем уведомление во фронтенд
+    // кидаем уведомление во фронт
     app_handle.emit("show_notification", &notification)
         .map_err(|e| format!("Ошибка отправки уведомления: {}", e))?;
     
@@ -38,7 +38,7 @@ pub async fn log_message(
     context: Option<serde_json::Value>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Логируем сообщение
+    // печатаем в консоль
     match level.as_str() {
         "info" => println!("ℹ️ {}", message),
         "warn" => println!("⚠️ {}", message),
@@ -47,7 +47,7 @@ pub async fn log_message(
         _ => println!("📝 {}", message),
     }
     
-    // Отправляем лог во фронтенд для отображения
+    // и шлём событие во фронт чтобы показать
     let log_entry = serde_json::json!({
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "level": level,

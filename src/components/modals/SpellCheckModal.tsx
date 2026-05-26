@@ -13,11 +13,11 @@ import {
 } from '../../utils/spellcheck';
 import { DraggableModalShell } from './DraggableModalShell';
 
-/** Как кнопки «Найти / Заменить» в FindReplaceModal */
+// как кнопки найти / заменить в FindReplaceModal
 const FR_ACTION_BTN =
 	'h-[24px] px-[12px] py-[4px] bg-secondary-main hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none text-caption text-text-primary rounded-sm transition-colors font-medium whitespace-nowrap flex items-center justify-center';
 
-/** Как «Спросить агента» */
+// как кнопка спросить агента
 const CHANGE_BTN =
 	'w-full h-[24px] py-[4px] bg-primary-main hover:bg-primary-hover disabled:opacity-40 disabled:pointer-events-none text-white text-caption rounded-sm transition-colors font-medium flex items-center justify-center';
 
@@ -265,7 +265,7 @@ export const SpellCheckModal: React.FC<SpellCheckModalProps> = ({
 	);
 };
 
-/** Показать индикатор загрузки во время предварительного сканирования. */
+// показываем спиннер пока идёт первичный скан
 export function SpellCheckLoadingOverlay({
 	progress
 }: {

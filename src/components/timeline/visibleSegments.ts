@@ -1,6 +1,6 @@
 import type { SubtitleSegment } from '../../services/projectService';
 
-/** Сегменты, пересекающие [timeStart, timeEnd] (sorted по start). */
+// сегменты, которые попадают в [timeStart, timeEnd], отсортированные по start
 export function visibleTimelineSegments(
 	sorted: SubtitleSegment[],
 	timeStart: number,
@@ -25,7 +25,7 @@ export function visibleTimelineSegments(
 	return out;
 }
 
-/** Доля длительности (0…1) под курсором в области скролла таймлайна. */
+// доля длительности 0..1 под курсором в скролле таймлайна
 export function timelineRatioAtClientX(
 	clientX: number,
 	scrollEl: HTMLElement,
@@ -39,7 +39,7 @@ export function timelineRatioAtClientX(
 	return Math.max(0, Math.min(1, xOnInner / innerW));
 }
 
-/** Якорь зума по центру видимой области таймлайна. */
+// якорь зума по центру видимой области таймлайна
 export function timelineRatioAtViewportCenter(
 	scrollEl: HTMLElement,
 	innerEl: HTMLElement

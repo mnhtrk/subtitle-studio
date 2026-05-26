@@ -23,7 +23,7 @@ pub struct VadParams {
 }
 
 impl Default for VadParams {
-    // threshold ниже = раньше старт речи; speech_pad — запас до/после Silero (первые слоги не обрезаются)
+    // threshold ниже - раньше старт речи; speech_pad запас до и после silero чтобы не отрезать первые слоги
     fn default() -> Self {
         Self {
             speech_pad_ms: 550,
@@ -34,7 +34,7 @@ impl Default for VadParams {
     }
 }
 
-/// Склеивает соседние VAD-куски, если пауза между ними короче max_gap_sec (речь в паузе не теряется).
+// склеиваем соседние vad куски если пауза между ними короче max_gap_sec, чтобы не терять речь в паузе
 pub fn merge_nearby_speech_segments(
     segments: &[SpeechSegment],
     max_gap_sec: f64,
@@ -58,7 +58,8 @@ pub fn merge_nearby_speech_segments(
     out
 }
 
-/// Запас до/после Silero без пересечения соседних кусков (иначе Whisper дублирует начало реплики).
+// добавляем запас до и после silero, без пересечения с соседними кусками
+// иначе whisper будет дублировать начало реплики
 pub fn expand_speech_margins(
     segments: &[SpeechSegment],
     pre_sec: f64,
@@ -91,7 +92,7 @@ pub fn expand_speech_margins(
     out
 }
 
-/// Логирует пересечения диапазонов, уходящих в Whisper (должно быть пусто после expand_speech_margins).
+// логируем пересечения кусков уходящих в whisper, после expand_speech_margins должно быть пусто
 pub fn log_vad_whisper_overlap(segments: &[SpeechSegment]) {
     for w in segments.windows(2) {
         let overlap = w[0].end - w[1].start;
@@ -109,19 +110,28 @@ pub async fn detect_speech_segments(
     params: VadParams,
 ) -> Result<Vec<SpeechSegment>, String> {
     let paths = crate::ml_sidecar::resolve_script("vad.py")?;
-    println!(
-        "[vad] sidecar python={:?} script={:?}",
-        paths.python_exe, paths.script_path
-    );
+    crate::debug_log::log_line(&format!(
+        "[vad] sidecar python={} script={}",
+        paths.python_exe.display(),
+        paths.script_path.display()
+    ));
+    crate::debug_log::log_line(&format!(
+        "[vad] старт детекции: audio={} threshold={:.3} pad={}ms minSpeech={}ms",
+        audio_path.display(),
+        params.threshold,
+        params.speech_pad_ms,
+        params.min_speech_duration_ms,
+    ));
 
-    let mut child = Command::new(&paths.python_exe)
+    let mut child = Command::new(&paths.python_exe);
+    child
         .arg(&paths.script_path)
         .current_dir(&paths.work_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("PYTHONIOENCODING", "utf-8")
-        .env("PYTHONUNBUFFERED", "1")
+        .stderr(Stdio::piped());
+    crate::ml_sidecar::apply_python_env(&mut child);
+    let mut child = child
         .spawn()
         .map_err(|e| format!("Не удалось запустить VAD sidecar: {}", e))?;
 
@@ -142,7 +152,7 @@ pub async fn detect_speech_segments(
 
     let mut reader = BufReader::new(stdout).lines();
 
-    // ждем пока silero подгрузится
+    // ждём пока silero загрузится
     let t_init = std::time::Instant::now();
     loop {
         ai_cancel::check_ai_operation_cancelled()?;
@@ -220,14 +230,14 @@ pub async fn detect_speech_segments(
                     .get("duration_sec")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0);
-                println!(
+                crate::debug_log::log_line(&format!(
                     "[vad] получено {} сегментов, речь {:.2}s/{:.2}s ({:.1}%) за {:.2}s",
                     parsed.len(),
                     total,
                     dur,
                     if dur > 0.0 { total / dur * 100.0 } else { 0.0 },
                     t_detect.elapsed().as_secs_f32(),
-                );
+                ));
                 segments = parsed;
                 break;
             }
@@ -340,9 +350,9 @@ pub async fn extract_segment_audio(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    // -ss после -i: точнее начало куска (важно для первых слогов реплики)
-    let status = Command::new("ffmpeg")
-        .arg("-y")
+    // -ss после -i - точнее начало куска, важно чтобы не отрезать первые слоги
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
+    cmd.arg("-y")
         .arg("-loglevel")
         .arg("error")
         .arg("-i")
@@ -362,7 +372,9 @@ pub async fn extract_segment_audio(
         .arg("64k")
         .arg(output)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
+    let status = cmd
         .status()
         .await
         .map_err(|e| format!("ffmpeg extract: {}", e))?;

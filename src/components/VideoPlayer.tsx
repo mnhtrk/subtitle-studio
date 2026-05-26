@@ -12,7 +12,7 @@ export type VideoPlayerProps = {
 	onPlayingChange: (playing: boolean) => void;
 	onVolumeFromElement: (volume: number) => void;
 	onError: () => void;
-	/** Синхронизация UI с реальным кадром (requestVideoFrameCallback или RAF). */
+	// синхронизация UI с реальным кадром (requestVideoFrameCallback или raf)
 	onFrameTime: (time: number) => void;
 	onSeeked: (time: number) => void;
 	onPlayStart?: () => void;

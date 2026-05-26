@@ -1,6 +1,6 @@
 import type { SubtitleSegment } from '../services/projectService';
 
-export const AGENT_NEIGHBOR_RADIUS = 5;
+export const AGENT_NEIGHBOR_RADIUS = 10;
 
 export function formatSpeakerGenderForAgent(gender?: string | null): string {
 	if (gender === 'male' || gender === 'female') return gender;
@@ -8,7 +8,7 @@ export function formatSpeakerGenderForAgent(gender?: string | null): string {
 }
 export const AGENT_BATCH_SIZE = 40;
 
-// правка всего эпизода - пакетами, при «весь проект» - по файлам
+// правка всего эпизода идёт пакетами, для весь проект - перебираем файлы
 export function isWholeFileAgentRequest(text: string): boolean {
 	const t = text.toLowerCase();
 	return (

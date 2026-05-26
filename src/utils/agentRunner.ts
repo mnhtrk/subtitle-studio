@@ -7,7 +7,7 @@ import {
 	type ConversationTurn,
 	type SubtitleFileContext
 } from '../services/agentService';
-import type { GlossaryEntry, SubtitleSegment } from '../services/projectService';
+import { projectService, type GlossaryEntry, type SubtitleSegment } from '../services/projectService';
 import { deleteSegmentsByIdsWithRemoved } from './subtitleSegmentsLocal';
 import {
 	AGENT_BATCH_SIZE,
@@ -22,8 +22,34 @@ export function buildSubtitleFileContexts(files: SubtitleFileBundle[]): Subtitle
 	return files.map((f) => ({
 		file_id: f.id,
 		file_name: f.name,
-		segments: f.segments
+		segments: f.segments,
+		summary: f.summary ?? null
 	}));
+}
+
+// гарантирует что у эпизода есть пересказ
+// если уже есть - вернёт его как есть; если нет - сгенерит через gpt и вернёт
+// вызывающий код должен сам сохранить summary в проект (callback onSummaryReady)
+export async function ensureEpisodeSummary(
+	file: SubtitleFileBundle,
+	targetLanguage: string | null,
+	onSummaryReady?: (fileId: string, summary: string) => void | Promise<void>
+): Promise<string | null> {
+	const existing = (file.summary ?? '').trim();
+	if (existing) return existing;
+	if (!file.segments || file.segments.length === 0) return null;
+	try {
+		const summary = (await projectService.summarizeEpisode(file.segments, targetLanguage)).trim();
+		if (!summary) return null;
+		file.summary = summary;
+		if (onSummaryReady) {
+			await onSummaryReady(file.id, summary);
+		}
+		return summary;
+	} catch (e) {
+		console.warn('[agent] не удалось сгенерировать пересказ эпизода', file.name, e);
+		return null;
+	}
 }
 
 export function agentContextForEpisode(params: {
@@ -76,6 +102,8 @@ export async function runAgentChatOnSubtitleFile(params: {
 	hasAttachedSegment: boolean;
 	focusSegmentId?: number | null;
 	onBatchProgress?: (current: number, total: number) => void;
+	// колбэк для сохранения сгенеренного пересказа в проект (state + project.json на диске)
+	onSummaryReady?: (fileId: string, summary: string) => void | Promise<void>;
 }): Promise<{ actions: AgentAction[]; message: string }> {
 	const {
 		messageForAgent,
@@ -90,8 +118,22 @@ export async function runAgentChatOnSubtitleFile(params: {
 		conversationHistory,
 		hasAttachedSegment,
 		focusSegmentId,
-		onBatchProgress
+		onBatchProgress,
+		onSummaryReady
 	} = params;
+
+	// гарантируем что у активного эпизода есть пересказ (фолбэк если не сгенерили после перевода)
+	await ensureEpisodeSummary(file, targetLanguage, onSummaryReady);
+	// для остальных эпизодов проекта тоже подтягиваем пересказы (нужны для общего контекста)
+	// делаем параллельно и не падаем при ошибках отдельных эпизодов; один раз - потом в project.json
+	const otherWithoutSummary = allFiles.filter(
+		(f) => f.id !== file.id && !(f.summary ?? '').trim() && (f.segments?.length ?? 0) > 0
+	);
+	if (otherWithoutSummary.length > 0) {
+		await Promise.allSettled(
+			otherWithoutSummary.map((f) => ensureEpisodeSummary(f, targetLanguage, onSummaryReady))
+		);
+	}
 
 	const neighborRadius = hasAttachedSegment || focusSegmentId != null ? AGENT_NEIGHBOR_RADIUS : 0;
 
@@ -136,9 +178,8 @@ export async function runAgentChatOnSubtitleFile(params: {
 		};
 	}
 
-	const batchSize =
-		intent.task_mode === 'proofread' || intent.task_mode === 'translation_fix' ? 20 : AGENT_BATCH_SIZE;
-	const batches = chunkSubtitleSegments(file.segments, batchSize);
+	// размер пачки одинаковый для всех режимов агента - так быстрее и предсказуемо
+	const batches = chunkSubtitleSegments(file.segments, AGENT_BATCH_SIZE);
 	const collected: AgentAction[] = [];
 	let working = file.segments;
 	let lastMessage = '';
@@ -148,27 +189,16 @@ export async function runAgentChatOnSubtitleFile(params: {
 		const ids = batch.map((s) => s.id);
 		onBatchProgress?.(i + 1, batches.length);
 
-		const replaceHint =
-			intent.task_mode === 'bulk_replace' && intent.replace_from && intent.replace_to
-				? `\nЗамена: «${intent.replace_from}» → «${intent.replace_to}». Все словоформы и падежи; для имён — грамматически верные формы (особые склонения, предлоги с/со), не подстановка «lemma + окончание».`
-				: '';
-
+		// подсказка для пачки. для всех режимов одинаковая структура - чтобы модель работала
+		// только по запросу пользователя и не правила "заодно" посторонние реплики
 		const proofreadBatchHint =
 			intent.task_mode === 'proofread'
-				? `\nПакет ${i + 1}/${batches.length}: проверь ВСЕ ${ids.length} реплик (id: ${ids.join(', ')}). \
-Для каждой — опечатки, пунктуация, точка в конце; только минимальная правка, без перефразирования. \
-Если реплика уже корректна — не включай id в edit_segments.\n`
+				? `\n\nПакет ${i + 1}/${batches.length}: ${ids.length} реплик. Применяй ТОЛЬКО запрошенную пользователем правку (опечатки/пунктуация/точка в конце). Если в пакете нет реплик попадающих под запрос - actions: []. Не правь по своему усмотрению.\nfile_id для edit_segments: "${file.id}".`
 				: intent.task_mode === 'translation_fix'
-					? `\nПакет ${i + 1}/${batches.length}: проверь ВСЕ ${ids.length} реплик (id: ${ids.join(', ')}). \
-Только поле translation, только явные ошибки перевода.\n`
-					: `\nПакет ${i + 1}/${batches.length}: обработай ВСЕ ${ids.length} реплик пакета (id: ${ids.join(', ')}). \
-Проверь каждый id из списка, не пропускай без просмотра.\n`;
+					? `\n\nПакет ${i + 1}/${batches.length}: ${ids.length} реплик. Применяй ТОЛЬКО ту правку перевода, что просил пользователь в сообщении. Не правь другие реплики "заодно". Если в пакете нет реплик попадающих под запрос - actions: [].\nfile_id для edit_segments: "${file.id}".`
+					: `\n\nПакет ${i + 1}/${batches.length} (${ids.length} реплик, id: ${ids.join(', ')}). Полный текст этих реплик дан в системном контексте под заголовком «Пакет ${i + 1}/${batches.length} - полный текст ВСЕХ реплик».\nРаботай ТОЛЬКО с этими id и ТОЛЬКО с тем, что просил пользователь. file_id для edit_segments: "${file.id}".`;
 
-		const batchPrompt = `${messageForAgent}${replaceHint}${proofreadBatchHint}
-
-ПАКЕТНАЯ ОБРАБОТКА: часть ${i + 1} из ${batches.length} (эпизод «${file.name}»).
-Полный текст всех реплик этого пакета — в контексте ниже (id: ${ids.join(', ')}).
-Если ни одна реплика пакета не требует правки — actions: [].`;
+		const batchPrompt = `${messageForAgent}${proofreadBatchHint}`;
 
 		console.log('[agent][debug] request', {
 			episode: file.name,

@@ -1,4 +1,4 @@
-use crate::project::{SpeakerGender, SubtitleSegment};
+use crate::project::{GlossaryEntry, SpeakerGender, SubtitleSegment};
 
 pub fn segment_speaker_gender_str(s: &SubtitleSegment) -> &'static str {
     match s.speaker_gender {
@@ -8,7 +8,76 @@ pub fn segment_speaker_gender_str(s: &SubtitleSegment) -> &'static str {
     }
 }
 
-/// Язык перевода из UI («Russian», «ru», «Русский») → ISO для правил рода.
+// достаёт пол персонажа из строки description/context глоссария
+// принимает любую форму - male/female/m/ж/мужчина/девочка и т.п.
+pub fn parse_gender_marker(s: &str) -> Option<&'static str> {
+    let l = s.to_lowercase();
+    let has_word = |w: &str| -> bool {
+        // ищем как подстроку, но рядом с границей слова (упрощённо)
+        if let Some(pos) = l.find(w) {
+            let before_ok = pos == 0
+                || !l.as_bytes()[pos - 1].is_ascii_alphanumeric();
+            let after = pos + w.len();
+            let after_ok = after >= l.len()
+                || !l.as_bytes()[after].is_ascii_alphanumeric();
+            before_ok && after_ok
+        } else {
+            false
+        }
+    };
+    // важно сначала female - чтобы "female" не схватился как "male"
+    let female_markers = [
+        "female", "f.", "женский", "женщина", "девушка", "девочка", "девушки", "женщины",
+        "женский пол", "ж.", "(ж)", "fem",
+    ];
+    let male_markers = [
+        "male", "m.", "мужской", "мужчина", "юноша", "мальчик", "мужчины",
+        "мужской пол", "м.", "(м)", "masc",
+    ];
+    for w in &female_markers {
+        if has_word(w) {
+            return Some("female");
+        }
+    }
+    for w in &male_markers {
+        if has_word(w) {
+            return Some("male");
+        }
+    }
+    None
+}
+
+// карта имён персонажей -> пол на основе глоссария
+// берём source и target термина если у него в description или context размечен пол
+// сами слова имени приводим к lowercase
+pub fn collect_character_genders(glossary: &[GlossaryEntry]) -> Vec<(String, &'static str)> {
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for e in glossary {
+        let marker = e
+            .description
+            .as_deref()
+            .and_then(parse_gender_marker)
+            .or_else(|| e.context.as_deref().and_then(parse_gender_marker));
+        let Some(g) = marker else { continue };
+        for raw in [&e.source, &e.target] {
+            let name = raw.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let key = name.to_lowercase();
+            if seen.insert(key.clone()) {
+                out.push((name.to_string(), g));
+            }
+        }
+    }
+    // длинные имена первыми - чтобы "X.A.N.A. virus" не съело "X.A.N.A."
+    out.sort_by(|a, b| b.0.chars().count().cmp(&a.0.chars().count()));
+    out
+}
+
+
+// язык из UI (Russian, ru, Русский) в iso код для правил рода
 pub fn normalize_target_language_iso(raw: &str) -> Option<String> {
     let lower = raw.trim().to_lowercase();
     if lower.is_empty() {
@@ -55,12 +124,11 @@ pub fn dialogue_context_translation_rules(target_language: &str) -> String {
         return "- В списке субтитров все реплики — одна сцена; правь перевод согласованно с соседними.\n"
             .to_string();
     }
-    "Диалог (справочно, только для строк, которые пользователь попросил править):\n\
+    "Диалог (справочно):\n\
      - Сначала прочитай реплики в блоке по порядку id/времени\n\
-     - У каждой строки есть speaker_gender (male/female/unknown) — кто произносит ЭТУ реплику\n\
-     - Определи также, кому адресована реплика (часто другой пол в соседних id)\n\
-     - При правке запрошенного id согласуй грамматику с соседними — не изолированно\n\
-     - Чередование male/female по id обычно = двое собеседников (вопрос/ответ)\n\
+     - У каждой строки есть speaker_gender (male/female/unknown) — кто произносит ЭТУ реплику (акустическая оценка, может ошибаться)\n\
+     - Адресата определяй сам по контексту: имена в реплике, вопрос-ответ в соседних id, сюжет\n\
+     - При правке/переводе согласуй грамматику с соседями — не изолированно\n\
      - Не меняй другие реплики только из-за несогласования рода, если пользователь об этом не просил\n\n"
         .to_string()
 }
@@ -75,18 +143,20 @@ pub fn speaker_gender_translation_rules(target_language: &str) -> String {
     }
     format!(
         "Согласование по полу на языке перевода ({target_language}):\n\
-         - speaker_gender = кто произносит ЭТУ строку (не путать с собеседником)\n\
-         - Первая лица (я/мы, глаголы и местоимения говорящего): строго по speaker_gender этого id\n\
-         - Вторая лица (ты/вы к собеседнику): по полу АДРЕСАТА, не по speaker_gender говорящей реплики\n\
-         - Описание «о себе» (меня, мой, один/одна и т.п. рядом с «мной»): по speaker_gender говорящего\n\
+         - speaker_gender = кто произносит ЭТУ строку (акустика, бывает ошибочной)\n\
+         - Пол адресата определяй сам по контексту диалога и блоку ПЕРСОНАЖИ\n\
+         - Первое лицо (я/мы, глаголы говорящего): по полу говорящего (если знаешь персонажа — из ПЕРСОНАЖЕЙ, иначе по speaker_gender)\n\
+         - Второе лицо (ты/вы к собеседнику): по полу адресата\n\
+           Пример: female говорит мальчику → «Ты видел?» (не «видела»). male говорит девочке → «Ты видела?»\n\
+         - Описание «о себе» (меня, мой, один/одна и т.п. рядом с «мной»): по полу говорящего\n\
+           Пример: male «I saw it, too» → «Я тоже его видел» (не «видела»)\n\
          - В одной фразе могут сочетаться формы к адресату и к говорящему — это нормально\n\
-         - Грамматика исходного текста подсказывает пол говорящего и адресата — сверяй с соседними репликами\n\
-         - При speaker_gender unknown — выводи из контекста соседних реплик и глоссария\n",
+         - Если по контексту пол неоднозначен — переформулируй нейтрально, не ставь мужской по умолчанию\n",
         target_language = target_language.trim(),
     )
 }
 
-/// Правила склонения имён при замене терминов / синхронизации глоссария.
+// правила склонения имён при замене терминов и синхронизации глоссария
 pub fn proper_name_declension_rules(target_language: &str) -> String {
     let iso = match normalize_target_language_iso(target_language) {
         Some(code) => code,

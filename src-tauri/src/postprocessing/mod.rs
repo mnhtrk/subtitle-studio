@@ -20,7 +20,7 @@ pub struct PostProcessingResult {
     pub processing_time_ms: u64,
 }
 
-// сколько сегментов в одном gpt запросе (не раздувать)
+// сколько сегментов в одном gpt запросе чтобы не раздувать
 const POSTPROCESS_CHUNK_SIZE: usize = 60;
 
 pub async fn postprocess_transcription(

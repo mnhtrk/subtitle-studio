@@ -49,7 +49,7 @@ pub async fn get_cached_waveform(
 pub async fn generate_waveform(
     audio_path: String,
     output_path: String,
-    resolution: Option<u32>, // Количество точек на секунду
+    resolution: Option<u32>, // точек на секунду
     _app_handle: tauri::AppHandle,
 ) -> Result<WaveformData, String> {
     println!("Генерация волновой формы для: {}", audio_path);
@@ -59,18 +59,17 @@ pub async fn generate_waveform(
         return Err(format!("Аудиофайл не найден: {}", audio_path));
     }
     
-    // ffmpeg?
-    let ffmpeg_available = is_ffmpeg_available().await;
-    if !ffmpeg_available {
-        return Err("FFmpeg не установлен в системе".to_string());
+    // ffmpeg есть?
+    if !crate::ffmpeg_util::is_ffmpeg_available().await {
+        return Err(crate::ffmpeg_util::ffmpeg_missing_message());
     }
     
     let resolution = resolution.unwrap_or(50);
     
-    // волна
+    // считаем волну
     let waveform_data = generate_waveform_with_ffmpeg(audio_path_buf, resolution).await?;
     
-    // json для ui
+    // json для фронта
     let json_data = serde_json::to_string(&waveform_data).map_err(|e| e.to_string())?;
     fs::write(&output_path, json_data).map_err(|e| e.to_string())?;
     
@@ -85,34 +84,35 @@ async fn generate_waveform_with_ffmpeg(
     use std::process::Stdio;
     use tokio::process::Command;
     
-    // duration ffprobe
+    // длительность через ffprobe
     let duration = get_audio_duration(audio_path).await?;
     
-    // Рассчитываем общее количество точек
+    // сколько всего точек
     let total_points = (duration * resolution as f64) as usize;
     let mut peaks = Vec::with_capacity(total_points);
     
-    // ffmpeg для извлечения амплитуды
-    let mut cmd = Command::new("ffmpeg");
+    // ffmpeg выгружает сырые сэмплы
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
     cmd.arg("-i")
         .arg(audio_path)
-        .arg("-vn") // Без видео
+        .arg("-vn") // без видео
         .arg("-acodec")
-        .arg("pcm_s16le") // PCM 16-bit
+        .arg("pcm_s16le") // pcm 16 бит
         .arg("-f")
-        .arg("s16le") // Raw samples
+        .arg("s16le") // сырые сэмплы
         .arg("-ac")
-        .arg("1") // Моно
+        .arg("1") // моно
         .arg("-ar")
-        .arg("44100") // Частота дискретизации
+        .arg("44100") // частота
         .arg("-")
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
+
     let mut child = cmd.spawn().map_err(|e| format!("Ошибка запуска FFmpeg: {}", e))?;
     let stdout = child.stdout.take().unwrap();
     
-    // Читаем сырые аудио данные и вычисляем пики
+    // читаем сырые аудио и считаем пики
     let mut buffer = vec![0u8; 4096];
     let mut audio_data = Vec::new();
     
@@ -130,13 +130,13 @@ async fn generate_waveform_with_ffmpeg(
         return Err("ffmpeg: ошибка декодирования аудио (проверьте кодек)".to_string());
     }
     
-    // Конвертируем байты в 16-битные сэмплы
+    // байты в 16 битные сэмплы
     let samples: Vec<i16> = audio_data
         .chunks_exact(2)
         .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
         .collect();
     
-    // Вычисляем пики для каждой временной точки
+    // пик для каждой точки
     let samples_per_point = (samples.len() as f64 / total_points as f64).max(1.0) as usize;
     
     for i in 0..total_points {
@@ -166,7 +166,7 @@ async fn generate_waveform_with_ffmpeg(
     })
 }
 
-// png волны (ffmpeg showwavespic)
+// png волны через ffmpeg showwavespic
 #[tauri::command]
 pub async fn generate_waveform_png(
     media_path: String,
@@ -188,21 +188,23 @@ pub async fn generate_waveform_png(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    /* boost перед showwavespic */
+    // буст перед showwavespic чтобы волна не была плоской
     let filter = format!(
         "[0:a]volume=10dB,showwavespic=s={}x{}:colors=0xADFF2F|0x121212",
         w, h
     );
 
-    let output = Command::new("ffmpeg")
-        .arg("-y")
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
+    cmd.arg("-y")
         .arg("-i")
         .arg(media_path)
         .arg("-filter_complex")
         .arg(&filter)
         .arg("-frames:v")
         .arg("1")
-        .arg(&output_png_path)
+        .arg(&output_png_path);
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
+    let output = cmd
         .output()
         .await
         .map_err(|e| format!("Запуск ffmpeg: {}", e))?;
@@ -216,7 +218,7 @@ pub async fn generate_waveform_png(
     Ok(())
 }
 
-/// Быстрый кадр для превью при перемотке (ffmpeg -ss перед -i).
+// быстрый кадр для превью при перемотке (ffmpeg -ss перед -i)
 #[tauri::command]
 pub async fn extract_video_preview_frame(
     app: tauri::AppHandle,
@@ -226,8 +228,8 @@ pub async fn extract_video_preview_frame(
     use tauri::Manager;
     use tokio::process::Command;
 
-    if !is_ffmpeg_available().await {
-        return Err("ffmpeg не найден".to_string());
+    if !crate::ffmpeg_util::is_ffmpeg_available().await {
+        return Err(crate::ffmpeg_util::ffmpeg_missing_message());
     }
 
     let media = Path::new(&video_path);
@@ -243,8 +245,8 @@ pub async fn extract_video_preview_frame(
     let out = cache.join("video_preview_scratch.jpg");
     let t = time_secs.max(0.0);
 
-    let status = Command::new("ffmpeg")
-        .arg("-hide_banner")
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
+    cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
         .arg("-y")
@@ -259,7 +261,9 @@ pub async fn extract_video_preview_frame(
         .arg("-vf")
         .arg("scale=-2:480")
         .arg("-an")
-        .arg(&out)
+        .arg(&out);
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
+    let status = cmd
         .output()
         .await
         .map_err(|e| format!("ffmpeg preview: {}", e))?;
@@ -286,7 +290,7 @@ fn playback_proxy_cache_key(source: &Path) -> Result<(u64, u64), String> {
     Ok((hasher.finish(), modified))
 }
 
-/// MP4 с moov в начале — WebView быстрее перематывает длинные файлы.
+// перепаковываем mp4 чтобы moov шёл в начале - webview так быстрее перематывает длинное видео
 #[tauri::command]
 pub async fn ensure_faststart_playback_proxy(
     app: tauri::AppHandle,
@@ -319,12 +323,12 @@ pub async fn ensure_faststart_playback_proxy(
         }
     }
 
-    if !is_ffmpeg_available().await {
+    if !crate::ffmpeg_util::is_ffmpeg_available().await {
         return Ok(video_path);
     }
 
-    let status = Command::new("ffmpeg")
-        .arg("-hide_banner")
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
+    cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
         .arg("-y")
@@ -334,7 +338,9 @@ pub async fn ensure_faststart_playback_proxy(
         .arg("copy")
         .arg("-movflags")
         .arg("+faststart")
-        .arg(&proxy)
+        .arg(&proxy);
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
+    let status = cmd
         .output()
         .await
         .map_err(|e| format!("ffmpeg faststart: {}", e))?;
@@ -346,7 +352,7 @@ pub async fn ensure_faststart_playback_proxy(
     Ok(video_path)
 }
 
-// ffprobe duration
+// длительность через ffprobe
 #[tauri::command]
 pub async fn probe_media_duration(media_path: String) -> Result<f64, String> {
     let p = Path::new(&media_path);
@@ -381,7 +387,7 @@ async fn probe_duration_seconds(
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let mut cmd = Command::new("ffprobe");
+    let mut cmd = Command::new(crate::ffmpeg_util::ffprobe_program());
     cmd.arg("-v").arg("error");
     if let Some(stream) = select_stream {
         cmd.arg("-select_streams").arg(stream);
@@ -393,6 +399,7 @@ async fn probe_duration_seconds(
         .arg(audio_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
 
     let output = cmd
         .output()
@@ -445,22 +452,5 @@ mod duration_tests {
     #[test]
     fn parses_duration_prefix() {
         assert_eq!(parse_ffprobe_duration("duration=9.5").unwrap(), 9.5);
-    }
-}
-
-async fn is_ffmpeg_available() -> bool {
-    use std::process::Stdio;
-    use tokio::process::Command;
-    
-    let output = Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-    
-    match output {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
     }
 }

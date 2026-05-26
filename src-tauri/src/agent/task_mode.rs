@@ -4,17 +4,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTaskMode {
     General,
-    /// Только ответ в чате, без правок субтитров
+    // только ответ в чате, без правок субтитров
     AnswerOnly,
-    /// Замена термина/фразы (from → to), без посторонних правок
+    // замена термина или фразы (from -> to), без лишних правок
     BulkReplace,
-    /// Опечатки и грамматика — минимальные точечные правки
+    // опечатки и грамматика - точечные правки
     Proofread,
-    /// Исправление ошибок перевода — только поле translation
+    // фикс перевода - только поле translation
     TranslationFix,
-    /// Пакет: не расширять задачу за пределы запроса
+    // пакетный режим - не расширяем задачу за пределы запроса
     StrictBatch,
-    /// Применить изменения глоссария ко всем репликам
+    // применяем изменения глоссария ко всем репликам
     GlossarySync,
 }
 
@@ -52,6 +52,12 @@ impl AgentTaskMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplacePair {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentIntent {
     pub task_mode: String,
     #[serde(default)]
@@ -60,6 +66,9 @@ pub struct AgentIntent {
     pub replace_to: Option<String>,
     #[serde(default)]
     pub translation_only: bool,
+    // все пары замен для glossary_sync - bulk_replace фильтр смотрит только на replace_from/to
+    #[serde(default)]
+    pub replace_pairs: Option<Vec<ReplacePair>>,
 }
 
 impl AgentIntent {
@@ -79,7 +88,7 @@ struct IntentClassifierJson {
     translation_only: bool,
 }
 
-/// Классификация намерения по сообщению пользователя (любой язык) — только LLM, без regex по тексту.
+// классифицируем намерение по сообщению пользователя - только через llm, без regex
 pub async fn classify_agent_intent(
     api_key: &str,
     user_message: &str,
@@ -92,6 +101,7 @@ pub async fn classify_agent_intent(
             replace_from: None,
             replace_to: None,
             translation_only: false,
+            replace_pairs: None,
         });
     }
 
@@ -142,8 +152,9 @@ For bulk_replace, extract the actual old and new wording from context (e.g. glos
                 { "role": "user", "content": user }
             ],
             "response_format": { "type": "json_object" },
-            "temperature": 0,
-            "max_completion_tokens": 512
+            // классификация - простая задача, экономим время на reasoning
+            "reasoning_effort": "low",
+            "max_completion_tokens": 2048
         }))
         .send()
         .await
@@ -168,6 +179,7 @@ For bulk_replace, extract the actual old and new wording from context (e.g. glos
         replace_from: parsed.replace_from.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         replace_to: parsed.replace_to.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         translation_only: parsed.translation_only,
+        replace_pairs: None,
     };
 
     if intent.mode() == AgentTaskMode::BulkReplace {
@@ -193,7 +205,7 @@ For bulk_replace, extract the actual old and new wording from context (e.g. glos
     Ok(intent)
 }
 
-/// Уточняет bulk_replace: правка перевода, не оригинала.
+// уточняем bulk_replace - что правим перевод, а не оригинал
 pub fn normalize_bulk_replace_intent(intent: &mut AgentIntent, user_message: &str) {
     if intent.mode() != AgentTaskMode::BulkReplace {
         return;
@@ -259,22 +271,26 @@ fn strip_batch_processing_suffix(message: &str) -> String {
     }
 }
 
-pub fn model_temperature(mode: AgentTaskMode) -> f32 {
+// уровень reasoning_effort для gpt-5.4-mini
+// high для пакетных задач где модель должна пройтись по куче реплик и ничего не пропустить
+// low для болтовни чтобы не тормозило
+pub fn reasoning_effort_for_task(mode: AgentTaskMode) -> &'static str {
     match mode {
         AgentTaskMode::BulkReplace
         | AgentTaskMode::Proofread
         | AgentTaskMode::TranslationFix
         | AgentTaskMode::StrictBatch
-        | AgentTaskMode::GlossarySync
-        | AgentTaskMode::AnswerOnly => 0.2,
-        AgentTaskMode::General => 0.5,
+        | AgentTaskMode::GlossarySync => "high",
+        // болталка с пересказами эпизодов - нужен medium, иначе с большим контекстом модель
+        // отдаёт {} без поля message
+        AgentTaskMode::General | AgentTaskMode::AnswerOnly => "medium",
     }
 }
 
-/// Чат агента и правки субтитров (general, proofread, bulk_replace и т.д.).
-pub const AGENT_CHAT_MODEL: &str = "gpt-5.4-mini";
+// чат агента и все правки субтитров через агента - полная gpt-5 для максимального качества
+pub const AGENT_CHAT_MODEL: &str = "gpt-5";
 
-/// Классификация намерения — отдельно, полная модель.
+// классификатор намерения берёт полную модель, отдельно
 pub const INTENT_CLASSIFIER_MODEL: &str = "gpt-5.4";
 
 pub fn agent_model_for_task(_mode: AgentTaskMode) -> &'static str {
@@ -344,72 +360,37 @@ pub fn filter_changed_segments(
     task_mode: AgentTaskMode,
     base: &[SubtitleSegment],
     changed: Vec<SubtitleSegment>,
-    intent: Option<&AgentIntent>,
+    _intent: Option<&AgentIntent>,
 ) -> Vec<SubtitleSegment> {
+    // полностью доверяем gpt-5 - убираем все эвристические фильтры и контекстные проверки
+    // оставляем только базовые санити-проверки
+    // 1. сегмент с таким id реально существует
+    // 2. в режиме answer_only правок быть не должно вообще
+    // 3. text или translation реально отличаются от исходных
+    if matches!(task_mode, AgentTaskMode::AnswerOnly) {
+        return Vec::new();
+    }
+
     let base_by_id: std::collections::HashMap<u32, &SubtitleSegment> =
         base.iter().map(|s| (s.id, s)).collect();
 
     changed
         .into_iter()
         .filter_map(|seg| {
-            let Some(b) = base_by_id.get(&seg.id) else {
+            let b = base_by_id.get(&seg.id)?;
+            let tr_b = b.translation.as_deref().unwrap_or("");
+            let tr_a = seg.translation.as_deref().unwrap_or("");
+            if b.text == seg.text && tr_b == tr_a {
                 return None;
-            };
-            match task_mode {
-                AgentTaskMode::BulkReplace => {
-                    let Some(intent) = intent else {
-                        return None;
-                    };
-                    if intent.replace_from.as_deref().unwrap_or("").trim().is_empty() {
-                        return None;
-                    }
-                    let clamped = clamp_bulk_replace_segment(b, &seg, intent);
-                    if segment_matches_bulk_replace_contextual(b, &clamped, intent) {
-                        Some(clamped)
-                    } else {
-                        None
-                    }
-                }
-                AgentTaskMode::Proofread => {
-                    let tr_b = b.translation.as_deref().unwrap_or("");
-                    let tr_a = seg.translation.as_deref().unwrap_or("");
-                    let text_ok =
-                        b.text == seg.text || is_minimal_proofread_edit(&b.text, &seg.text);
-                    let tr_ok = tr_b == tr_a
-                        || is_minimal_proofread_edit(tr_b, tr_a);
-                    if text_ok && tr_ok && (b.text != seg.text || tr_b != tr_a) {
-                        Some(seg)
-                    } else {
-                        None
-                    }
-                }
-                AgentTaskMode::TranslationFix => {
-                    if b.text == seg.text
-                        && b.translation != seg.translation
-                        && seg
-                            .translation
-                            .as_deref()
-                            .map(|t| is_minimal_proofread_edit(
-                                b.translation.as_deref().unwrap_or(""),
-                                t,
-                            ))
-                            .unwrap_or(false)
-                    {
-                        Some(seg)
-                    } else {
-                        None
-                    }
-                }
-                AgentTaskMode::AnswerOnly => None,
-                AgentTaskMode::GlossarySync | AgentTaskMode::StrictBatch | AgentTaskMode::General => {
-                    Some(seg)
-                }
             }
+            Some(seg)
         })
         .collect()
 }
 
-/// Восстанавливает text, если модель ошибочно подставила перевод в оригинал.
+// возвращаем оригинальный text если модель случайно засунула туда перевод
+// сейчас не используется - доверяем gpt-5 - оставлено на случай возврата
+#[allow(dead_code)]
 pub fn clamp_bulk_replace_segment(
     before: &SubtitleSegment,
     after: &SubtitleSegment,
@@ -428,6 +409,7 @@ pub fn clamp_bulk_replace_segment(
     out
 }
 
+#[allow(dead_code)]
 fn allow_original_text_edit(original: &str, from: &str, to: &str) -> bool {
     if from.trim().is_empty() {
         return false;
@@ -438,7 +420,8 @@ fn allow_original_text_edit(original: &str, from: &str, to: &str) -> bool {
     script_bucket(original) == script_bucket(from) && script_bucket(original) == script_bucket(to)
 }
 
-/// Пропускает правки GPT по замене термина: реплика относилась к старому термину (в т.ч. словоформы).
+// пропускаем правки gpt по замене термина если реплика реально относилась к старому термину (в тч словоформы)
+#[allow(dead_code)]
 fn segment_matches_bulk_replace_contextual(
     before: &SubtitleSegment,
     after: &SubtitleSegment,
@@ -475,7 +458,45 @@ fn segment_matches_bulk_replace_contextual(
     false
 }
 
-/// Совпадение термина с учётом словоформ (lemma ⊂ словоформа, фраза с термином).
+// glossary_sync: пропускаем правку только если в исходной реплике было одно из слов from
+#[allow(dead_code)]
+fn segment_matches_glossary_replacements(
+    before: &SubtitleSegment,
+    after: &SubtitleSegment,
+    pairs: &[ReplacePair],
+    translation_only: bool,
+) -> bool {
+    if translation_only && before.text != after.text {
+        return false;
+    }
+    let tr_b = before.translation.as_deref().unwrap_or("");
+    let tr_a = after.translation.as_deref().unwrap_or("");
+    let text_changed = before.text != after.text;
+    let tr_changed = tr_b != tr_a;
+    if !text_changed && !tr_changed {
+        return false;
+    }
+
+    for pair in pairs {
+        let from = pair.from.trim();
+        if from.is_empty() {
+            continue;
+        }
+        let in_tr = text_related_to_term(tr_b, from);
+        let in_text = text_related_to_term(&before.text, from);
+        if translation_only {
+            if tr_changed && in_tr {
+                return true;
+            }
+        } else if (tr_changed && in_tr) || (text_changed && in_text) {
+            return true;
+        }
+    }
+    false
+}
+
+// проверяем совпадение термина с учётом словоформ (lemma внутри словоформы, фраза с термином)
+#[allow(dead_code)]
 fn text_related_to_term(haystack: &str, term: &str) -> bool {
     let term = term.trim();
     if term.is_empty() {
@@ -490,7 +511,7 @@ fn text_related_to_term(haystack: &str, term: &str) -> bool {
     if n < 3 {
         return false;
     }
-    // clamp(4, n) паникует при n < 4 (короткие имена: Боз, Лев)
+    // clamp(4, n) паникует при n < 4 - короткие имена типа Боз, Лев
     let stem_len = if n < 4 {
         n
     } else {
@@ -504,7 +525,9 @@ fn text_related_to_term(haystack: &str, term: &str) -> bool {
         .any(|w| w.len() >= 3 && (w.starts_with(&stem) || stem.starts_with(w)))
 }
 
-/// Отсекает «переписывание» при вычитке: слишком большая доля новых слов.
+// отсекаем переписывание при вычитке - слишком много новых слов
+// сейчас не используется в боевом коде (доверяем gpt-5), оставлено для возможного возврата
+#[allow(dead_code)]
 fn is_minimal_proofread_edit(before: &str, after: &str) -> bool {
     let before = before.trim();
     let after = after.trim();
@@ -522,6 +545,7 @@ fn is_minimal_proofread_edit(before: &str, after: &str) -> bool {
     edits as f64 / max_len as f64 <= 0.35
 }
 
+#[allow(dead_code)]
 fn is_substantial_rewrite(before: &str, after: &str) -> bool {
     let old: std::collections::HashSet<String> = before
         .split_whitespace()
@@ -539,6 +563,7 @@ fn is_substantial_rewrite(before: &str, after: &str) -> bool {
     (inter as f64 / union as f64) < 0.45
 }
 
+#[allow(dead_code)]
 fn levenshtein_chars(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -591,7 +616,7 @@ mod tests {
     #[test]
     fn short_name_term_does_not_panic() {
         assert!(text_related_to_term("Привет, Боз!", "Боз"));
-        // короткие имена (3 буквы) не должны вызывать clamp-панику
+        // короткие имена в 3 буквы не должны вызывать clamp панику
         let _ = text_related_to_term("со Львом", "Лев");
     }
 
@@ -602,6 +627,7 @@ mod tests {
             replace_from: Some("Cuñadísima".to_string()),
             replace_to: Some("сестрёнушка".to_string()),
             translation_only: false,
+            replace_pairs: None,
         };
         normalize_bulk_replace_intent(&mut intent, "переведи везде Cuñadísima как сестрёнушка");
         assert!(intent.translation_only);
@@ -627,6 +653,7 @@ mod tests {
             replace_from: Some("Cuñadísima".to_string()),
             replace_to: Some("сестрёнушка".to_string()),
             translation_only: true,
+            replace_pairs: None,
         };
         let fixed = clamp_bulk_replace_segment(&before, &after, &intent);
         assert_eq!(fixed.text, before.text);

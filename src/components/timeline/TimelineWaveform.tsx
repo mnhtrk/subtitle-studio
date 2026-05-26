@@ -2,7 +2,7 @@ import { memo, useLayoutEffect, useRef } from 'react';
 
 const WAVEFORM_CANVAS_WIDTH = 2048;
 
-/** Canvas-волна: рисуется один раз по пикам, масштабируется CSS (не перерисовка при зуме). */
+// canvas волна - рисуем один раз по пикам, дальше зум через css, без перерисовки
 function TimelineWaveformInner({
 	peaks,
 	className

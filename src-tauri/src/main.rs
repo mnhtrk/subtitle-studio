@@ -9,9 +9,11 @@ mod types;
 mod subtitle_parser; 
 mod postprocessing;
 mod agent;
+mod debug_log;
 mod gender_detection;
 mod speaker_gender_rules;
 mod ml_sidecar;
+mod ffmpeg_util;
 mod vad;
 
 use tauri_plugin_sql::{Migration, MigrationKind};
@@ -80,6 +82,8 @@ fn main() {
             commands::sync::sync_subtitles_with_video,
             commands::quality::check_translation_quality,
             commands::ai::auto_generate_glossary,
+            commands::ai::summarize_episode,
+            commands::ai::translate_glossary_terms,
             commands::files::backup_project,
             commands::notifications::show_notification,
             commands::notifications::log_message,
@@ -90,7 +94,7 @@ fn main() {
         
         .setup(|app| {
             use tauri::Manager;
-            // таскбар icon.ico
+            // иконка для таскбара
             if let Ok(icon) =
                 tauri::image::Image::from_bytes(include_bytes!("../icons/icon.ico"))
             {

@@ -81,9 +81,10 @@ fn kill_registered_sidecars() {
 fn kill_pid(pid: u32) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output();
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/PID", &pid.to_string()]);
+        crate::ffmpeg_util::hide_console_window_std(&mut cmd);
+        let _ = cmd.output();
     }
     #[cfg(not(windows))]
     {

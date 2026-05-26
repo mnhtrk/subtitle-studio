@@ -8,6 +8,8 @@ export interface SubtitleFileBundle {
 	id: string;
 	name: string;
 	segments: SubtitleSegment[];
+	// пересказ эпизода для агента, генерится через summarize_episode
+	summary?: string | null;
 }
 
 export function listProjectSubtitleFiles(project: ProjectData | null): SubtitleFileBundle[] {
@@ -17,7 +19,8 @@ export function listProjectSubtitleFiles(project: ProjectData | null): SubtitleF
 		.map((f) => ({
 			id: f.id,
 			name: f.name,
-			segments: f.subtitle_segments ?? []
+			segments: f.subtitle_segments ?? [],
+			summary: f.summary ?? null
 		}))
 		.filter((f) => f.segments.length > 0);
 }
@@ -158,35 +161,33 @@ export function findSubtitleFileInProject(
 }
 
 export function intentFromGlossaryChanges(changes: GlossaryReplacementChange[]): AgentIntent {
-	const targetChange = changes.find(
-		(c) =>
-			c.oldTarget?.trim() &&
-			c.newTarget?.trim() &&
-			c.oldTarget.trim().toLowerCase() !== c.newTarget.trim().toLowerCase()
-	);
-	const sourceChange = changes.find(
-		(c) =>
-			c.oldSource?.trim() &&
-			c.newSource?.trim() &&
-			c.oldSource.trim().toLowerCase() !== c.newSource.trim().toLowerCase()
-	);
+	const translationPairs = changes
+		.filter(
+			(c) =>
+				c.oldTarget?.trim() &&
+				c.newTarget?.trim() &&
+				c.oldTarget.trim().toLowerCase() !== c.newTarget.trim().toLowerCase()
+		)
+		.map((c) => ({ from: c.oldTarget.trim(), to: c.newTarget.trim() }));
+	const sourcePairs = changes
+		.filter(
+			(c) =>
+				c.oldSource?.trim() &&
+				c.newSource?.trim() &&
+				c.oldSource.trim().toLowerCase() !== c.newSource.trim().toLowerCase()
+		)
+		.map((c) => ({ from: c.oldSource.trim(), to: c.newSource.trim() }));
 
-	if (targetChange) {
-		const sourceAlsoChanged = Boolean(sourceChange);
-		return {
-			task_mode: 'bulk_replace',
-			replace_from: targetChange.oldTarget.trim(),
-			replace_to: targetChange.newTarget.trim(),
-			translation_only: !sourceAlsoChanged
-		};
-	}
+	const allPairs = [...translationPairs, ...sourcePairs];
+	const translationOnly = sourcePairs.length === 0 && translationPairs.length > 0;
 
-	if (sourceChange) {
+	if (allPairs.length === 0) {
 		return {
-			task_mode: 'bulk_replace',
-			replace_from: sourceChange.oldSource.trim(),
-			replace_to: sourceChange.newSource.trim(),
-			translation_only: false
+			task_mode: 'glossary_sync',
+			replace_from: null,
+			replace_to: null,
+			translation_only: true,
+			replace_pairs: []
 		};
 	}
 
@@ -194,7 +195,8 @@ export function intentFromGlossaryChanges(changes: GlossaryReplacementChange[]):
 		task_mode: 'glossary_sync',
 		replace_from: null,
 		replace_to: null,
-		translation_only: false
+		translation_only: translationOnly,
+		replace_pairs: allPairs
 	};
 }
 

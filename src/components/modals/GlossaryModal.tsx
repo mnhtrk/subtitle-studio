@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { GlossaryEntry } from '../../services/projectService';
 import { useI18n } from '../../i18n';
+import { DraggableModalShell } from './DraggableModalShell';
 
 interface GlossaryRow {
   entryId?: string;
@@ -125,7 +126,7 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
           context: r.context.trim() || null
         }));
       const changes = collectReplacementChanges(loadedEntries, entries);
-      // Только в память проекта; на диск — при «Сохранить проект»
+      // только в память проекта - на диск уйдёт когда нажмут сохранить
       onSaved?.(entries, changes);
       setLoadedEntries(entries);
       setRows(entriesToRows(entries));
@@ -140,8 +141,10 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
   const canSave = Boolean(projectPath) && !saving;
 
   return (
-    <div className="fixed inset-0 z-[10000] flex items-center justify-center pointer-events-none">
-      <div className="pointer-events-auto w-[840px] h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col overflow-hidden select-none">
+    <DraggableModalShell
+      width={840}
+      className="h-[560px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 overflow-hidden select-none"
+    >
         <div className="shrink-0 flex justify-end h-5 mb-2">
             <button
               type="button"
@@ -235,7 +238,6 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
             {t('glossary.saveChanges')}
           </button>
         </div>
-      </div>
-    </div>
+    </DraggableModalShell>
   );
 };

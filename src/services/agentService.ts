@@ -5,6 +5,8 @@ export interface SubtitleFileContext {
   file_id: string;
   file_name: string;
   segments: SubtitleSegment[];
+  // краткий пересказ эпизода для системного промпта агента
+  summary?: string | null;
 }
 
 export type AgentEditScope = 'active_episode' | 'whole_project';
@@ -31,6 +33,7 @@ export interface AgentContext {
   replace_from?: string | null;
   replace_to?: string | null;
   translation_only?: boolean;
+  replace_pairs?: { from: string; to: string }[] | null;
 }
 
 export interface AgentIntent {
@@ -38,6 +41,7 @@ export interface AgentIntent {
   replace_from?: string | null;
   replace_to?: string | null;
   translation_only?: boolean;
+  replace_pairs?: { from: string; to: string }[] | null;
 }
 
 export type AgentAction =

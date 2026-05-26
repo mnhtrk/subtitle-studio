@@ -28,10 +28,13 @@ export function resolveIsoLanguage(languageOrCode: string): string | null {
 	return null;
 }
 
+// человекочитаемое описание для колонки context
+// предпочитаем то что GPT написал в meaning_context, а старая авто-метка - запасной вариант
 function termContextLabel(t: GlossaryTermGenerated): string {
+	const meaning = (t.meaning_context ?? '').trim();
+	if (meaning.length > 0) return meaning;
 	const cat = (t.category ?? '').trim();
-	const conf = Math.round(t.confidence * 100);
-	return cat.length > 0 ? `auto ${conf}% (${cat})` : `auto ${conf}%`;
+	return cat.length > 0 ? cat : '';
 }
 
 function glossaryEntryNeedsTranslation(e: GlossaryEntry): boolean {
@@ -184,13 +187,98 @@ export function mergePromptHintsIntoGlossary(
 	return next;
 }
 
-/** @deprecated whisper prompt теперь на rust */
+// @deprecated whisper prompt теперь на rust
 export function buildTranscriptionPrompt(
 	userPrompt: string,
 	_glossary: GlossaryEntry[]
 ): string | undefined {
 	const manual = userPrompt.trim();
 	return manual.length > 0 ? manual : undefined;
+}
+
+// переводит target-колонку всех записей глоссария проекта где target пустой или равен source
+// использует translate_glossary_terms (явная транслитерация имён)
+// НЕ запускает повторный auto_generate_glossary - только перевод того что уже есть
+// onlySources=undefined - переводит всё пустое; иначе только указанные source-формы
+export async function translateGlossaryTargetsInProject(
+	projectPath: string,
+	targetLanguage: string,
+	contextPrompt?: string,
+	onlySources?: string[]
+): Promise<ProjectData> {
+	const opened = await projectService.open(projectPath);
+	const existing = opened.glossary ?? [];
+	if (existing.length === 0) return opened;
+
+	const onlyFilter = onlySources
+		? new Set(onlySources.map((s) => s.trim().toLowerCase()).filter(Boolean))
+		: null;
+
+	const pending = existing.filter((e) => {
+		if (!glossaryEntryNeedsTranslation(e)) return false;
+		if (onlyFilter && !onlyFilter.has(e.source.trim().toLowerCase())) return false;
+		return true;
+	});
+	if (pending.length === 0) return opened;
+
+	const stylePrompt = contextPrompt?.trim() || 'Natural subtitle translation';
+	const termInputs = pending
+		.map((e) => ({
+			source: e.source.trim(),
+			context: e.context?.trim() || null
+		}))
+		.filter((t) => t.source.length > 0);
+	if (termInputs.length === 0) return opened;
+
+	try {
+		const translations = await projectService.translateGlossaryTerms(
+			termInputs,
+			targetLanguage,
+			stylePrompt
+		);
+		const bySource = new Map<string, string>();
+		for (const tr of translations) {
+			const src = tr.source.trim().toLowerCase();
+			const tgt = tr.target.trim();
+			if (src && tgt && tgt.toLowerCase() !== src) {
+				bySource.set(src, tgt);
+			}
+		}
+		if (bySource.size === 0) return opened;
+		const updated = existing.map((e) => {
+			const tr = bySource.get(e.source.trim().toLowerCase());
+			if (tr && glossaryEntryNeedsTranslation(e)) {
+				return { ...e, target: tr };
+			}
+			return e;
+		});
+		const toSave: ProjectData = {
+			...opened,
+			glossary: updated,
+			updated_at: new Date().toISOString()
+		};
+		await projectService.save(toSave);
+		return toSave;
+	} catch (err) {
+		console.warn('[glossary] translateGlossaryTargetsInProject failed', err);
+		return opened;
+	}
+}
+
+// сбрасывает target во всех записях глоссария проекта (нужно при смене target-языка)
+// после сброса вызвать translateGlossaryTargetsInProject чтобы заполнить заново
+export async function clearGlossaryTargetsInProject(projectPath: string): Promise<ProjectData> {
+	const opened = await projectService.open(projectPath);
+	const existing = opened.glossary ?? [];
+	if (existing.length === 0) return opened;
+	const cleared = existing.map((e) => ({ ...e, target: '' }));
+	const toSave: ProjectData = {
+		...opened,
+		glossary: cleared,
+		updated_at: new Date().toISOString()
+	};
+	await projectService.save(toSave);
+	return toSave;
 }
 
 export async function applyAutoGlossaryToProject(
@@ -201,6 +289,9 @@ export async function applyAutoGlossaryToProject(
 		targetLanguage?: string;
 		contextPrompt?: string;
 		fillTranslation?: boolean;
+		// язык для поля meaning_context (если не задан = targetLanguageIso)
+		// в wizard'е target=исходный, но meaning_context надо писать на ui-языке проекта
+		meaningContextLanguageIso?: string;
 	}
 ): Promise<ProjectData> {
 	const opened = await projectService.open(projectPath);
@@ -226,7 +317,8 @@ export async function applyAutoGlossaryToProject(
 		min_frequency: 2,
 		max_terms: 45,
 		target_language: opts.targetLanguageIso,
-		contextPrompt
+		contextPrompt,
+		meaningContextLanguage: opts.meaningContextLanguageIso ?? opts.targetLanguageIso
 	};
 
 	try {
@@ -259,31 +351,39 @@ export async function applyAutoGlossaryToProject(
 			const stylePrompt = opts.contextPrompt?.trim() || 'Natural subtitle translation';
 			const pending = merged.filter(glossaryEntryNeedsTranslation);
 			if (pending.length > 0 && targetLanguage) {
-				const sources = pending.map((e) => e.source.trim()).filter(Boolean);
-				const termSegments = pseudoSegmentsForGlossarySources(sources);
-				if (termSegments.length > 0) {
-					const termTranslations = await projectService.translateBatch(
-						termSegments,
-						targetLanguage,
-						stylePrompt,
-						merged
-					);
-					const byId = new Map(termTranslations.map((t) => [t.id, t.translated_text.trim()]));
-					const bySource = new Map<string, string>();
-					for (let i = 0; i < sources.length; i++) {
-						const tr =
-							byId.get(i * 2 + 1) ||
-							byId.get(i * 2 + 2) ||
-							'';
-						if (tr) bySource.set(sources[i].toLowerCase(), tr);
-					}
-					merged = merged.map((e) => {
-						const tr = bySource.get(e.source.trim().toLowerCase());
-						if (tr && glossaryEntryNeedsTranslation(e)) {
-							return { ...e, target: tr };
+				// translate_glossary_terms делает явную транслитерацию (Griselda -> Гризельда)
+				// translate_batch на одиночных словах оставлял имена в латинице
+				const termInputs = pending
+					.map((e) => ({
+						source: e.source.trim(),
+						context: e.context?.trim() || null
+					}))
+					.filter((t) => t.source.length > 0);
+				if (termInputs.length > 0) {
+					try {
+						const termTranslations = await projectService.translateGlossaryTerms(
+							termInputs,
+							targetLanguage,
+							stylePrompt
+						);
+						const bySource = new Map<string, string>();
+						for (const tr of termTranslations) {
+							const src = tr.source.trim().toLowerCase();
+							const tgt = tr.target.trim();
+							if (src && tgt && tgt.toLowerCase() !== src) {
+								bySource.set(src, tgt);
+							}
 						}
-						return e;
-					});
+						merged = merged.map((e) => {
+							const tr = bySource.get(e.source.trim().toLowerCase());
+							if (tr && glossaryEntryNeedsTranslation(e)) {
+								return { ...e, target: tr };
+							}
+							return e;
+						});
+					} catch (err) {
+						console.warn('[glossary] translate_glossary_terms failed', err);
+					}
 				}
 			}
 		}

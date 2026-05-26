@@ -23,6 +23,10 @@ pub struct SubtitleFileContext {
     pub file_id: String,
     pub file_name: String,
     pub segments: Vec<SubtitleSegment>,
+    // краткий пересказ эпизода (3-4 предложения) для системного промпта агента
+    // нужен чтобы не выгружать полный текст эпизода в промпт каждый раз
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

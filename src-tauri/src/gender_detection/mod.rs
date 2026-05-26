@@ -9,7 +9,7 @@ use crate::commands::ai_cancel::{self, SidecarPidGuard};
 
 use crate::project::{SpeakerGender, SubtitleSegment};
 
-/// Точные границы субтитра (без расширения — иначе в клип попадает соседняя реплика).
+// точные границы субтитра без расширения, иначе в клип попадёт соседняя реплика
 fn exact_clip_range(seg_start: f64, seg_end: f64, audio_duration: f64) -> (f64, f64) {
     let start = seg_start.max(0.0);
     let end = if audio_duration > 0.0 {
@@ -20,7 +20,7 @@ fn exact_clip_range(seg_start: f64, seg_end: f64, audio_duration: f64) -> (f64, 
     (start, end.max(start + 0.001))
 }
 
-// пол по репликам через python sidecar (один запрос = один субтитр, его start/end)
+// определяем пол по репликам через python sidecar - один запрос на один субтитр и его start/end
 pub async fn assign_speaker_genders(
     audio_path: &Path,
     segments: &mut [SubtitleSegment],
@@ -30,20 +30,26 @@ pub async fn assign_speaker_genders(
     }
 
     let paths = crate::ml_sidecar::resolve_script("classify.py")?;
-    println!(
-        "[gender] sidecar python={:?} script={:?}",
-        paths.python_exe, paths.script_path
-    );
-    println!("[gender] режим: ровно тайминги субтитра на реплику, без расширения клипа");
+    crate::debug_log::log_line(&format!(
+        "[gender] sidecar python={} script={}",
+        paths.python_exe.display(),
+        paths.script_path.display()
+    ));
+    crate::debug_log::log_line(&format!(
+        "[gender] старт: {} реплик, audio={}",
+        segments.len(),
+        audio_path.display()
+    ));
 
-    let mut child = Command::new(&paths.python_exe)
+    let mut child = Command::new(&paths.python_exe);
+    child
         .arg(&paths.script_path)
         .current_dir(&paths.work_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("PYTHONIOENCODING", "utf-8")
-        .env("PYTHONUNBUFFERED", "1")
+        .stderr(Stdio::piped());
+    crate::ml_sidecar::apply_python_env(&mut child);
+    let mut child = child
         .spawn()
         .map_err(|e| format!("Не удалось запустить gender sidecar: {}", e))?;
 
@@ -94,12 +100,12 @@ pub async fn assign_speaker_genders(
                     .get("device")
                     .and_then(|x| x.as_str())
                     .unwrap_or("?");
-                println!(
+                crate::debug_log::log_line(&format!(
                     "[gender] sidecar готов за {:.2}s, audio_duration={:.3}s, device={}",
                     t_init.elapsed().as_secs_f32(),
                     audio_duration,
                     device,
-                );
+                ));
                 break;
             }
             Some("error") => {
@@ -179,10 +185,24 @@ pub async fn assign_speaker_genders(
                     } else {
                         format!(" ({})", reason)
                     };
-                    println!(
-                        "[gender] #{} clip {:.3}-{:.3} -> {} scores={} inf={:.1}ms{}",
-                        seg.id, clip_start, clip_end, gender_str, scores, duration_ms, reason_part,
-                    );
+                    // обрезаем длинные реплики для лога, чтобы файл не разрастался
+                    let preview = if seg.text.chars().count() > 120 {
+                        let head: String = seg.text.chars().take(120).collect();
+                        format!("{}…", head)
+                    } else {
+                        seg.text.clone()
+                    };
+                    crate::debug_log::log_line(&format!(
+                        "[gender] #{} [{:.2}-{:.2}] -> {} scores={} inf={:.1}ms{} text={:?}",
+                        seg.id,
+                        clip_start,
+                        clip_end,
+                        gender_str,
+                        scores,
+                        duration_ms,
+                        reason_part,
+                        preview,
+                    ));
                     break;
                 }
                 Some("error") => {
@@ -209,7 +229,7 @@ pub async fn assign_speaker_genders(
     } else {
         0.0
     };
-    println!(
+    crate::debug_log::log_line(&format!(
         "[gender] обработано {} сегментов за {:.2}s (avg inf {:.1}ms/seg; male={} female={} unknown={})",
         total,
         t_classify.elapsed().as_secs_f32(),
@@ -217,7 +237,7 @@ pub async fn assign_speaker_genders(
         male,
         female,
         unknown,
-    );
+    ));
 
     Ok(())
 }
