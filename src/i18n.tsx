@@ -148,7 +148,9 @@ const enMessages = {
 		charsPerSec: 'Chars/sec',
 		prev: '< Prev',
 		next: 'Next >',
-		askAgent: 'Ask agent'
+		askAgent: 'Ask agent',
+		attachToChat: 'Attach to chat',
+		attachRangeToChat: 'Attach range to chat ({count})'
 	},
 	video: {
 		preview: 'Video Preview',
@@ -320,7 +322,7 @@ const enMessages = {
 		skipAll: 'Skip all',
 		loading: 'Checking spelling…',
 		scanning: 'Checking subtitles…',
-		scanningHint: 'Translation column only. Progress is also printed to the dev console.',
+		scanningHint: 'Translation column only.',
 		scanProgress: '{done} / {total} lines · {found} typo(s)',
 		close: 'Close',
 		noIssues: 'Spell check complete: 0 typos found.',
@@ -495,7 +497,9 @@ const ruMessages: Messages = {
 		charsPerSec: 'Симв/сек',
 		prev: '< Назад',
 		next: 'Вперёд >',
-		askAgent: 'Спросить агента'
+		askAgent: 'Спросить агента',
+		attachToChat: 'Прикрепить к чату',
+		attachRangeToChat: 'Прикрепить диапазон к чату ({count})'
 	},
 	video: {
 		preview: 'Просмотр видео',
@@ -669,7 +673,7 @@ const ruMessages: Messages = {
 		skipAll: 'Пропустить все',
 		loading: 'Проверка орфографии…',
 		scanning: 'Проверка субтитров…',
-		scanningHint: 'Только колонка перевода. Прогресс также в консоли (терминал dev).',
+		scanningHint: 'Проверяется только колонка перевода.',
 		scanProgress: '{done} / {total} строк · опечаток: {found}',
 		close: 'Закрыть',
 		noIssues: 'Проверка завершена: опечаток не найдено (0).',

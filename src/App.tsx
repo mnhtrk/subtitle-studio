@@ -28,7 +28,7 @@ import {
 } from './utils/fileName';
 import { useI18n } from './i18n';
 import { TimelinePanel } from './components/timeline/TimelinePanel';
-import { SubtitleTable } from './components/subtitles/SubtitleTable';
+import { SubtitleTable, type SubtitleCellCommitValue } from './components/subtitles/SubtitleTable';
 import { EditorVideoPane } from './components/video/EditorVideoPane';
 import { sidebarIconMaskStyle } from './utils/iconMask';
 import { formatPlaybackClock } from './utils/playbackClock';
@@ -268,6 +268,7 @@ function mergeProjectFilesWithDisk(
 }
 
 const MIN_SEGMENT_DURATION = 0.05;
+const SUBTITLE_CLIPBOARD_MARKER = '__subtitle-studio:subtitle-clip__';
 const RETRANSCRIBE_LANGUAGE_OPTIONS: ReadonlyArray<string> = [
 	'English',
 	'Russian',
@@ -444,6 +445,11 @@ export default function App() {
 		translation?: string | null;
 		speaker_gender?: SpeakerGender | null;
 	};
+	type ChatAttachedRange = {
+		first: ChatAttachedSegment;
+		last: ChatAttachedSegment;
+		segments: ChatAttachedSegment[];
+	};
 	type ChatEditDiff = {
 		fileId: string;
 		fileName: string;
@@ -479,6 +485,7 @@ export default function App() {
 				role: 'user';
 				text: string;
 				attachedSegment?: ChatAttachedSegment;
+				attachedRange?: ChatAttachedRange;
 		  }
 		| {
 				id: string;
@@ -496,6 +503,18 @@ export default function App() {
 	const [chatInput, setChatInput] = useState('');
 	const [chatInputHasScrollbar, setChatInputHasScrollbar] = useState(false);
 	const [pendingAttachedSegment, setPendingAttachedSegment] = useState<ChatAttachedSegment | null>(null);
+	const [pendingAttachedRange, setPendingAttachedRange] = useState<ChatAttachedRange | null>(null);
+	const [subtitleTableContextMenu, setSubtitleTableContextMenu] = useState<{
+		x: number;
+		y: number;
+		index: number;
+	} | null>(null);
+	const subtitleTableContextMenuRef = useRef<HTMLDivElement>(null);
+	const subtitleClipboardRef = useRef<
+		| { kind: 'segment'; segment: ChatAttachedSegment }
+		| { kind: 'range'; range: ChatAttachedRange }
+		| null
+	>(null);
 	const [isAgentBusy, setIsAgentBusy] = useState(false);
 	const [agentBatchProgress, setAgentBatchProgress] = useState<{
 		current: number;
@@ -672,7 +691,7 @@ export default function App() {
 		[]
 	);
 	const [probedMediaDuration, setProbedMediaDuration] = useState<number | null>(null);
-	// controlled - иначе delete + blur пишет мусор
+
 	const [segEditorTranslation, setSegEditorTranslation] = useState('');
 	const [segEditorOriginal, setSegEditorOriginal] = useState('');
 	const [segEditorStart, setSegEditorStart] = useState('');
@@ -735,6 +754,8 @@ export default function App() {
 		);
 		setChatInput('');
 		setPendingAttachedSegment(null);
+		setPendingAttachedRange(null);
+		subtitleClipboardRef.current = null;
 		setExpandedDiffIds(new Set());
 		setIsAgentBusy(false);
 	}, []);
@@ -758,6 +779,16 @@ export default function App() {
 					if (msg.attachedSegment) {
 						const seg = msg.attachedSegment;
 						content = `${content}\n\nПрикрепленная реплика:\n#${seg.id} [${formatChatTimecode(seg.start)}]\nOriginal: ${seg.text}\nTranslation: ${seg.translation ?? ''}`.trim();
+					}
+					if (msg.attachedRange) {
+						const range = msg.attachedRange;
+						const lines = range.segments
+							.map(
+								(s) =>
+									`#${s.id} [${formatChatTimecode(s.start)}]\nOriginal: ${s.text}\nTranslation: ${s.translation ?? ''}`
+							)
+							.join('\n\n');
+						content = `${content}\n\nПрикрепленный диапазон реплик #${range.first.id}-${range.last.id}:\n${lines}`.trim();
 					}
 					if (content) turns.push({ role: 'user', content });
 				} else if (msg.role === 'assistant') {
@@ -1197,11 +1228,31 @@ export default function App() {
 		const seg = segmentsRef.current[selectedSegmentIndex];
 		if (!seg) return;
 
-		const st = parseSrtTime(segEditorStart);
-		const baseStart = st !== null ? st : seg.start;
-		const d = parseFloat(segEditorDuration.replace(',', '.'));
-		const end =
-			Number.isFinite(d) && d >= 0 ? baseStart + d : seg.end;
+		const stParsed = parseSrtTime(segEditorStart);
+		const dParsed = parseFloat(segEditorDuration.replace(',', '.'));
+		const stValid = stParsed !== null;
+		const dValid = Number.isFinite(dParsed) && dParsed >= 0;
+		const startTouched = stValid && Math.abs((stParsed as number) - seg.start) > 1e-6;
+		const durTouched = dValid && Math.abs(dParsed - (seg.end - seg.start)) > 1e-6;
+
+		let baseStart = seg.start;
+		let end = seg.end;
+		if (startTouched && durTouched) {
+			baseStart = stParsed as number;
+			end = baseStart + dParsed;
+		} else if (startTouched) {
+			baseStart = stParsed as number;
+		} else if (durTouched) {
+			end = seg.start + dParsed;
+		}
+		if (baseStart < 0) baseStart = 0;
+		if (end - baseStart < MIN_SEGMENT_DURATION) {
+			if (startTouched && !durTouched) {
+				baseStart = Math.max(0, end - MIN_SEGMENT_DURATION);
+			} else {
+				end = baseStart + MIN_SEGMENT_DURATION;
+			}
+		}
 
 		const text = segEditorOriginal;
 		const translation = segEditorTranslation;
@@ -1368,6 +1419,7 @@ export default function App() {
 		setSelectedSegmentIds(new Set());
 		setTimelineRubberRange(null);
 		setTimelineContextMenu(null);
+		setSubtitleTableContextMenu(null);
 		hydrateAgentChatFromProject(null);
 		undoSegmentsStackRef.current = [];
 		redoSegmentsStackRef.current = [];
@@ -2450,6 +2502,7 @@ export default function App() {
 		setChatMessages([]);
 		setChatInput('');
 		setPendingAttachedSegment(null);
+		setPendingAttachedRange(null);
 		setExpandedDiffIds(new Set());
 		setAgentBatchProgress(null);
 	}, [isAgentBusy]);
@@ -2607,8 +2660,114 @@ export default function App() {
 			translation: seg.translation ?? null,
 			speaker_gender: seg.speaker_gender ?? null
 		});
+		setPendingAttachedRange(null);
 		requestAnimationFrame(() => chatInputRef.current?.focus());
 	}, [generatedSegments, selectedSegmentIndex]);
+
+	const buildAttachedSegmentFromSeg = useCallback(
+		(seg: SubtitleSegment): ChatAttachedSegment => ({
+			id: seg.id,
+			start: seg.start,
+			end: seg.end,
+			text: seg.text,
+			translation: seg.translation ?? null,
+			speaker_gender: seg.speaker_gender ?? null
+		}),
+		[]
+	);
+
+	const buildAttachedRangeFromIds = useCallback(
+		(ids: Set<number>): ChatAttachedRange | null => {
+			if (ids.size < 2) return null;
+			const segs = segmentsRef.current.filter((s) => ids.has(s.id));
+			if (segs.length < 2) return null;
+			segs.sort((a, b) => {
+				if (a.start !== b.start) return a.start - b.start;
+				return a.id - b.id;
+			});
+			const first = buildAttachedSegmentFromSeg(segs[0]);
+			const last = buildAttachedSegmentFromSeg(segs[segs.length - 1]);
+			return {
+				first,
+				last,
+				segments: segs.map(buildAttachedSegmentFromSeg)
+			};
+		},
+		[buildAttachedSegmentFromSeg]
+	);
+
+	const attachCurrentSubtitleSelectionToChat = useCallback((): boolean => {
+		const ids = selectedSegmentIdsRef.current;
+		if (ids.size >= 2) {
+			const range = buildAttachedRangeFromIds(ids);
+			if (!range) return false;
+			setPendingAttachedSegment(null);
+			setPendingAttachedRange(range);
+			requestAnimationFrame(() => chatInputRef.current?.focus());
+			return true;
+		}
+		const idx = selectedSegmentIndexRef.current;
+		const seg = segmentsRef.current[idx];
+		if (!seg) return false;
+		setPendingAttachedSegment(buildAttachedSegmentFromSeg(seg));
+		setPendingAttachedRange(null);
+		requestAnimationFrame(() => chatInputRef.current?.focus());
+		return true;
+	}, [buildAttachedRangeFromIds, buildAttachedSegmentFromSeg]);
+
+	const copyCurrentSubtitleSelectionToClipboard = useCallback((): boolean => {
+		const ids = selectedSegmentIdsRef.current;
+		if (ids.size >= 2) {
+			const range = buildAttachedRangeFromIds(ids);
+			if (!range) return false;
+			subtitleClipboardRef.current = { kind: 'range', range };
+			return true;
+		}
+		const idx = selectedSegmentIndexRef.current;
+		const seg = segmentsRef.current[idx];
+		if (!seg) return false;
+		subtitleClipboardRef.current = {
+			kind: 'segment',
+			segment: buildAttachedSegmentFromSeg(seg)
+		};
+		return true;
+	}, [buildAttachedRangeFromIds, buildAttachedSegmentFromSeg]);
+
+	const pasteSubtitleClipboardToChat = useCallback((): boolean => {
+		const clip = subtitleClipboardRef.current;
+		if (!clip) return false;
+		if (clip.kind === 'segment') {
+			setPendingAttachedSegment(clip.segment);
+			setPendingAttachedRange(null);
+		} else {
+			setPendingAttachedSegment(null);
+			setPendingAttachedRange(clip.range);
+		}
+		return true;
+	}, []);
+
+	const handleSubtitleMultiSelectChange = useCallback(
+		(next: Set<number>) => {
+			setSelectedSegmentIds(next);
+		},
+		[]
+	);
+
+	const handleSubtitleRowContextMenu = useCallback(
+		(e: React.MouseEvent, index: number) => {
+			e.preventDefault();
+			const seg = segmentsRef.current[index];
+			if (!seg) return;
+			const multi = selectedSegmentIdsRef.current;
+			if (!multi.has(seg.id) && selectedSegmentIndexRef.current !== index) {
+				setSelectedSegmentIds(new Set());
+				selectSegmentAndSeek(index);
+			}
+			setSubtitleTableContextMenu({ x: e.clientX, y: e.clientY, index });
+		},
+		[selectSegmentAndSeek]
+	);
+
 
 	const mergeGlossaryAgentUpdates = useCallback(
 		(
@@ -2998,24 +3157,37 @@ ${pairsBlock}
 		if (!text || isAgentBusy) return;
 
 		const attached = pendingAttachedSegment;
+		const attachedRange = pendingAttachedRange;
 		const userMsg: ChatMessage = {
 			id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
 			role: 'user',
 			text,
-			attachedSegment: attached ?? undefined
+			attachedSegment: attached ?? undefined,
+			attachedRange: attachedRange ?? undefined
 		};
 		setChatMessages((prev) => [...prev, userMsg]);
 		setChatInput('');
 		setPendingAttachedSegment(null);
+		setPendingAttachedRange(null);
 		setIsAgentBusy(true);
 		setAgentBatchProgress(null);
 
 		try {
 			const project = currentProjectRef.current;
 			if (!project) return;
-			const messageForAgent = attached
-				? `${text}\n\nПрикрепленная реплика:\n#${attached.id} [${formatChatTimecode(attached.start)}] speaker_gender=${formatSpeakerGenderForAgent(attached.speaker_gender)}\nOriginal: ${attached.text}\nTranslation: ${attached.translation ?? ''}`
-				: text;
+			let messageForAgent = text;
+			if (attached) {
+				messageForAgent = `${messageForAgent}\n\nПрикрепленная реплика:\n#${attached.id} [${formatChatTimecode(attached.start)}] speaker_gender=${formatSpeakerGenderForAgent(attached.speaker_gender)}\nOriginal: ${attached.text}\nTranslation: ${attached.translation ?? ''}`;
+			}
+			if (attachedRange) {
+				const lines = attachedRange.segments
+					.map(
+						(s) =>
+							`#${s.id} [${formatChatTimecode(s.start)}] speaker_gender=${formatSpeakerGenderForAgent(s.speaker_gender)}\nOriginal: ${s.text}\nTranslation: ${s.translation ?? ''}`
+					)
+					.join('\n\n');
+				messageForAgent = `${messageForAgent}\n\nПрикрепленный диапазон реплик #${attachedRange.first.id}-${attachedRange.last.id}:\n${lines}`;
+			}
 
 			const history = buildAgentConversationHistory(chatMessages);
 			const intent: AgentIntent = await agentService.classifyIntent(text, {
@@ -3025,7 +3197,7 @@ ${pairsBlock}
 
 			const editScope: AgentEditScope = resolveAgentEditScope({
 				message: text,
-				hasAttachedSegment: !!attached,
+				hasAttachedSegment: !!attached || !!attachedRange,
 				intent
 			});
 
@@ -3117,7 +3289,7 @@ ${pairsBlock}
 					targetLanguage: projectForAgent.target_language ?? null,
 					sessionId: agentSessionIdRef.current,
 					conversationHistory: history,
-					hasAttachedSegment: !!attached,
+					hasAttachedSegment: !!attached || !!attachedRange,
 					focusSegmentId: attached?.id ?? null,
 					onBatchProgress: (c, t) => {
 						if (!showBatchProgress) return;
@@ -3202,6 +3374,7 @@ ${pairsBlock}
 		chatInput,
 		isAgentBusy,
 		pendingAttachedSegment,
+		pendingAttachedRange,
 		chatMessages,
 		activeSubtitleFileId,
 		formatChatTimecode,
@@ -3242,7 +3415,7 @@ ${pairsBlock}
 
 	useLayoutEffect(() => {
 		syncChatInputHeight();
-	}, [chatInput, pendingAttachedSegment, syncChatInputHeight]);
+	}, [chatInput, pendingAttachedSegment, pendingAttachedRange, syncChatInputHeight]);
 
 	const hasOriginalText = useMemo(
 		() => generatedSegments.some((s) => (s.text ?? '').trim().length > 0),
@@ -3269,6 +3442,17 @@ ${pairsBlock}
 			setTimelineContextMenu((prev) => (prev ? { ...prev, x, y } : null));
 		}
 	}, [timelineContextMenu]);
+
+	useLayoutEffect(() => {
+		const menu = subtitleTableContextMenu;
+		const el = subtitleTableContextMenuRef.current;
+		if (!menu || !el) return;
+		const { width, height } = el.getBoundingClientRect();
+		const { x, y } = clampContextMenuToViewport(menu.x, menu.y, width, height);
+		if (x !== menu.x || y !== menu.y) {
+			setSubtitleTableContextMenu((prev) => (prev ? { ...prev, x, y } : null));
+		}
+	}, [subtitleTableContextMenu]);
 
 	const handleOpenSpellCheck = useCallback(async () => {
 		if (!currentProjectRef.current || generatedSegments.length === 0) return;
@@ -3471,6 +3655,40 @@ ${pairsBlock}
 		[activeSubtitleFileId, pushSubtitleHistorySnapshot, markProjectDirty]
 	);
 
+	const handleSubtitleCellCommit = useCallback(
+		(index: number, payload: SubtitleCellCommitValue) => {
+			const seg = segmentsRef.current[index];
+			if (!seg) return;
+			if (payload.field === 'start') {
+				const t = parseSrtTime(payload.valueText);
+				if (t == null) return;
+				const maxStart = Math.max(0, seg.end - MIN_SEGMENT_DURATION);
+				const nextStart = Math.max(0, Math.min(t, maxStart));
+				if (Math.abs(nextStart - seg.start) < 1e-6) return;
+				updateSegmentAtIndex(index, { start: nextStart });
+			} else if (payload.field === 'end') {
+				const t = parseSrtTime(payload.valueText);
+				if (t == null) return;
+				const minEnd = seg.start + MIN_SEGMENT_DURATION;
+				const nextEnd = Math.max(minEnd, t);
+				if (Math.abs(nextEnd - seg.end) < 1e-6) return;
+				updateSegmentAtIndex(index, { end: nextEnd });
+			} else if (payload.field === 'duration') {
+				const raw = payload.valueText.replace(',', '.');
+				const d = parseFloat(raw);
+				if (!Number.isFinite(d) || d <= 0) return;
+				updateSegmentAtIndex(index, { end: seg.start + Math.max(MIN_SEGMENT_DURATION, d) });
+			} else if (payload.field === 'translation') {
+				if ((seg.translation ?? '') === payload.valueText) return;
+				updateSegmentAtIndex(index, { translation: payload.valueText });
+			} else if (payload.field === 'text') {
+				if (seg.text === payload.valueText) return;
+				updateSegmentAtIndex(index, { text: payload.valueText });
+			}
+		},
+		[updateSegmentAtIndex]
+	);
+
 	const applyFindReplaceSegments = useCallback(
 		(nextList: SubtitleSegment[]) => {
 			if (!activeSubtitleFileId) return;
@@ -3513,8 +3731,10 @@ ${pairsBlock}
 		if (t === null) return;
 		const seg = generatedSegments[selectedSegmentIndex];
 		if (!seg) return;
-		const dur = seg.end - seg.start;
-		void updateSegmentAtIndex(selectedSegmentIndex, { start: t, end: t + dur });
+		const maxStart = Math.max(0, seg.end - MIN_SEGMENT_DURATION);
+		const nextStart = Math.max(0, Math.min(t, maxStart));
+		if (Math.abs(nextStart - seg.start) < 1e-6) return;
+		void updateSegmentAtIndex(selectedSegmentIndex, { start: nextStart });
 	}, [selectedSegmentIndex, segEditorStart, generatedSegments, updateSegmentAtIndex]);
 
 	const commitSegEditorDuration = useCallback(() => {
@@ -4318,6 +4538,7 @@ ${pairsBlock}
 			setSelectedSegmentIds(new Set());
 			setTimelineRubberRange(null);
 			setTimelineContextMenu(null);
+			setSubtitleTableContextMenu(null);
 			setSelectedTreeItem(null);
 			setProjectFileMenu(null);
 			timelineRangeSelectDragRef.current = null;
@@ -4325,6 +4546,38 @@ ${pairsBlock}
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
 	}, []);
+
+	useEffect(() => {
+		const onContextMenu = (e: MouseEvent) => {
+			if (isEditableKeyboardTarget(e.target)) return;
+			e.preventDefault();
+		};
+		window.addEventListener('contextmenu', onContextMenu);
+		return () => window.removeEventListener('contextmenu', onContextMenu);
+	}, []);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.code !== 'KeyC') return;
+			if (!(e.ctrlKey || e.metaKey)) return;
+			if (e.shiftKey || e.altKey) return;
+			if (activeModal !== null) return;
+			if (isEditableKeyboardTarget(e.target)) return;
+			const hasMulti = selectedSegmentIdsRef.current.size > 0;
+			const hasSingle = selectedSegmentIndexRef.current >= 0;
+			if (!hasMulti && !hasSingle) return;
+			if (copyCurrentSubtitleSelectionToClipboard()) {
+				e.preventDefault();
+				try {
+					void navigator.clipboard?.writeText(SUBTITLE_CLIPBOARD_MARKER).catch(() => {});
+				} catch {
+					/* noop */
+				}
+			}
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	}, [activeModal, copyCurrentSubtitleSelectionToClipboard]);
 
 	useEffect(() => {
 		if (!selectedTreeItem) return;
@@ -5653,6 +5906,28 @@ ${pairsBlock}
 													</div>
 												</div>
 											)}
+											{msg.attachedRange && (
+												<div className="mt-3 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
+													<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+														<span className="whitespace-nowrap">
+															#{msg.attachedRange.first.id}-{msg.attachedRange.last.id}
+														</span>
+														<div className="flex-1 h-[1px] bg-border-default" />
+													</div>
+													<div className="flex flex-col gap-[4px]">
+														<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+															<span className="text-caption text-text-primary font-inter break-words">
+																{msg.attachedRange.first.translation || t('aiAgent.noTranslation')}
+															</span>
+														</div>
+														<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+															<span className="text-caption text-text-primary font-inter break-words">
+																{msg.attachedRange.last.translation || t('aiAgent.noTranslation')}
+															</span>
+														</div>
+													</div>
+												</div>
+											)}
 										</div>
 									</div>
 								);
@@ -5943,6 +6218,37 @@ ${pairsBlock}
 								</div>
 							)}
 
+							{pendingAttachedRange && (
+								<div className="mx-3 mt-3 mb-1 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] shrink-0">
+									<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+										<span className="whitespace-nowrap">
+											#{pendingAttachedRange.first.id}-{pendingAttachedRange.last.id}
+										</span>
+										<div className="flex-1 h-[1px] bg-border-default" />
+										<button
+											type="button"
+											title={t('aiAgent.removeAttachment')}
+											onClick={() => setPendingAttachedRange(null)}
+											className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors"
+										>
+											{t('aiAgent.remove')}
+										</button>
+									</div>
+									<div className="flex flex-col gap-[4px]">
+										<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+											<span className="text-caption text-text-primary font-inter break-words">
+												{pendingAttachedRange.first.translation || t('aiAgent.noTranslation')}
+											</span>
+										</div>
+										<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+											<span className="text-caption text-text-primary font-inter break-words">
+												{pendingAttachedRange.last.translation || t('aiAgent.noTranslation')}
+											</span>
+										</div>
+									</div>
+								</div>
+							)}
+
 							<textarea
 								ref={chatInputRef}
 								value={chatInput}
@@ -5951,6 +6257,15 @@ ${pairsBlock}
 									requestAnimationFrame(syncChatInputHeight);
 								}}
 								onKeyDown={handleChatInputKeyDown}
+								onPaste={(e) => {
+									if (!subtitleClipboardRef.current) return;
+									const txt = e.clipboardData?.getData('text') ?? '';
+									const isOurClip = txt.length === 0 || txt === SUBTITLE_CLIPBOARD_MARKER;
+									if (!isOurClip) return;
+									if (pasteSubtitleClipboardToChat()) {
+										e.preventDefault();
+									}
+								}}
 								disabled={isAgentBusy}
 								placeholder={t('aiAgent.placeholder')}
 								rows={3}
@@ -6016,9 +6331,13 @@ ${pairsBlock}
 								colWidths={colWidths}
 								segments={generatedSegments}
 								selectedSegmentIndex={selectedSegmentIndex}
+								selectedSegmentIds={selectedSegmentIds}
 								findHighlight={findHighlight}
 								onSelectRow={selectSegmentAndSeek}
+								onMultiSelectChange={handleSubtitleMultiSelectChange}
 								onColResizeStart={startColResize}
+								onCellCommit={handleSubtitleCellCommit}
+								onRowContextMenu={handleSubtitleRowContextMenu}
 								labels={subtitleTableLabels}
 							/>
 
@@ -6556,6 +6875,13 @@ ${pairsBlock}
 				const canRetranscribe = hasRange && Boolean(activeVideoAbsolutePath);
 				const selectedCount = selectedSegmentIds.size;
 				const canDelete = Boolean(activeSubtitleFileId) && (selectedCount > 0 || selectedSegmentIndex >= 0);
+				const canAttach =
+					selectedCount >= 1 ||
+					(selectedSegmentIndex >= 0 && selectedSegmentIndex < generatedSegments.length);
+				const attachLabel =
+					selectedCount >= 2
+						? t('table.attachRangeToChat', { count: selectedCount })
+						: t('table.attachToChat');
 				const deleteLabel =
 					selectedCount > 1
 						? t('timeline.deleteCount', { count: selectedCount })
@@ -6615,6 +6941,18 @@ ${pairsBlock}
 							</button>
 							<button
 								type="button"
+								disabled={!canAttach}
+								onClick={() => {
+									if (!canAttach) return;
+									setTimelineContextMenu(null);
+									attachCurrentSubtitleSelectionToChat();
+								}}
+								className="block text-left whitespace-nowrap px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
+							>
+								{attachLabel}
+							</button>
+							<button
+								type="button"
 								disabled={!canDelete}
 								onClick={() => {
 									if (!canDelete) return;
@@ -6631,6 +6969,45 @@ ${pairsBlock}
 								}
 							>
 								{deleteLabel}
+							</button>
+						</div>
+					</>
+				);
+			})()}
+
+			{subtitleTableContextMenu && (() => {
+				const m = subtitleTableContextMenu;
+				const hasSelection =
+					selectedSegmentIds.size >= 1 ||
+					(selectedSegmentIndex >= 0 && selectedSegmentIndex < generatedSegments.length);
+				const canAttach = hasSelection;
+				const attachLabel =
+					selectedSegmentIds.size >= 2
+						? t('table.attachRangeToChat', { count: selectedSegmentIds.size })
+						: t('table.attachToChat');
+				return (
+					<>
+						<div
+							className="fixed inset-0 z-[10500]"
+							onMouseDown={() => setSubtitleTableContextMenu(null)}
+							onContextMenu={(e) => { e.preventDefault(); setSubtitleTableContextMenu(null); }}
+						/>
+						<div
+							ref={subtitleTableContextMenuRef}
+							className="fixed z-[10501] w-max max-w-[min(100vw-16px,24rem)] py-1 bg-surface-secondary border border-border-default rounded-[8px] shadow-2xl"
+							style={{ left: m.x, top: m.y }}
+							onMouseDown={(e) => e.stopPropagation()}
+						>
+							<button
+								type="button"
+								disabled={!canAttach}
+								onClick={() => {
+									setSubtitleTableContextMenu(null);
+									attachCurrentSubtitleSelectionToChat();
+								}}
+								className="block text-left whitespace-nowrap px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
+							>
+								{attachLabel}
 							</button>
 						</div>
 					</>

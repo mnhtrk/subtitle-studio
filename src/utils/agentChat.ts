@@ -8,7 +8,7 @@ export function formatSpeakerGenderForAgent(gender?: string | null): string {
 }
 export const AGENT_BATCH_SIZE = 40;
 
-// правка всего эпизода идёт пакетами, для весь проект - перебираем файлы
+// правка всего эпизода идёт пакетами, для полного проекта перебираем файлы
 export function isWholeFileAgentRequest(text: string): boolean {
 	const t = text.toLowerCase();
 	return (
