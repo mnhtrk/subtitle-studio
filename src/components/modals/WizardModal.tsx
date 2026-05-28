@@ -1,15 +1,24 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { DraggableModalShell } from './DraggableModalShell';
+import { GlossaryModal } from './GlossaryModal';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   projectService,
   ProjectData,
   ProjectFile,
-  SubtitleSegment,
   GlossaryEntry,
-  GlossaryTermGenerated
+  SubtitleSegment,
+  isAiOperationCancelled
 } from '../../services/projectService';
+import {
+  applyAutoGlossaryToProject,
+  clearGlossaryTargetsInProject,
+  mergePromptHintsIntoGlossary,
+  parseTranslationHintsFromPrompt,
+  resolveIsoLanguage,
+  translateGlossaryTargetsInProject
+} from '../../utils/glossary';
 
 function joinProjectPath(base: string, ...parts: string[]): string {
   const a = base.replace(/[/\\]+$/, '');
@@ -17,7 +26,7 @@ function joinProjectPath(base: string, ...parts: string[]): string {
   return `${a}/${rest}`;
 }
 
-/** После транскрипции: сегменты на дорожке субтитров, видео только медиа, пара связана + .srt на диске. */
+// после транскрипции: сегменты, srt на диск, видео+саб связаны
 async function finalizeEpisodePairInProject(
   projectPath: string,
   videoId: string,
@@ -64,54 +73,6 @@ async function finalizeEpisodePairInProject(
   return { project: updated, subtitleFileId: subId };
 }
 
-function mergeAutoGlossary(
-  existing: GlossaryEntry[],
-  generated: GlossaryTermGenerated[]
-): GlossaryEntry[] {
-  const seen = new Set(
-    existing.map((e) => e.source.trim().toLowerCase()).filter(Boolean)
-  );
-  const next = [...existing];
-  for (const t of generated) {
-    const s = t.source.trim();
-    const tgt = t.target.trim();
-    if (!s || !tgt) continue;
-    const k = s.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    const cat = (t.category ?? '').trim();
-    const conf = Math.round(t.confidence * 100);
-    const ctx = cat.length > 0 ? `auto ${conf}% (${cat})` : `auto ${conf}%`;
-    next.push({
-      id: crypto.randomUUID(),
-      source: t.source,
-      target: t.target,
-      description: null,
-      context: ctx
-    });
-  }
-  return next;
-}
-
-function buildTranscriptionPrompt(
-  userPrompt: string,
-  glossary: GlossaryEntry[]
-): string | undefined {
-  const manual = userPrompt.trim();
-  const glossaryOriginals = glossary
-    .map((e) => e.source.trim())
-    .filter(Boolean)
-    .filter((value, index, arr) => arr.findIndex((x) => x.toLowerCase() === value.toLowerCase()) === index);
-
-  if (manual.length > 0) {
-    if (glossaryOriginals.length === 0) return manual;
-    return `${manual}\n\nImportant names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
-  }
-
-  if (glossaryOriginals.length === 0) return undefined;
-  return `Important names/terms to keep exactly:\n${glossaryOriginals.join(', ')}`;
-}
-
 interface WizardModalProps {
   onClose: () => void;
   projectPath?: string;
@@ -153,28 +114,6 @@ const whisperLanguageCodes: Record<string, string> = {
   Ukrainian: 'uk'
 };
 
-const resolveIsoLanguage = (languageOrCode: string): string | null => {
-  const normalized = languageOrCode.trim().toLowerCase();
-  if (!normalized) return null;
-  if (normalized.length === 2) return normalized;
-  if (normalized === 'english') return 'en';
-  if (normalized === 'russian') return 'ru';
-  if (normalized === 'spanish') return 'es';
-  if (normalized === 'french') return 'fr';
-  if (normalized === 'german') return 'de';
-  if (normalized === 'italian') return 'it';
-  if (normalized === 'portuguese') return 'pt';
-  if (normalized === 'chinese') return 'zh';
-  if (normalized === 'japanese') return 'ja';
-  if (normalized === 'korean') return 'ko';
-  if (normalized === 'arabic') return 'ar';
-  if (normalized === 'hindi') return 'hi';
-  if (normalized === 'turkish') return 'tr';
-  if (normalized === 'polish') return 'pl';
-  if (normalized === 'ukrainian') return 'uk';
-  return null;
-};
-
 export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, onComplete }) => {
   const { t } = useI18n();
   const [currentStep, setCurrentStep] = useState(1);
@@ -189,7 +128,15 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
   const [errorText, setErrorText] = useState('');
   const [workingSegments, setWorkingSegments] = useState<SubtitleSegment[]>([]);
   const [workingFileId, setWorkingFileId] = useState<string | null>(null);
+  // глоссарий уже сгенерирован и переведён - можно открыть для ручной правки
+  const [glossaryReady, setGlossaryReady] = useState<GlossaryEntry[] | null>(null);
+  const [glossaryModalOpen, setGlossaryModalOpen] = useState(false);
+  const [isPreparingGlossary, setIsPreparingGlossary] = useState(false);
+  // активный фоновый запрос на генерацию глоссария
+  // нужен чтобы не дублировать вызов если фон ещё идёт, а пользователь жмёт edit glossary
+  const glossaryPromiseRef = useRef<Promise<GlossaryEntry[]> | null>(null);
   const totalSteps = 7;
+  const cancelRef = useRef(false);
 
   const isFileMode = sourceType === 'file';
 
@@ -206,6 +153,25 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
 
   const progressWidth = `${(currentStep / totalSteps) * 100}%`;
   const isLoaderStep = currentStep === 4 || currentStep === 6;
+
+  const canProceedFromStep =
+    currentStep === 1
+      ? Boolean(videoPath.trim())
+      : currentStep === 2 && isFileMode
+        ? Boolean(subtitlePath.trim())
+        : true;
+
+  const handleCancelLoader = () => {
+    cancelRef.current = true;
+    void projectService.cancelAiOperation();
+    setIsProcessing(false);
+    setErrorText('');
+    if (currentStep === 4) {
+      setCurrentStep(isFileMode ? 2 : 3);
+    } else if (currentStep === 6) {
+      setCurrentStep(5);
+    }
+  };
 
   const ensureProject = () => {
     if (!projectPath) {
@@ -269,6 +235,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     }
 
     console.log('[Wizard] Step 3.5: transcription started');
+    cancelRef.current = false;
     setIsProcessing(true);
     setErrorText('');
     setCurrentStep(4);
@@ -277,6 +244,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     try {
       console.log('[Wizard][subtitle-file] importing video to project');
       const importedVideo: ProjectFile = await projectService.importMedia(projectPath!, videoPath);
+      if (cancelRef.current) return;
       console.log('[Wizard][subtitle-file] video imported:', importedVideo.id);
 
       let segments: SubtitleSegment[] = [];
@@ -291,17 +259,18 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
         const outputAudioPath = `${projectPath!}/${tempAudioRel}`;
         console.log('[Wizard] Extracting audio', outputAudioPath);
         const audioPath = await projectService.extractAudioFromVideo(videoPath, outputAudioPath);
+        if (cancelRef.current) return;
 
         const whisperLanguage = whisperLanguageCodes[sourceLanguage] ?? 'en';
         const projectForPrompt = await projectService.open(projectPath!);
-        const whisperPrompt = buildTranscriptionPrompt(contextPrompt, projectForPrompt.glossary);
+        const userPrompt = contextPrompt.trim();
         console.log('[Wizard] Whisper language:', whisperLanguage);
         console.log('[Wizard] Calling OpenAI Whisper');
         segments = await projectService.transcribeAudio(
           audioPath,
           whisperLanguage,
-          whisperPrompt,
-          projectForPrompt.glossary
+          userPrompt.length > 0 ? userPrompt : undefined,
+          projectForPrompt.glossary ?? []
         );
       } else {
         if (!subtitlePath) {
@@ -309,8 +278,11 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
         }
         console.log('[Wizard][subtitle-file] parsing subtitle file:', subtitlePath);
         segments = await projectService.parseSubtitleFile(subtitlePath);
+        if (cancelRef.current) return;
         console.log('[Wizard][subtitle-file] parsed segments:', segments.length);
       }
+
+      if (cancelRef.current) return;
 
       console.log('[Wizard][subtitle-file] creating paired subtitle track');
       const { project: pairedProject, subtitleFileId } = await finalizeEpisodePairInProject(
@@ -323,37 +295,73 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       let updatedProject = pairedProject;
 
       if (sourceType === 'ai') {
-        try {
-          const targetIso =
-            resolveIsoLanguage(updatedProject.target_language) ??
-            resolveIsoLanguage(targetLanguage) ??
-            'en';
-          const suggested = await projectService.autoGenerateGlossary(segments, {
-            min_frequency: 2,
-            max_terms: 45,
-            target_language: targetIso,
-            contextPrompt: contextPrompt
-          });
-          if (suggested.length > 0) {
-            const opened = await projectService.open(projectPath!);
-            const merged = mergeAutoGlossary(opened.glossary, suggested);
-            const toSave: ProjectData = {
-              ...opened,
-              glossary: merged,
-              updated_at: new Date().toISOString()
-            };
-            await projectService.save(toSave);
-            updatedProject = toSave;
+        const glossaryLangIso =
+          resolveIsoLanguage(sourceLanguage) ??
+          resolveIsoLanguage(updatedProject.target_language) ??
+          resolveIsoLanguage(targetLanguage) ??
+          'en';
+        // meaning_context всегда на target-языке проекта
+        const meaningCtxIso =
+          resolveIsoLanguage(updatedProject.target_language) ??
+          resolveIsoLanguage(targetLanguage) ??
+          'en';
+        // шаг 1: source-термины + meaning_context (target пуст)
+        updatedProject = await applyAutoGlossaryToProject(projectPath!, segments, {
+          targetLanguageIso: glossaryLangIso,
+          meaningContextLanguageIso: meaningCtxIso,
+          contextPrompt: contextPrompt,
+          fillTranslation: false
+        });
+        if (cancelRef.current) return;
+        // шаг 2: переводим target-колонку на язык проекта (Griselda -> Гризельда и т.п.)
+        // без второго auto_generate - только translate_glossary_terms
+        const effectiveTargetLanguage =
+          (updatedProject.target_language ?? '').trim() || targetLanguage;
+        if (effectiveTargetLanguage) {
+          const combinedPrompt = [translationPrompt, contextPrompt]
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .join('\n\n');
+          try {
+            updatedProject = await translateGlossaryTargetsInProject(
+              projectPath!,
+              effectiveTargetLanguage,
+              combinedPrompt
+            );
+          } catch (err) {
+            console.warn('[Wizard] translateGlossaryTargetsInProject failed', err);
           }
-        } catch (autoGlossErr) {
-          console.warn('[Wizard] Auto-glossary skipped:', autoGlossErr);
         }
       }
 
+      if (cancelRef.current) return;
+
       setWorkingSegments(segments);
       console.log('[Wizard] Transcription done, segments:', segments.length);
+
+      // глоссарий уже полностью готов (original + meaning_context + перевод)
+      // подсасываем в state чтобы кнопка «Редактировать глоссарий» открывалась мгновенно
+      const promptHints = parseTranslationHintsFromPrompt(
+        [translationPrompt, contextPrompt].filter(Boolean).join('\n\n')
+      );
+      let readyGlossary = updatedProject.glossary ?? [];
+      if (promptHints.length > 0) {
+        readyGlossary = mergePromptHintsIntoGlossary(readyGlossary, promptHints);
+        updatedProject = { ...updatedProject, glossary: readyGlossary };
+        try {
+          await projectService.save(updatedProject);
+        } catch (err) {
+          console.warn('[Wizard] save glossary with prompt hints failed', err);
+        }
+      }
+      glossaryPromiseRef.current = null;
+      setGlossaryReady(readyGlossary);
+
       setCurrentStep(5);
       onComplete({ project: updatedProject, segments, subtitleFileId });
+    } catch (error) {
+      if (cancelRef.current || isAiOperationCancelled(error)) return;
+      throw error;
     } finally {
       if (tempAudioRel && projectPath) {
         projectService
@@ -364,6 +372,93 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     }
   };
 
+  // подсосать актуальный глоссарий для runTranslation
+  // если уже есть в state - отдаём как есть; иначе читаем из project.json
+  // дополнительно догоняем перевод любых записей с пустым target (на случай если язык поменяли только что)
+  const ensureGlossaryReady = async (): Promise<GlossaryEntry[]> => {
+    if (!projectPath) throw new Error('Project path is not set');
+    if (glossaryPromiseRef.current) return glossaryPromiseRef.current;
+    const promise = (async (): Promise<GlossaryEntry[]> => {
+      const opened = await projectService.open(projectPath);
+      let glossary = (glossaryReady && glossaryReady.length > 0)
+        ? glossaryReady
+        : opened.glossary ?? [];
+      const needsTr = glossary.some(
+        (e) =>
+          e.source.trim().length > 0 &&
+          (!e.target.trim() || e.target.trim().toLowerCase() === e.source.trim().toLowerCase())
+      );
+      if (needsTr) {
+        const combinedPrompt = [translationPrompt, contextPrompt]
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join('\n\n');
+        try {
+          setIsPreparingGlossary(true);
+          const updated = await translateGlossaryTargetsInProject(
+            projectPath,
+            targetLanguage,
+            combinedPrompt
+          );
+          glossary = updated.glossary ?? glossary;
+        } finally {
+          setIsPreparingGlossary(false);
+        }
+      }
+      const promptHints = parseTranslationHintsFromPrompt(
+        [translationPrompt, contextPrompt].filter(Boolean).join('\n\n')
+      );
+      if (promptHints.length > 0) {
+        glossary = mergePromptHintsIntoGlossary(glossary, promptHints);
+        await projectService.save({ ...opened, glossary });
+      }
+      setGlossaryReady(glossary);
+      return glossary;
+    })();
+    glossaryPromiseRef.current = promise.finally(() => {
+      glossaryPromiseRef.current = null;
+    });
+    return promise;
+  };
+
+  const handleOpenGlossaryEditor = async () => {
+    if (!projectPath) return;
+    setErrorText('');
+    // открываем модал МГНОВЕННО с тем что есть в state/проекте.
+    // глоссарий формируется на этапе транскрипции, отдельно ничего не «готовится».
+    // если перевод ещё пере-генерируется фоном после смены языка - в модале поля просто обновятся.
+    if (glossaryReady === null) {
+      try {
+        const opened = await projectService.open(projectPath);
+        setGlossaryReady(opened.glossary ?? []);
+      } catch (e) {
+        console.warn('[Wizard] open project for glossary failed', e);
+        setGlossaryReady([]);
+      }
+    }
+    setGlossaryModalOpen(true);
+  };
+
+  // сохранение глоссария из визарда - только на диск, без агента
+  // агент проекта работает только когда глоссарий правится в основном UI, тут он не нужен
+  const handleGlossarySavedFromWizard = (entries: GlossaryEntry[]) => {
+    setGlossaryReady(entries);
+    if (!projectPath) return;
+    void (async () => {
+      try {
+        const opened = await projectService.open(projectPath);
+        await projectService.save({
+          ...opened,
+          glossary: entries,
+          updated_at: new Date().toISOString()
+        });
+      } catch (e) {
+        console.warn('[Wizard] save glossary failed', e);
+      }
+    })();
+    setGlossaryModalOpen(false);
+  };
+
   const runTranslation = async () => {
     ensureProject();
     if (!workingSegments.length || !workingFileId) {
@@ -371,19 +466,28 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
     }
 
     console.log('[Wizard] Step 4.5: translation started');
+    cancelRef.current = false;
     setIsProcessing(true);
     setErrorText('');
     setCurrentStep(6);
 
     try {
-      const prompt = translationPrompt.trim() || contextPrompt.trim() || 'Natural subtitle translation';
-      const projectForGlossary = await projectService.open(projectPath!);
+      const combinedPrompt = [translationPrompt, contextPrompt]
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .join('\n\n');
+      const prompt = combinedPrompt || 'Natural subtitle translation';
+      // если пользователь уже открывал Edit Glossary - глоссарий готов и отредактирован
+      // иначе подготавливаем на лету
+      const glossary = await ensureGlossaryReady();
+      if (cancelRef.current) return;
       const translations = await projectService.translateBatch(
         workingSegments,
         targetLanguage,
         prompt,
-        projectForGlossary.glossary
+        glossary
       );
+      if (cancelRef.current) return;
 
       const translatedSegments = workingSegments.map((segment) => {
         const translation = translations.find((item) => item.id === segment.id);
@@ -398,6 +502,9 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       console.log('[Wizard] Translation done, translated segments:', translatedSegments.length);
       setCurrentStep(7);
       onComplete({ project: updatedProject, segments: translatedSegments, subtitleFileId: workingFileId });
+    } catch (error) {
+      if (cancelRef.current || isAiOperationCancelled(error)) return;
+      throw error;
     } finally {
       setIsProcessing(false);
     }
@@ -436,6 +543,9 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       }
       nextStep();
     } catch (error) {
+      if (cancelRef.current || isAiOperationCancelled(error)) {
+        return;
+      }
       const message =
         error instanceof Error
           ? error.message
@@ -537,8 +647,8 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
       title: t('wizard.step3Title'),
       desc: t('wizard.step3Desc'),
       rightCol: (
-        <div className="flex flex-col h-full min-h-0">
-          <div className="flex flex-col gap-[8px] h-full min-h-0">
+        <div className="flex flex-col gap-[12px] h-full min-h-0">
+          <div className="flex-1 flex flex-col gap-[8px] min-h-0">
             <label className="text-caption text-text-primary">{t('wizard.prompt')}</label>
             <textarea 
               value={contextPrompt}
@@ -546,6 +656,18 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
               className="flex-1 min-h-0 w-full p-4 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary resize-none overflow-y-auto subtitle-table-scroll focus:outline-none focus:border-text-primary transition-colors placeholder:text-text-secondary/50"
               placeholder={t('wizard.step3Placeholder')}
             />
+          </div>
+          <div className="shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                void handleOpenGlossaryEditor();
+              }}
+              disabled={isPreparingGlossary || !projectPath}
+              className="w-full h-[42px] px-4 flex items-center justify-center bg-secondary-main hover:bg-secondary-hover disabled:bg-primary-disabled disabled:text-white/60 disabled:cursor-not-allowed text-text-primary text-body-reg rounded-[12px] border border-border-default transition-colors"
+            >
+              {isPreparingGlossary ? t('wizard.preparingGlossary') : t('wizard.editGlossary')}
+            </button>
           </div>
         </div>
       )
@@ -559,7 +681,35 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             <label className="text-caption text-text-primary">{t('wizard.targetLanguage')}</label>
             <select
               value={targetLanguage}
-              onChange={(e) => setTargetLanguage(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                setTargetLanguage(next);
+                // меняем target - старые переводы уже не актуальны
+                // источник + meaning_context остаются, очищаем только колонку перевод и пере-генерим её
+                if (!projectPath) return;
+                glossaryPromiseRef.current = null;
+                void (async () => {
+                  setIsPreparingGlossary(true);
+                  try {
+                    const cleared = await clearGlossaryTargetsInProject(projectPath);
+                    setGlossaryReady(cleared.glossary ?? []);
+                    const combinedPrompt = [translationPrompt, contextPrompt]
+                      .map((s) => s.trim())
+                      .filter(Boolean)
+                      .join('\n\n');
+                    const updated = await translateGlossaryTargetsInProject(
+                      projectPath,
+                      next,
+                      combinedPrompt
+                    );
+                    setGlossaryReady(updated.glossary ?? []);
+                  } catch (err) {
+                    console.warn('[Wizard] retranslate glossary on lang change failed', err);
+                  } finally {
+                    setIsPreparingGlossary(false);
+                  }
+                })();
+              }}
               className="w-full h-[42px] px-3 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary"
             >
               {languageOptions.map((lang) => (
@@ -576,26 +726,26 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
               placeholder={t('wizard.step5Placeholder')}
             />
           </div>
+          <div className="shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                void handleOpenGlossaryEditor();
+              }}
+              disabled={isPreparingGlossary || !projectPath}
+              className="w-full h-[42px] px-4 flex items-center justify-center bg-secondary-main hover:bg-secondary-hover disabled:bg-primary-disabled disabled:text-white/60 disabled:cursor-not-allowed text-text-primary text-body-reg rounded-[12px] border border-border-default transition-colors"
+            >
+              {isPreparingGlossary ? t('wizard.preparingGlossary') : t('wizard.editGlossary')}
+            </button>
+          </div>
         </div>
       )
     },
     7: {
       title: t('wizard.step7Title'),
-      desc: t('wizard.step7Desc'),
-      rightCol: (
-        <div className="flex-1 border border-border-default rounded-[12px] bg-secondary-main flex items-center justify-center overflow-hidden">
-          <div className="text-text-secondary opacity-20 flex flex-col items-center gap-2">
-            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-              <path d="M12 2L2 7L12 12L22 7L12 2Z" />
-              <path d="M2 17L12 22L22 17" />
-              <path d="M2 12L12 17L22 12" />
-            </svg>
-            <span className="text-caption">{t('wizard.placeholder')}</span>
-          </div>
-        </div>
-      )
+      desc: t('wizard.step7Desc')
     }
-  }), [t, videoPath, sourceType, sourceLanguage, subtitlePath, contextPrompt, targetLanguage, translationPrompt]);
+  }), [t, videoPath, sourceType, sourceLanguage, subtitlePath, contextPrompt, targetLanguage, translationPrompt, isPreparingGlossary, projectPath]);
 
   const currentContent = stepData[currentStep as keyof typeof stepData] || stepData[1];
 
@@ -618,7 +768,11 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
           </button>
         </div>
 
-        <div className="grid grid-cols-[1fr_1.2fr] gap-[32px] flex-1 min-h-0 items-start">
+        <div
+          className={`grid gap-[32px] flex-1 min-h-0 items-start ${
+            currentStep === 7 ? 'grid-cols-1' : 'grid-cols-[1fr_1.2fr]'
+          }`}
+        >
           {isLoaderStep ? (
             <>
               <div className="flex flex-col pt-0">
@@ -647,9 +801,11 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                   {currentContent.desc}
                 </p>
               </div>
-              <div className="flex flex-col h-full min-h-0 min-w-0">
-                {currentContent.rightCol}
-              </div>
+              {currentStep !== 7 && 'rightCol' in currentContent && currentContent.rightCol ? (
+                <div className="flex flex-col h-full min-h-0 min-w-0">
+                  {currentContent.rightCol}
+                </div>
+              ) : null}
             </>
           )}
         </div>
@@ -664,8 +820,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
           {isLoaderStep ? (
             <>
               <button 
-                onClick={prevStep}
-                disabled={isProcessing}
+                onClick={handleCancelLoader}
                 className="w-[112px] h-[26px] flex items-center justify-center bg-secondary-main hover:bg-secondary-hover text-text-primary text-body-reg rounded-[5px] transition-colors"
               >
                 {t('wizard.cancel')}
@@ -710,14 +865,22 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
                 onClick={() => {
                   handleNext().catch(console.error);
                 }}
-                disabled={isProcessing}
-                className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
+                disabled={isProcessing || !canProceedFromStep}
+                className="w-[112px] h-[26px] flex items-center justify-center bg-primary-main hover:bg-primary-hover disabled:bg-primary-disabled disabled:text-white/60 disabled:cursor-not-allowed text-white text-body-reg rounded-[5px] transition-colors shadow-sm"
               >
                 {t('wizard.nextStep')}
               </button>
             </>
           )}
         </div>
+        {glossaryModalOpen && (
+          <GlossaryModal
+            projectPath={projectPath ?? null}
+            initialEntries={glossaryReady ?? []}
+            onSaved={handleGlossarySavedFromWizard}
+            onClose={() => setGlossaryModalOpen(false)}
+          />
+        )}
     </DraggableModalShell>
   );
 };

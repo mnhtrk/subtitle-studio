@@ -6,15 +6,21 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1",
+    "release:msi": "npm run tauri build -- --bundles msi",
+    "icons:taskbar": "tauri icon branding/icon.svg -o src-tauri/icons && node scripts/prune-taskbar-icons.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-fs": "^2.5.0",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-sql": "^2.4.0",
+    "dictionary-en": "^4.0.0",
+    "dictionary-ru": "^3.0.0",
     "lucide-react": "^1.7.0",
+    "nspell": "^2.1.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

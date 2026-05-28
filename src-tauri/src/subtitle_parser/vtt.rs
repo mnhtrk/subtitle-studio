@@ -6,14 +6,14 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
     
-    // Пропускаем заголовок WebVTT
+    // скипаем заголовок webvtt
     while i < lines.len() && lines[i].trim().is_empty() {
         i += 1;
     }
     
     if i < lines.len() && lines[i].contains("WEBVTT") {
         i += 1;
-        // Пропускаем пустые строки после заголовка
+        // и пустые строки после него
         while i < lines.len() && lines[i].trim().is_empty() {
             i += 1;
         }
@@ -30,7 +30,7 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
             continue;
         }
         
-        // Проверяем строку времени
+        // таймкод?
         if let Some(captures) = time_regex.captures(line) {
             let start_hours = captures[1].parse::<u32>().unwrap_or(0);
             let start_minutes = captures[2].parse::<u32>().unwrap_or(0);
@@ -55,7 +55,7 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
             i += 1;
             let mut text_lines = Vec::new();
             
-            // Собираем текст сегмента
+            // собираем текст сегмента
             while i < lines.len() && !lines[i].trim().is_empty() {
                 text_lines.push(lines[i]);
                 i += 1;
@@ -71,10 +71,11 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
                 duration: end - start,
                 text,
                 translation: None,
+                speaker_gender: None,
                 flags: None,
             });
         } else {
-            // Пропускаем другие строки (идентификаторы, заметки и т.д.)
+            // мусорные строки vtt
             i += 1;
         }
     }

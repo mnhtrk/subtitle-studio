@@ -42,8 +42,6 @@ export const DraggableModalShell: React.FC<DraggableModalShellProps> = ({
 
 	const onDragPointerDown = (e: React.PointerEvent) => {
 		if (e.button !== 0) return;
-		if (!(e.target as HTMLElement).closest('[data-modal-drag-handle]')) return;
-		if ((e.target as HTMLElement).closest('button, input, textarea, select, a, label')) return;
 		if (position === null) return;
 		dragRef.current = {
 			pointerId: e.pointerId,
@@ -75,16 +73,12 @@ export const DraggableModalShell: React.FC<DraggableModalShellProps> = ({
 		<div className="fixed inset-0 z-[10000] pointer-events-none">
 			<div
 				ref={panelRef}
-				className={`pointer-events-auto absolute select-none ${className}`}
+				className={`pointer-events-auto absolute flex flex-col select-none ${className}`}
 				style={
 					position
 						? { left: position.x, top: position.y, width }
 						: { left: '50%', top: '50%', width, transform: 'translate(-50%, -50%)', visibility: 'hidden' }
 				}
-				onPointerDown={onDragPointerDown}
-				onPointerMove={onPointerMove}
-				onPointerUp={onPointerUp}
-				onPointerCancel={onPointerUp}
 			>
 				{dragZoneHeight > 0 && (
 					<div
@@ -92,9 +86,13 @@ export const DraggableModalShell: React.FC<DraggableModalShellProps> = ({
 						className="absolute left-0 right-0 top-0 z-[1]"
 						style={{ height: dragZoneHeight }}
 						aria-hidden
+						onPointerDown={onDragPointerDown}
+						onPointerMove={onPointerMove}
+						onPointerUp={onPointerUp}
+						onPointerCancel={onPointerUp}
 					/>
 				)}
-				<div className="contents [&>*]:relative [&>*]:z-[2]">{children}</div>
+				<div className="relative z-[2] flex flex-col flex-1 min-h-0 h-full w-full min-w-0">{children}</div>
 			</div>
 		</div>
 	);

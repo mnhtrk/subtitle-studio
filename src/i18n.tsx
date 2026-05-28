@@ -4,6 +4,28 @@ export type Locale = 'en' | 'ru';
 
 const LOCALE_STORAGE_KEY = 'subtitle-studio-locale';
 
+function detectSystemLocale(): Locale {
+	const sources: string[] = [];
+	if (typeof navigator !== 'undefined') {
+		if (Array.isArray(navigator.languages)) {
+			sources.push(...navigator.languages);
+		}
+		if (typeof navigator.language === 'string') {
+			sources.push(navigator.language);
+		}
+	}
+	for (const tag of sources) {
+		const lower = String(tag).toLowerCase();
+		if (lower.startsWith('ru') || lower.startsWith('be') || lower.startsWith('uk') || lower.startsWith('kk')) {
+			return 'ru';
+		}
+		if (lower.startsWith('en')) {
+			return 'en';
+		}
+	}
+	return 'en';
+}
+
 type DeepStringRecord<T> = {
 	[K in keyof T]: T[K] extends string ? string : DeepStringRecord<T[K]>;
 };
@@ -12,11 +34,14 @@ const enMessages = {
 	menu: {
 		file: 'File',
 		edit: 'Edit',
-		tools: 'Tools',
-		video: 'Video',
+		view: 'View',
+		ai: 'AI',
 		help: 'Help',
+		showOriginalOnVideo: 'Original subtitles on video',
+		dualMonitorMode: 'Dual monitor mode',
 		newProject: 'New Project',
 		openProject: 'Open Project',
+		importVideo: 'Import Video',
 		importOriginal: 'Import Original Subtitles',
 		importTranslated: 'Import Translated Subtitles',
 		save: 'Save',
@@ -25,15 +50,37 @@ const enMessages = {
 		undo: 'Undo',
 		redo: 'Redo',
 		delete: 'Delete',
-		find: 'Find',
+		findAndReplace: 'Find and Replace',
 		spellCheck: 'Spell check',
-		batchConvert: 'Batch convert',
-		openVideoFile: 'Open video file',
-		audioTrack: 'Audio track',
+		transcribe: 'Transcribe',
+		translate: 'Translate',
+		retranscribeRange: 'Retranscribe range',
+		retranscribeRangeGpt4o: 'Retranscribe using GPT-4o (one line)',
 		about: 'About',
-		updates: 'Updates',
 		switchToDark: 'Switch to dark theme',
 		switchToLight: 'Switch to light theme'
+	},
+	about: {
+		title: 'About Subtitle Studio',
+		desc: 'Desktop app for subtitle editing, transcription, and translation.',
+		developers: 'Developers',
+		developersList: 'Denis Gusev, Ilya Ivanov',
+		copyright: '© 2025–2026'
+	},
+	ai: {
+		transcribeTitle: 'Transcribe',
+		transcribeDesc: 'Select the source language and an optional hint for Whisper.',
+		transcribeStart: 'Transcribe',
+		noVideo: 'No video in the project to transcribe.',
+		noOriginalText: 'No original text to translate.',
+		openProjectFirst: 'Open or create a project first.',
+		stageAudio: 'Extracting audio from video...',
+		stageTranscribe: 'Transcribing speech...',
+		stageApply: 'Applying subtitles...',
+		stageTranslate: 'Translating...',
+		working: 'AI is working!',
+		errorTitle: 'AI error',
+		ok: 'OK'
 	},
 	settings: {
 		title: 'Settings',
@@ -60,14 +107,16 @@ const enMessages = {
 	},
 	projectTree: {
 		newFile: 'New file',
-		newFolder: 'New folder'
+		newFolder: 'New folder',
+		rename: 'Rename'
 	},
 	aiAgent: {
 		title: 'AI-agent',
-		add: 'Add',
+		add: 'New chat',
 		more: 'More',
-		emptyHint: 'Ask the agent a question or ask it to edit lines',
+		emptyHint: 'Chat with the agent to get tips and help.',
 		thinking: 'Agent is thinking...',
+		batchProgress: 'Batch {current} of {total}...',
 		placeholder: 'Help me translate, please...',
 		sendMessage: 'Send message',
 		removeAttachment: 'Remove line',
@@ -80,12 +129,17 @@ const enMessages = {
 		kept: 'Kept',
 		reverted: 'Reverted',
 		change: 'change',
-		changes: 'changes'
+		changes: 'changes',
+		episodeProgress: 'Batch {current} of {total}: {name}',
+		episodeChanges: '{count} changes',
+		inFiles: ' · {count} file(s)',
+		deletedLine: 'Removed'
 	},
 	table: {
 		startTime: 'Start time',
 		endTime: 'End time',
 		duration: 'Duration',
+		speakerGender: 'Speaker',
 		translation: 'Translation',
 		originalText: 'Original text',
 		translationPlaceholder: 'Translation...',
@@ -98,6 +152,7 @@ const enMessages = {
 	},
 	video: {
 		preview: 'Video Preview',
+		preparing: 'Preparing smooth playback…',
 		play: 'Play',
 		pause: 'Pause',
 		stop: 'Stop',
@@ -123,7 +178,10 @@ const enMessages = {
 		deleteCount: 'Delete ({count})',
 		retranscribeSelectRange: 'Select a range on the timeline (click and drag)',
 		retranscribeNoVideo: 'No video available for audio extraction',
-		retranscribeHint: 'Whisper + GPT post-processing + translation for the selected range',
+		retranscribeHint: 'Retry a selected range.',
+		retranscribeRangeGpt4o: 'Retranscribe using GPT-4o (one line)',
+		retranscribeGpt4oHint:
+			'Transcribe the selected range with GPT-4o Transcribe (one subtitle for the selection).',
 		deleteSelectSubtitle: 'Select subtitle(s) on the timeline',
 		deleteSelectedPlural: 'Delete selected subtitles (Delete)',
 		deleteSelectedSingle: 'Delete selected subtitle (Delete)'
@@ -133,14 +191,21 @@ const enMessages = {
 		desc: 'You can select the source language and write a hint prompt to help improve the re-transcription.',
 		sourceLanguage: 'Source language',
 		prompt: 'Prompt',
-		promptPlaceholder: 'Bloom, Stella, Mike, Magix, Alfea...',
+		promptPlaceholder: 'In the series Velorian Echo, characters Arlen, Siva, Toren, and Miri investigate a strange signal in an abandoned complex. It is leading to unsettling events.',
 		cancel: 'Cancel',
-		retranscribe: 'Retranscribe',
+		retranscribe: 'Start',
+		gpt4oTitle: 'Retranscribe with GPT-4o',
+		gpt4oDesc:
+			'The selected time range is sent to GPT-4o Transcribe. One subtitle is created for that range (start and end of the selection).',
+		gpt4oStart: 'Start',
 		working: 'AI is working!',
 		stageAudio: 'Extracting audio from the selected range...',
 		stageTranscribe: 'Transcribing speech...',
+		stageTranscribeGpt4o:
+			'Whisper timings, then refining each line with GPT-4o Transcribe. This may take longer...',
 		stageTranslate: 'Translating...',
 		stageApply: 'Replacing subtitles in the selected area...',
+		stageApplyGpt4o: 'Inserting transcription into the selected range...',
 		errorTitle: 'Retranscription error',
 		ok: 'OK'
 	},
@@ -156,10 +221,13 @@ const enMessages = {
 		noSegments: 'The file contains no segments.',
 		importOriginalDialog: 'Import Original Subtitles',
 		importTranslatedDialog: 'Import Translated Subtitles',
+		importVideoDialog: 'Import Video',
+		importVideoFailed: 'Could not import video: {detail}',
+		videoFilter: 'Video',
 		subtitlesFilter: 'Subtitles',
 		deleteEpisodeTitle: 'Delete episode',
 		deleteEpisodeConfirm:
-			'Delete episode «{name}»?\nThe video, linked subtitles and waveform will be permanently removed.',
+			'Delete file «{name}»?\nThe video, linked subtitles and waveform will be permanently removed.',
 		deleteEpisodeFailed: 'Could not delete episode: {detail}',
 		deleteFileTitle: 'Delete file',
 		deleteFileConfirm: 'Delete file «{name}»?',
@@ -167,8 +235,11 @@ const enMessages = {
 		deleteFolderTitle: 'Delete folder',
 		deleteFolderConfirm: 'Delete all files from folder «{folder}» ({count})?',
 		deleteFolderFailed: 'Could not delete folder: {detail}',
+		renameFileTitle: 'Rename file',
+		renameFileSave: 'Rename',
+		renameFileFailed: 'Could not rename file: {detail}',
 		openProjectFailed:
-			'Choose a Subtitle Studio project folder — it must contain project.json in the root. A regular folder without it will not work.\n\n{detail}',
+			'Choose a Subtitle Studio project folder – it must contain project.json in the root. A regular folder without it will not work.\n\n{detail}',
 		openProjectFailedTitle: 'Could not open project',
 		openProjectFailedAlert: 'Could not open project. A folder with project.json is required.\n\n{detail}',
 		glossaryUpdateConfirm: 'Do you want the agent to update the translation based on glossary changes?',
@@ -240,6 +311,21 @@ const enMessages = {
 		confirmReplaceAll: 'Found {count} occurrence(s). Replace all?',
 		cancel: 'Cancel'
 	},
+	spellCheck: {
+		fullText: 'Full text',
+		lineOf: 'Line {current} of {total}',
+		editWholeText: 'Edit the whole text',
+		change: 'Change',
+		skipOne: 'Skip one',
+		skipAll: 'Skip all',
+		loading: 'Checking spelling…',
+		scanning: 'Checking subtitles…',
+		scanningHint: 'Translation column only. Progress is also printed to the dev console.',
+		scanProgress: '{done} / {total} lines · {found} typo(s)',
+		close: 'Close',
+		noIssues: 'Spell check complete: 0 typos found.',
+		scanFailed: 'Could not run spell check. Try again.'
+	},
 	glossary: {
 		title: 'Glossary',
 		desc: 'Define how the AI agent should translate specific names or terms.',
@@ -267,14 +353,16 @@ const enMessages = {
 			'Tell the AI about specific names, slang or terms to create a glossary that will keep transcription consistent.',
 		prompt: 'Prompt',
 		step3Placeholder:
-			'Arcane, Saison 1. Personnages : Vi, Jinx, Jayce, Viktor, Silco, Caitlyn, Mel Medarda, Ekko, Heimerdinger...',
+			'In the series Velorian Echo, characters Arlen, Siva, Toren, and Miri investigate a strange signal in an abandoned complex. It is leading to unsettling events.',
 		step5Title: 'Translation',
 		step5Desc:
 			'You can select a language and give instructions to the agent. Style, tone and context matter for the result.',
 		targetLanguage: 'Target language',
-		step5Placeholder: 'Professional localization for a sci-fi drama series...',
+		step5Placeholder: 'Professional localization for a sci-fi drama series.',
+		editGlossary: 'Edit glossary',
+		preparingGlossary: 'Preparing glossary...',
 		step7Title: 'Everything is ready!',
-		step7Desc: 'You can continue improving the results manually in the editor.',
+		step7Desc: 'You can review the result in the main editor window.',
 		placeholder: 'PLACEHOLDER',
 		working: 'AI is working!',
 		importWait: 'Please wait while we import your subtitle file...',
@@ -293,11 +381,14 @@ const ruMessages: Messages = {
 	menu: {
 		file: 'Файл',
 		edit: 'Правка',
-		tools: 'Сервис',
-		video: 'Видео',
+		view: 'Вид',
+		ai: 'ИИ',
 		help: 'Справка',
+		showOriginalOnVideo: 'Оригинальные субтитры на видео',
+		dualMonitorMode: 'Режим двух мониторов',
 		newProject: 'Новый проект',
 		openProject: 'Открыть проект',
+		importVideo: 'Импорт видео',
 		importOriginal: 'Импорт оригинальных субтитров',
 		importTranslated: 'Импорт переведённых субтитров',
 		save: 'Сохранить',
@@ -306,15 +397,37 @@ const ruMessages: Messages = {
 		undo: 'Отменить',
 		redo: 'Повторить',
 		delete: 'Удалить',
-		find: 'Найти',
+		findAndReplace: 'Найти и заменить',
 		spellCheck: 'Проверка орфографии',
-		batchConvert: 'Пакетное преобразование',
-		openVideoFile: 'Открыть видеофайл',
-		audioTrack: 'Звуковая дорожка',
+		transcribe: 'Транскрибировать',
+		translate: 'Перевести',
+		retranscribeRange: 'Перетранскрибировать',
+		retranscribeRangeGpt4o: 'Перетранскрибировать через GPT-4o (одна реплика)',
 		about: 'О программе',
-		updates: 'Обновления',
 		switchToDark: 'Тёмная тема',
 		switchToLight: 'Светлая тема'
+	},
+	about: {
+		title: 'О Subtitle Studio',
+		desc: 'Настольное приложение для редактирования субтитров, транскрипции и перевода.',
+		developers: 'Разработчики',
+		developersList: 'Денис Гусев, Илья Иванов',
+		copyright: '© 2025–2026'
+	},
+	ai: {
+		transcribeTitle: 'Транскрибировать',
+		transcribeDesc: 'Выберите язык оригинала и при необходимости подсказку для Whisper.',
+		transcribeStart: 'Транскрибировать',
+		noVideo: 'В проекте нет видео для транскрипции.',
+		noOriginalText: 'Нет текста в колонке оригинала для перевода.',
+		openProjectFirst: 'Сначала откройте или создайте проект.',
+		stageAudio: 'Извлечение аудио из видео...',
+		stageTranscribe: 'Транскрипция речи...',
+		stageApply: 'Применение субтитров...',
+		stageTranslate: 'Перевод...',
+		working: 'ИИ работает!',
+		errorTitle: 'Ошибка ИИ',
+		ok: 'OK'
 	},
 	settings: {
 		title: 'Настройки',
@@ -341,14 +454,16 @@ const ruMessages: Messages = {
 	},
 	projectTree: {
 		newFile: 'Новый файл',
-		newFolder: 'Новая папка'
+		newFolder: 'Новая папка',
+		rename: 'Переименовать'
 	},
 	aiAgent: {
 		title: 'ИИ-агент',
-		add: 'Добавить',
+		add: 'Новый чат',
 		more: 'Ещё',
 		emptyHint: 'Задайте вопрос агенту или попросите изменить реплики',
 		thinking: 'Агент думает...',
+		batchProgress: 'Пачка {current} из {total}...',
 		placeholder: 'Помоги, пожалуйста, перевести...',
 		sendMessage: 'Отправить сообщение',
 		removeAttachment: 'Убрать реплику',
@@ -361,12 +476,17 @@ const ruMessages: Messages = {
 		kept: 'Принято',
 		reverted: 'Отменено',
 		change: 'изменение',
-		changes: 'изменений'
+		changes: 'изменений',
+		episodeProgress: 'Пачка {current} из {total}: {name}',
+		episodeChanges: '{count} изм.',
+		inFiles: ' · {count} файла(ов)',
+		deletedLine: 'Удалено'
 	},
 	table: {
 		startTime: 'Начало',
 		endTime: 'Конец',
 		duration: 'Длительность',
+		speakerGender: 'Пол',
 		translation: 'Перевод',
 		originalText: 'Оригинал',
 		translationPlaceholder: 'Перевод...',
@@ -379,6 +499,7 @@ const ruMessages: Messages = {
 	},
 	video: {
 		preview: 'Просмотр видео',
+		preparing: 'Подготовка плавного воспроизведения…',
 		play: 'Воспроизведение',
 		pause: 'Пауза',
 		stop: 'Стоп',
@@ -405,7 +526,10 @@ const ruMessages: Messages = {
 		deleteCount: 'Удалить ({count})',
 		retranscribeSelectRange: 'Выделите диапазон на таймлайне (зажмите ЛКМ и протяните)',
 		retranscribeNoVideo: 'Нет видео для извлечения аудио',
-		retranscribeHint: 'Whisper + GPT-постпроцессинг + перевод по выделенному отрезку',
+		retranscribeHint: 'Заново транскрибировать выделенный диапазон',
+		retranscribeRangeGpt4o: 'Перетранскрибировать через GPT-4o (одна реплика)',
+		retranscribeGpt4oHint:
+			'Транскрипция выделенного диапазона через GPT-4o Transcribe (один субтитр на выделение).',
 		deleteSelectSubtitle: 'Выделите субтитр(ы) на таймлайне',
 		deleteSelectedPlural: 'Удалить выделенные субтитры (Delete)',
 		deleteSelectedSingle: 'Удалить выбранный субтитр (Delete)'
@@ -415,14 +539,21 @@ const ruMessages: Messages = {
 		desc: 'Выберите язык оригинала и при необходимости укажите подсказку для улучшения результата.',
 		sourceLanguage: 'Язык оригинала',
 		prompt: 'Подсказка',
-		promptPlaceholder: 'Блум, Стелла, Майк, Магикс, Алфея...',
+		promptPlaceholder: 'В сериале Velorian Echo персонажи Арлен, Сива, Торен и Мири исследуют странный сигнал в заброшенном комплексе. Это приводит к тревожным событиям.',
 		cancel: 'Отмена',
-		retranscribe: 'Перетранскрибировать',
+		retranscribe: 'Начать',
+		gpt4oTitle: 'Перетранскрипция GPT-4o',
+		gpt4oDesc:
+			'Выделенный участок отправляется в GPT-4o Transcribe. Создаётся один субтитр на весь диапазон (начало и конец выделения).',
+		gpt4oStart: 'Начать',
 		working: 'ИИ работает!',
 		stageAudio: 'Извлекаем аудио из выделенного диапазона...',
 		stageTranscribe: 'Распознаём речь...',
+		stageTranscribeGpt4o:
+			'Тайминги Whisper, затем уточнение каждой строки через GPT-4o Transcribe. Может занять дольше...',
 		stageTranslate: 'Переводим...',
 		stageApply: 'Заменяем субтитры в выделенной области...',
+		stageApplyGpt4o: 'Вставляем транскрипцию в выделенный диапазон...',
 		errorTitle: 'Ошибка ретранскрипции',
 		ok: 'ОК'
 	},
@@ -438,10 +569,13 @@ const ruMessages: Messages = {
 		noSegments: 'Файл не содержит сегментов.',
 		importOriginalDialog: 'Импорт оригинальных субтитров',
 		importTranslatedDialog: 'Импорт переведённых субтитров',
+		importVideoDialog: 'Импорт видео',
+		importVideoFailed: 'Не удалось импортировать видео: {detail}',
+		videoFilter: 'Видео',
 		subtitlesFilter: 'Субтитры',
 		deleteEpisodeTitle: 'Удаление эпизода',
 		deleteEpisodeConfirm:
-			'Удалить эпизод «{name}»?\nВидео, связанные субтитры и waveform будут удалены без возможности восстановления.',
+			'Удалить файл «{name}»?\nВидео, связанные субтитры и waveform будут удалены без возможности восстановления.',
 		deleteEpisodeFailed: 'Не удалось удалить эпизод: {detail}',
 		deleteFileTitle: 'Удаление файла',
 		deleteFileConfirm: 'Удалить файл «{name}»?',
@@ -449,8 +583,11 @@ const ruMessages: Messages = {
 		deleteFolderTitle: 'Удаление папки',
 		deleteFolderConfirm: 'Удалить все файлы из папки «{folder}» ({count})?',
 		deleteFolderFailed: 'Не удалось удалить папку: {detail}',
+		renameFileTitle: 'Переименовать файл',
+		renameFileSave: 'Переименовать',
+		renameFileFailed: 'Не удалось переименовать файл: {detail}',
 		openProjectFailed:
-			'Укажите папку проекта Subtitle Studio — в корне должен быть файл project.json. Обычная папка без него не подойдёт.\n\n{detail}',
+			'Укажите папку проекта Subtitle Studio – в корне должен быть файл project.json. Обычная папка без него не подойдёт.\n\n{detail}',
 		openProjectFailedTitle: 'Не удалось открыть проект',
 		openProjectFailedAlert: 'Не удалось открыть проект. Нужна папка с project.json.\n\n{detail}',
 		glossaryUpdateConfirm: 'Хотите, чтобы агент обновил перевод по изменениям глоссария?',
@@ -523,6 +660,21 @@ const ruMessages: Messages = {
 		confirmReplaceAll: 'Найдено: {count}. Заменить все вхождения?',
 		cancel: 'Отмена'
 	},
+	spellCheck: {
+		fullText: 'Полный текст',
+		lineOf: 'Строка {current} из {total}',
+		editWholeText: 'Редактировать весь текст',
+		change: 'Заменить',
+		skipOne: 'Пропустить',
+		skipAll: 'Пропустить все',
+		loading: 'Проверка орфографии…',
+		scanning: 'Проверка субтитров…',
+		scanningHint: 'Только колонка перевода. Прогресс также в консоли (терминал dev).',
+		scanProgress: '{done} / {total} строк · опечаток: {found}',
+		close: 'Закрыть',
+		noIssues: 'Проверка завершена: опечаток не найдено (0).',
+		scanFailed: 'Не удалось запустить проверку орфографии.'
+	},
 	glossary: {
 		title: 'Глоссарий',
 		desc: 'Укажите, как агент должен переводить имена и термины.',
@@ -547,17 +699,19 @@ const ruMessages: Messages = {
 		chooseSubtitle: '[Выберите .srt / .vtt / .txt]',
 		step3Title: 'Контекст и глоссарий',
 		step3Desc:
-			'Укажите имена, сленг и термины — ИИ создаст глоссарий для согласованной транскрипции.',
+			'Укажите имена, сленг и термины – ИИ создаст глоссарий для согласованной транскрипции.',
 		prompt: 'Подсказка',
 		step3Placeholder:
-			'Arcane, сезон 1. Персонажи: Ви, Джинкс, Джейс, Виктор, Силко, Кейтлин, Мел Медарда, Экко, Хеймердингер...',
+			'В сериале Velorian Echo персонажи Арлен, Сива, Торен и Мири исследуют странный сигнал в заброшенном комплексе. Это приводит к тревожным событиям.',
 		step5Title: 'Перевод',
 		step5Desc:
 			'Выберите язык и дайте инструкции агенту. Стиль, тон и контекст влияют на результат.',
 		targetLanguage: 'Целевой язык',
-		step5Placeholder: 'Профессиональная локализация научно-фантастического сериала...',
+		step5Placeholder: 'Профессиональная локализация научно-фантастического сериала.',
+		editGlossary: 'Редактировать глоссарий',
+		preparingGlossary: 'Готовим глоссарий...',
 		step7Title: 'Всё готово!',
-		step7Desc: 'Продолжайте улучшать результат вручную в редакторе.',
+		step7Desc: 'Вы можете проверить результат в основном окне редактора.',
 		placeholder: 'ЗАГЛУШКА',
 		working: 'ИИ работает!',
 		importWait: 'Подождите, импортируем файл субтитров...',
@@ -611,7 +765,8 @@ const I18nContext = createContext<I18nContextValue | null>(null);
 export function I18nProvider({ children }: { children: React.ReactNode }) {
 	const [locale, setLocaleState] = useState<Locale>(() => {
 		const saved = localStorage.getItem(LOCALE_STORAGE_KEY);
-		return saved === 'ru' ? 'ru' : 'en';
+		if (saved === 'ru' || saved === 'en') return saved;
+		return detectSystemLocale();
 	});
 
 	useEffect(() => {

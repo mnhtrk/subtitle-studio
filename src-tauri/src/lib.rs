@@ -1,9 +1,12 @@
 pub mod commands;
-pub mod cache; 
 pub mod project;
 pub mod types;
 pub mod subtitle_parser;
 pub mod postprocessing;
-pub mod audio_preprocessing; 
-pub mod agent;                 
-pub mod gender_detection; 
+pub mod agent;
+pub mod debug_log;
+pub mod gender_detection;
+pub mod speaker_gender_rules;
+pub mod ml_sidecar;
+pub mod ffmpeg_util;
+pub mod vad;

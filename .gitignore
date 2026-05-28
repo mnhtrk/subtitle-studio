@@ -22,3 +22,16 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Bundled FFmpeg binaries (copy before release build; see src-tauri/bundle-extra/bin/README.md)
+src-tauri/bundle-extra/bin/*.exe
+
+# Release staging (venv + HF model; filled by npm run release:win)
+src-tauri/bundle-extra/runtime/ml/.venv/
+src-tauri/bundle-extra/runtime/ml/hf-cache/
+
+# Python (Silero VAD / gender sidecar)
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc

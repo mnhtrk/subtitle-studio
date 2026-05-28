@@ -6,12 +6,22 @@ use tokio::sync::mpsc;
 use tauri::Emitter;
 use std::collections::{HashMap};
 use std::path::Path;
+use crate::gender_detection;
+use crate::speaker_gender_rules::{
+    collect_character_genders, dialogue_context_translation_rules, normalize_target_language_iso,
+    segment_speaker_gender_str, speaker_gender_translation_rules,
+};
 use crate::postprocessing;
-use crate::audio_preprocessing;
-use crate::audio_preprocessing::SpeechSegment;
-use crate::cache::Cache;
+use crate::commands::ai_cancel;
+use crate::vad;
 
 const DEBUG_LOG_MAX_CHARS: usize = 24_000;
+// лимит whisper ~25mb, чуть меньше на всякий
+const WHISPER_MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
+// кусок при нарезке жирного файла
+const WHISPER_CHUNK_TARGET_BYTES: u64 = 18 * 1024 * 1024;
+const KEYRING_SERVICE: &str = "subtitle-studio";
+const KEYRING_USER: &str = "openai-api-key";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ApiKeyValidation {
@@ -27,6 +37,11 @@ pub struct AutoGlossaryOptions {
     pub target_language: String,
     #[serde(default, alias = "contextPrompt")]
     pub context_prompt: Option<String>,
+    // язык поля meaning_context (если не задан = target_language)
+    // в wizard'е первая генерация делается с target_language=source (имена остаются как в оригинале),
+    // но meaning_context всё равно должен быть на языке UI проекта - вот сюда его и кладём
+    #[serde(default, alias = "meaningContextLanguage")]
+    pub meaning_context_language: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,6 +51,9 @@ pub struct GlossaryTerm {
     pub frequency: u32,
     pub confidence: f64,
     pub category: Option<String>,
+    // готовая строка вида "Персонаж, мужской пол, склоняется"
+    // которую кладём в колонку context глоссария
+    pub meaning_context: Option<String>,
 }
 
 #[tauri::command]
@@ -56,7 +74,7 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
         });
     }
     
-    // Проверяем api ключ
+    // проверка ключа
     let client = reqwest::Client::new();
     let res = client
         .get("https://api.openai.com/v1/models")
@@ -67,7 +85,7 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
     match res {
         Ok(response) => {
             if response.status().is_success() {
-                // Получаем список доступных моделей
+                // какие модели доступны
                 let models: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
                 let available_models: Vec<String> = models["data"]
                     .as_array()
@@ -77,7 +95,7 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
                     .map(|s| s.to_string())
                     .collect();
                 
-                let required_models = ["whisper-1", "gpt-5.4-mini"];
+                let required_models = ["whisper-1", "gpt-5.4"];
                 let has_required = required_models.iter().all(|model| {
                     available_models.iter().any(|m| m.contains(model))
                 });
@@ -91,7 +109,10 @@ pub async fn validate_api_key(key: String) -> Result<ApiKeyValidation, String> {
                 } else {
                     Ok(ApiKeyValidation {
                         is_valid: false,
-                        error_message: Some("Ключ действителен, но недоступны необходимые модели (whisper-1, gpt-5.4-mini)".to_string()),
+                        error_message: Some(
+                            "Ключ действителен, но недоступны необходимые модели (whisper-1, gpt-5.4)"
+                                .to_string(),
+                        ),
                         model_access: available_models,
                     })
                 }
@@ -122,9 +143,63 @@ fn log_debug_block(title: &str, body: &str) {
     println!("{shown}");
     if count > DEBUG_LOG_MAX_CHARS {
         println!(
-            "[… усечено вывода: показано ~{DEBUG_LOG_MAX_CHARS} символов из {count}]"
+            "[усечено: показано ~{DEBUG_LOG_MAX_CHARS} символов из {count}]"
         );
     }
+}
+
+fn format_subtitle_time(seconds: f64) -> String {
+    let total = seconds.max(0.0);
+    let m = (total as u64) / 60;
+    let s = total % 60.0;
+    format!("{m:02}:{s:05.2}")
+}
+
+fn format_segments_for_debug(segments: &[SubtitleSegment]) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(segments.len() + 1);
+    lines.push(format!(
+        "  {:>3}  {:>11}  {:>7}  {}",
+        "id", "time", "speaker", "text"
+    ));
+    lines.push("  ---  -----------  -------  ----".to_string());
+    for s in segments {
+        let gender = segment_speaker_gender_str(s);
+        lines.push(format!(
+            "  {:>3}  {}-{}  {:>7}  {}",
+            s.id,
+            format_subtitle_time(s.start),
+            format_subtitle_time(s.end),
+            gender,
+            s.text
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_translation_response_for_debug(response: &serde_json::Value) -> String {
+    let content = response["choices"][0]["message"]["content"].as_str();
+    let Some(raw) = content else {
+        return "(нет content в ответе)".to_string();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return format!("(не JSON)\n{raw}");
+    };
+    let Some(arr) = find_translation_array(&parsed) else {
+        return serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| raw.to_string());
+    };
+    let mut lines = vec!["  id  translation".to_string(), "  ---  -----------".to_string()];
+    for item in arr {
+        let id = item.get("id").map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+        let text = item
+            .get("translated_text")
+            .or_else(|| item.get("translation"))
+            .or_else(|| item.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let one_line: String = text.lines().collect::<Vec<_>>().join(" ");
+        lines.push(format!("  {id:>3}  {one_line}"));
+    }
+    lines.join("\n")
 }
 
 #[tauri::command]
@@ -166,34 +241,29 @@ fn get_api_key() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn cancel_ai_operation() {
+    ai_cancel::request_ai_operation_cancel();
+}
+
+#[tauri::command]
 pub async fn transcribe_audio(
     file_path: String,
     language: Option<String>,
+    prompt: Option<String>,
+    glossary: Option<Vec<GlossaryEntry>>,
+    skip_vad: Option<bool>,
     app_handle: tauri::AppHandle,
-    cache: tauri::State<'_, Cache>,
 ) -> Result<Vec<SubtitleSegment>, String> {
     println!("📝 Транскрибация файла: {}", file_path);
-    
-    let file_path_buf = Path::new(&file_path);
-    let file_hash = Cache::calculate_file_hash(file_path_buf)?;
-    
-    // Проверяем кэш
-    if let Some(cached) = cache.get_transcription(&file_hash).await? {
-        println!("✅ Найдено в кэше ({} сегментов)", cached.len());
-        return Ok(cached);
-    }
+    ai_cancel::reset_ai_operation_cancel();
 
-    // Получаем API-ключ
     let api_key = get_api_key()?;
-    
-    // Создаём канал для отправки прогресса
+    let language_code = normalize_whisper_language(&language)?;
+
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(10);
-    
-    // Клонируем app_handle для отправки событий
     let app_handle_clone = app_handle.clone();
-    let operation_id = format!("transcribe_{}", file_hash);
-    
-    // Запускаем отправку прогресса в фоне
+    let operation_id = format!("transcribe_{}", uuid::Uuid::new_v4());
+
     tokio::spawn(async move {
         while let Some(event) = progress_rx.recv().await {
             let _ = app_handle_clone.emit("ai_progress", ProgressPayload {
@@ -202,72 +272,208 @@ pub async fn transcribe_audio(
             });
         }
     });
-    
-    // Отправляем начальное событие
-    let _ = progress_tx.send(ProgressEvent::Started { 
-        total_steps: 5, 
-        description: "Анализ аудио".to_string() 
-    }).await;
 
-    // Анализируем аудио для обнаружения сегментов с речью
-    let _ = progress_tx.send(ProgressEvent::InProgress { 
-        step: 1, 
-        progress: 0.2, 
-        description: "Обнаружение речи в аудио".to_string() 
-    }).await;
-    
-    let preprocessing_result = audio_preprocessing::detect_speech_segments(file_path_buf)
-        .await?;
-    
-    println!("🎧 Обнаружено {} сегментов с речью", preprocessing_result.speech_segments.len());
-    
-    if preprocessing_result.speech_segments.is_empty() {
-        return Err("В аудио не обнаружено речи".to_string());
+    let _ = progress_tx
+        .send(ProgressEvent::Started {
+            total_steps: 4,
+            description: "Подготовка файла".to_string(),
+        })
+        .await;
+
+    let _ = progress_tx
+        .send(ProgressEvent::InProgress {
+            step: 1,
+            progress: 0.15,
+            description: "Подготовка аудио".to_string(),
+        })
+        .await;
+
+    let file_metadata = std::fs::metadata(&file_path)
+        .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
+    let _file_size_bytes = file_metadata.len();
+
+    let glossary_entries = glossary.unwrap_or_default();
+    let mut glossary_originals: Vec<String> = Vec::new();
+    for entry in &glossary_entries {
+        let source = entry.source.trim();
+        if source.is_empty() {
+            continue;
+        }
+        if !glossary_originals
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(source))
+        {
+            glossary_originals.push(source.to_string());
+        }
     }
-    
-    // Если коэффициент тишины высокий (>70%), используем сегментированную транскрибацию
-    let segments = if preprocessing_result.silence_ratio > 0.7 {
-        transcribe_segmented_audio(
-            file_path_buf,
-            &preprocessing_result.speech_segments,
-            &language,
-            &api_key,
-            &progress_tx,
-        ).await?
+
+    let base_prompt = prompt
+        .as_ref()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string());
+    let base_prompt_lower = base_prompt.as_deref().unwrap_or("").to_lowercase();
+    let missing_glossary_originals: Vec<String> = glossary_originals
+        .into_iter()
+        .filter(|source| !base_prompt_lower.contains(&source.to_lowercase()))
+        .collect();
+    let glossary_prompt = if missing_glossary_originals.is_empty() {
+        None
     } else {
-        // Используем стандартную транскрибацию для файлов с низким уровнем тишины
-        transcribe_full_audio(file_path_buf, &language, &api_key, &progress_tx).await?
+        Some(format!(
+            "Important names/terms to keep exactly:\n{}",
+            missing_glossary_originals.join(", ")
+        ))
+    };
+    // anchor в конце промпта - whisper копирует пунктуацию
+    let style_anchor = whisper_style_anchor(&language_code);
+    let mut prompt_parts: Vec<String> = Vec::new();
+    if let Some(base) = base_prompt {
+        prompt_parts.push(base);
+    }
+    if let Some(glossary_block) = glossary_prompt {
+        prompt_parts.push(glossary_block);
+    }
+    prompt_parts.push(style_anchor);
+    let whisper_prompt: Option<String> = Some(prompt_parts.join("\n\n"));
+
+    println!(
+        "[transcribe_audio] whisper prompt: user + {} glossary terms + style anchor, language={}",
+        missing_glossary_originals.len(),
+        language_code
+    );
+
+    let audio_path = Path::new(&file_path);
+    let client = reqwest::Client::new();
+
+    let raw_segments = if skip_vad.unwrap_or(false) {
+        println!("[transcribe_audio] VAD выкл (ручной отрывок)");
+        let _ = progress_tx
+            .send(ProgressEvent::InProgress {
+                step: 2,
+                progress: 0.35,
+                description: "Whisper".to_string(),
+            })
+            .await;
+        transcribe_whisper_direct(
+            &client,
+            &api_key,
+            audio_path,
+            &language_code,
+            whisper_prompt.as_deref(),
+            &progress_tx,
+        )
+        .await?
+    } else {
+        let _ = progress_tx
+            .send(ProgressEvent::InProgress {
+                step: 1,
+                progress: 0.25,
+                description: "VAD: поиск речи".to_string(),
+            })
+            .await;
+
+        ai_cancel::check_ai_operation_cancelled()?;
+        let raw_vad =
+            vad::detect_speech_segments(audio_path, vad::VadParams::default()).await?;
+        ai_cancel::check_ai_operation_cancelled()?;
+        const VAD_MARGIN_PRE_SEC: f64 = 0.45;
+        const VAD_MARGIN_POST_SEC: f64 = 2.0;
+        const VAD_CHUNK_GAP_SEC: f64 = 0.05;
+        let merged = vad::merge_nearby_speech_segments(&raw_vad, 0.55);
+        let speech_segments = vad::expand_speech_margins(
+            &merged,
+            VAD_MARGIN_PRE_SEC,
+            VAD_MARGIN_POST_SEC,
+            VAD_CHUNK_GAP_SEC,
+        );
+        vad::log_vad_whisper_overlap(&speech_segments);
+        if raw_vad.len() != speech_segments.len() {
+            println!(
+                "[vad] после merge+margin: {} → {} кусков речи",
+                raw_vad.len(),
+                speech_segments.len()
+            );
+        }
+
+        if speech_segments.is_empty() {
+            return Err(
+                "VAD: речь не найдена (порог в vad/mod.rs VadParams::threshold)".into(),
+            );
+        }
+
+        transcribe_vad_speech_segments(
+            &client,
+            &api_key,
+            audio_path,
+            &speech_segments,
+            &language_code,
+            whisper_prompt.as_deref(),
+            &progress_tx,
+        )
+        .await?
     };
 
-    // Постобработка транскрибации
-    let _ = progress_tx.send(ProgressEvent::InProgress { 
-        step: 4, 
-        progress: 0.8, 
-        description: "Постобработка результата".to_string() 
-    }).await;
-    
+    ai_cancel::check_ai_operation_cancelled()?;
+
+    let _ = progress_tx
+        .send(ProgressEvent::InProgress {
+            step: 3,
+            progress: 0.85,
+            description: "Обработка результата".to_string(),
+        })
+        .await;
+
+    let segments = apply_subtitle_timing_postprocess(sanitize_whisper_segments(raw_segments));
+
+    ai_cancel::check_ai_operation_cancelled()?;
+
     let postprocessed_result = postprocessing::postprocess_transcription(
         segments,
         postprocessing::PostProcessingOptions {
             fix_punctuation: true,
             fix_names: true,
-            target_language: language.unwrap_or("en".to_string()),
+            target_language: language
+                .clone()
+                .unwrap_or_else(|| language_code.clone()),
             style_prompt: Some("Профессиональные субтитры для видео".to_string()),
+            name_hints: whisper_prompt.clone(),
+            glossary: glossary_entries,
         },
         &api_key,
-    ).await?;
+    )
+    .await?;
 
-    let final_segments = postprocessed_result.corrected_segments;
+    ai_cancel::check_ai_operation_cancelled()?;
 
-    // Автоматическая генерация глоссария
+    let mut final_segments = postprocessed_result.corrected_segments;
+
+    let file_path_buf = Path::new(&file_path);
+    let _ = progress_tx
+        .send(ProgressEvent::InProgress {
+            step: 4,
+            progress: 0.92,
+            description: "Определение пола говорящих".to_string(),
+        })
+        .await;
+    match gender_detection::assign_speaker_genders(file_path_buf, &mut final_segments).await {
+        Err(e) if ai_cancel::is_cancelled_error(&e) => return Err(e),
+        Err(e) => println!("[gender] пропущено: {}", e),
+        Ok(()) => {}
+    }
+
+    ai_cancel::check_ai_operation_cancelled()?;
+
     let _auto_glossary = if final_segments.len() > 5 {
+        ai_cancel::check_ai_operation_cancelled()?;
         match auto_generate_glossary_from_segments(&final_segments, "ru", &api_key).await {
             Ok(glossary) => {
-                println!("✅ Автоматический глоссарий создан: {} терминов", glossary.len());
+                println!("[glossary] автоглоссарий: {} терминов", glossary.len());
                 Some(glossary)
             }
+            Err(e) if ai_cancel::is_cancelled_error(&e) => return Err(e),
             Err(e) => {
-                println!("⚠️ Ошибка генерации глоссария: {}", e);
+                println!("[glossary] ошибка генерации: {}", e);
                 None
             }
         }
@@ -275,158 +481,208 @@ pub async fn transcribe_audio(
         None
     };
 
-    // Сохраняем в кэш
-    cache.set_transcription(&file_hash, &final_segments).await?;
-    
-    // Отправляем завершение
-    let _ = progress_tx.send(ProgressEvent::Completed { 
-        result_count: final_segments.len() 
-    }).await;
-    
-    println!("✅ Транскрибация завершена: {} сегментов", final_segments.len());
+    let _ = progress_tx
+        .send(ProgressEvent::Completed {
+            result_count: final_segments.len(),
+        })
+        .await;
+
+    println!("[transcribe] завершено: {} сегментов", final_segments.len());
     Ok(final_segments)
 }
 
-async fn transcribe_segmented_audio(
-    file_path: &Path,
-    speech_segments: &[SpeechSegment],
-    language: &Option<String>,
-    api_key: &str,
-    progress_tx: &mpsc::Sender<ProgressEvent>,
-) -> Result<Vec<SubtitleSegment>, String> {
-    let mut all_segments = Vec::new();
-    let total_segments = speech_segments.len();
-    
-    for (i, segment) in speech_segments.iter().enumerate() {
-        // Обновляем прогресс
-        let _ = progress_tx.send(ProgressEvent::InProgress { 
-            step: 2 + (i as u32),
-            progress: 0.2 + (0.5 * i as f64 / total_segments as f64),
-            description: format!("Транскрибация сегмента {}/{}", i + 1, total_segments)
-        }).await;
-        
-        // Создаем временный файл для сегмента
-        let temp_dir_result = tempfile::tempdir();
-        let temp_dir = match temp_dir_result {
-            Ok(dir) => dir,
-            Err(e) => return Err(format!("Ошибка создания временной директории: {}", e)),
-        };
-        
-        let segment_path = temp_dir.path().join(format!("segment_{}.wav", i));
-        
-        // Извлекаем сегмент с помощью FFmpeg
-        extract_audio_segment(file_path, &segment_path, segment.start_time, segment.end_time)
-            .await?;
-        
-        // Проверяем размер файла (должен быть > 0)
-        let metadata_result = std::fs::metadata(&segment_path);
-        let metadata = match metadata_result {
-            Ok(meta) => meta,
-            Err(e) => return Err(format!("Ошибка получения метаданных сегмента: {}", e)),
-        };
-        
-        if metadata.len() == 0 {
+fn build_gpt4o_transcription_prompt(
+    prompt: Option<String>,
+    glossary: Option<Vec<GlossaryEntry>>,
+) -> Option<String> {
+    let glossary_entries = glossary.unwrap_or_default();
+    let mut glossary_originals: Vec<String> = Vec::new();
+    for entry in &glossary_entries {
+        let source = entry.source.trim();
+        if source.is_empty() {
             continue;
         }
-        
-        // Транскрибируем сегмент
-        let file_data_result = std::fs::read(&segment_path);
-        let file_data = match file_data_result {
-            Ok(data) => data,
-            Err(e) => return Err(format!("Ошибка чтения сегмента: {}", e)),
-        };
-        
-        let client = reqwest::Client::new();
-        use reqwest::multipart;
-        
-        let file_part_result = multipart::Part::bytes(file_data)
-            .file_name("audio.mp3")
-            .mime_str("audio/mpeg");
-            
-        let file_part = match file_part_result {
-            Ok(part) => part,
-            Err(e) => return Err(format!("Ошибка создания multipart части: {}", e)),
-        };
-        
-        let form = multipart::Form::new()
-            .text("model", "whisper-1")
-            .text("language", language.clone().unwrap_or("en".to_string()))
-            .text("response_format", "verbose_json")
-            .part("file", file_part);
-
-        let res = client
-            .post("https://api.openai.com/v1/audio/transcriptions")
-            .bearer_auth(api_key)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| format!("Ошибка запроса к OpenAI: {}", e))?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let error_text = res.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
-            return Err(format!("OpenAI ошибка ({}): {}", status, error_text));
+        if !glossary_originals
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(source))
+        {
+            glossary_originals.push(source.to_string());
         }
-
-        let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        let mut segments = parse_whisper_response(response)?;
-        
-        // Корректируем временные метки относительно оригинального файла
-        for seg in &mut segments {
-            seg.start += segment.start_time;
-            seg.end += segment.start_time;
-        }
-        
-        all_segments.extend(segments);
     }
-    
-    Ok(all_segments)
+
+    let base_prompt = prompt
+        .as_ref()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string());
+    let base_prompt_lower = base_prompt.as_deref().unwrap_or("").to_lowercase();
+    let missing: Vec<String> = glossary_originals
+        .into_iter()
+        .filter(|source| !base_prompt_lower.contains(&source.to_lowercase()))
+        .collect();
+    let glossary_prompt = if missing.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Important names/terms to keep exactly:\n{}",
+            missing.join(", ")
+        ))
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(base) = base_prompt {
+        parts.push(base);
+    }
+    if let Some(glossary_block) = glossary_prompt {
+        parts.push(glossary_block);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
 }
 
-async fn transcribe_full_audio(
-    file_path: &Path,
-    language: &Option<String>,
-    api_key: &str,
-    progress_tx: &mpsc::Sender<ProgressEvent>,
-) -> Result<Vec<SubtitleSegment>, String> {
-    // Читаем файл
-    let _ = progress_tx.send(ProgressEvent::InProgress { 
-        step: 2, 
-        progress: 0.4, 
-        description: "Чтение аудиофайла".to_string() 
-    }).await;
-    
-    let file_data = std::fs::read(file_path)
-        .map_err(|e| format!("Ошибка чтения файла: {}", e))?;
+// gpt-4o transcribe на кусок аудио, без таймкодов
+#[tauri::command]
+pub async fn transcribe_audio_gpt4o(
+    file_path: String,
+    language: Option<String>,
+    prompt: Option<String>,
+    glossary: Option<Vec<GlossaryEntry>>,
+) -> Result<String, String> {
+    println!("📝 GPT-4o Transcribe: {}", file_path);
+    ai_cancel::reset_ai_operation_cancel();
+    ai_cancel::check_ai_operation_cancelled()?;
 
-    // Подготавливаем запрос
-    let _ = progress_tx.send(ProgressEvent::InProgress { 
-        step: 3, 
-        progress: 0.6, 
-        description: "Отправка в OpenAI".to_string() 
-    }).await;
-    
+    let api_key = get_api_key()?;
+    let language_code = normalize_whisper_language(&language)?;
+    let gpt4o_prompt = build_gpt4o_transcription_prompt(prompt, glossary);
+
+    let file_data = std::fs::read(&file_path).map_err(|e| format!("Ошибка чтения файла: {}", e))?;
+    if file_data.is_empty() {
+        return Err("Аудиофайл пуст".into());
+    }
+
     let client = reqwest::Client::new();
+    gpt4o_transcribe_call(
+        &client,
+        &api_key,
+        file_data,
+        &language_code,
+        gpt4o_prompt.as_deref(),
+        "range",
+    )
+    .await
+}
+
+fn whisper_style_anchor(language_code: &str) -> String {
+    let lang = language_code.trim().to_lowercase();
+    match lang.as_str() {
+        "ru" => "Привет, друг. Как дела сегодня? Я в порядке, спасибо! Давай начнём.".to_string(),
+        "uk" => "Привіт, друже. Як справи сьогодні? Все добре, дякую! Почнемо.".to_string(),
+        "be" => "Прывітанне, дружа. Як справы сёння? Усё добра, дзякуй! Пачнём.".to_string(),
+        "pl" => "Cześć, przyjacielu. Jak się dzisiaj masz? Wszystko dobrze, dziękuję! Zaczynajmy.".to_string(),
+        "cs" => "Ahoj, příteli. Jak se dnes máš? Dobře, díky! Začneme.".to_string(),
+        "sk" => "Ahoj, priateľu. Ako sa dnes máš? Dobre, vďaka! Začnime.".to_string(),
+        "de" => "Hallo, Freund. Wie geht es dir heute? Mir geht es gut, danke! Lass uns anfangen.".to_string(),
+        "fr" => "Bonjour, ami. Comment vas-tu aujourd'hui ? Je vais bien, merci ! Commençons.".to_string(),
+        "es" => "Hola, amigo. ¿Cómo estás hoy? Estoy bien, gracias. ¡Empecemos!".to_string(),
+        "it" => "Ciao, amico. Come stai oggi? Sto bene, grazie. Iniziamo!".to_string(),
+        "pt" => "Olá, amigo. Como vai você hoje? Estou bem, obrigado. Vamos começar!".to_string(),
+        "nl" => "Hallo, vriend. Hoe gaat het vandaag? Goed, bedankt! Laten we beginnen.".to_string(),
+        "tr" => "Merhaba, dostum. Bugün nasılsın? İyiyim, teşekkürler. Başlayalım!".to_string(),
+        // english дефолт для anchor
+        _ => "Hello, friend. How are you today? I'm fine, thanks. Let's begin.".to_string(),
+    }
+}
+
+// язык -> iso; en по умолчанию нельзя, русский тогда в кашу
+fn normalize_whisper_language(language: &Option<String>) -> Result<String, String> {
+    let raw = language
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "Не указан язык исходной записи. Выберите язык (например Russian / ru) перед транскрипцией."
+                .to_string()
+        })?;
+
+    let lower = raw.to_lowercase();
+    let iso = match lower.as_str() {
+        "en" | "english" | "английский" => "en",
+        "ru" | "russian" | "русский" => "ru",
+        "es" | "spanish" | "испанский" => "es",
+        "fr" | "french" | "французский" => "fr",
+        "de" | "german" | "немецкий" => "de",
+        "it" | "italian" | "итальянский" => "it",
+        "pt" | "portuguese" | "португальский" => "pt",
+        "zh" | "chinese" | "китайский" => "zh",
+        "ja" | "japanese" | "японский" => "ja",
+        "ko" | "korean" | "корейский" => "ko",
+        "ar" | "arabic" | "арабский" => "ar",
+        "hi" | "hindi" | "хинди" => "hi",
+        "tr" | "turkish" | "турецкий" => "tr",
+        "pl" | "polish" | "польский" => "pl",
+        "uk" | "ukrainian" | "украинский" => "uk",
+        code if code.len() == 2 && code.chars().all(|c| c.is_ascii_lowercase()) => code,
+        _ => {
+            return Err(format!(
+                "Не удалось распознать код языка «{}». Используйте ru, en, Russian, English и т.п.",
+                raw
+            ));
+        }
+    };
+    Ok(iso.to_string())
+}
+
+async fn whisper_call(
+    client: &reqwest::Client,
+    api_key: &str,
+    file_data: Vec<u8>,
+    language_code: &str,
+    prompt: Option<&str>,
+    log_label: &str,
+) -> Result<Vec<SubtitleSegment>, String> {
     use reqwest::multipart;
-    
+
+    let file_size_bytes = file_data.len();
+
     let file_part = multipart::Part::bytes(file_data)
         .file_name("audio.mp3")
         .mime_str("audio/mpeg")
         .map_err(|e| e.to_string())?;
-    
-    let form = multipart::Form::new()
+
+    let mut form = multipart::Form::new()
         .text("model", "whisper-1")
-        .text("language", language.clone().unwrap_or("en".to_string()))
+        .text("language", language_code.to_string())
+        .text("temperature", "0")
         .text("response_format", "verbose_json")
+        .text("timestamp_granularities[]", "segment")
+        .text("timestamp_granularities[]", "word")
         .part("file", file_part);
 
-    // Отправляем запрос
-    let _ = progress_tx.send(ProgressEvent::InProgress { 
-        step: 4, 
-        progress: 0.7, 
-        description: "Ожидание ответа от OpenAI".to_string() 
-    }).await;
-    
+    if let Some(p) = prompt {
+        if !p.trim().is_empty() {
+            form = form.text("prompt", p.to_string());
+        }
+    }
+
+    log_debug_block(
+        &format!("whisper [{log_label}]: запрос"),
+        &format!(
+            "model: whisper-1\n\
+language: {language_code}\n\
+temperature: 0\n\
+response_format: verbose_json\n\
+timestamp_granularities: segment, word\n\
+file: ({file_size_bytes} байт)\n\
+\n\
+prompt (опционально):\n{}",
+            prompt.unwrap_or("(не задан)")
+        ),
+    );
+
     let res = client
         .post("https://api.openai.com/v1/audio/transcriptions")
         .bearer_auth(api_key)
@@ -437,47 +693,448 @@ async fn transcribe_full_audio(
 
     if !res.status().is_success() {
         let status = res.status();
-        let error_text = res.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+        let error_text = res
+            .text()
+            .await
+            .unwrap_or_else(|_| "Неизвестная ошибка".to_string());
         return Err(format!("OpenAI ошибка ({}): {}", status, error_text));
     }
 
-    // Парсим ответ
     let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let response_pretty = serde_json::to_string_pretty(&response).unwrap_or_else(|e| e.to_string());
+    log_debug_block(
+        &format!("whisper [{log_label}]: ответ API (verbose_json)"),
+        &response_pretty,
+    );
+
     parse_whisper_response(response)
 }
 
-async fn extract_audio_segment(
+// gpt-4o transcribe, в ответе только текст
+async fn gpt4o_transcribe_call(
+    client: &reqwest::Client,
+    api_key: &str,
+    file_data: Vec<u8>,
+    language_code: &str,
+    prompt: Option<&str>,
+    log_label: &str,
+) -> Result<String, String> {
+    use reqwest::multipart;
+
+    let file_size_bytes = file_data.len();
+
+    let file_part = multipart::Part::bytes(file_data)
+        .file_name("segment.mp3")
+        .mime_str("audio/mpeg")
+        .map_err(|e| e.to_string())?;
+
+    let mut form = multipart::Form::new()
+        .text("model", "gpt-4o-transcribe")
+        .text("language", language_code.to_string())
+        .text("response_format", "json")
+        .part("file", file_part);
+
+    if let Some(p) = prompt {
+        if !p.trim().is_empty() {
+            form = form.text("prompt", p.to_string());
+        }
+    }
+
+    log_debug_block(
+        &format!("gpt-4o-transcribe [{log_label}]: запрос"),
+        &format!(
+            "model: gpt-4o-transcribe\n\
+language: {language_code}\n\
+response_format: json\n\
+file: ({file_size_bytes} байт)\n\
+\n\
+prompt (опционально):\n{}",
+            prompt.unwrap_or("(не задан)")
+        ),
+    );
+
+    let res = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к OpenAI: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let error_text = res
+            .text()
+            .await
+            .unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+        return Err(format!("OpenAI gpt-4o-transcribe ({}): {}", status, error_text));
+    }
+
+    let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let response_pretty = serde_json::to_string_pretty(&response).unwrap_or_else(|e| e.to_string());
+    log_debug_block(
+        &format!("gpt-4o-transcribe [{log_label}]: ответ API"),
+        &response_pretty,
+    );
+
+    if let Some(text) = response.get("text").and_then(|v| v.as_str()) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err("gpt-4o-transcribe вернул пустой текст".into());
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    if let Some(text) = response.as_str() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    Err("gpt-4o-transcribe: не удалось извлечь текст из ответа".into())
+}
+
+fn shift_segment_times(segments: &mut [SubtitleSegment], offset_seconds: f64) {
+    for seg in segments.iter_mut() {
+        seg.start += offset_seconds;
+        seg.end += offset_seconds;
+        seg.duration = (seg.end - seg.start).max(0.05);
+    }
+}
+
+// whisper часто ставит первое слово на 0.2-0.6 с внутри vad куска - подтягиваем к началу куска
+fn snap_vad_chunk_lead_timing(segments: &mut [SubtitleSegment], chunk_timeline_start: f64) {
+    const MAX_LOCAL_LEAD_SEC: f64 = 0.22;
+    const SNAP_LOCAL_SEC: f64 = 0.04;
+    if segments.is_empty() {
+        return;
+    }
+    segments.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let first = &mut segments[0];
+    let local = first.start - chunk_timeline_start;
+    if local <= MAX_LOCAL_LEAD_SEC {
+        return;
+    }
+    let new_start = chunk_timeline_start + SNAP_LOCAL_SEC;
+    if new_start >= first.end - MIN_SUBTITLE_DURATION {
+        return;
+    }
+    println!(
+        "[whisper] lead snap: start {:.3} → {:.3} (кусок @ {:.3}, local было {:.3}s)",
+        first.start, new_start, chunk_timeline_start, local
+    );
+    first.start = new_start;
+    first.duration = (first.end - first.start).max(MIN_SUBTITLE_DURATION);
+}
+
+// retranscribe: весь файл в whisper, vad выкл
+async fn transcribe_whisper_direct(
+    client: &reqwest::Client,
+    api_key: &str,
+    file_path: &Path,
+    language_code: &str,
+    whisper_prompt: Option<&str>,
+    progress_tx: &mpsc::Sender<ProgressEvent>,
+) -> Result<Vec<SubtitleSegment>, String> {
+    let file_size = std::fs::metadata(file_path)
+        .map_err(|e| format!("metadata: {}", e))?
+        .len();
+
+    if file_size <= WHISPER_MAX_FILE_BYTES {
+        let data = std::fs::read(file_path).map_err(|e| e.to_string())?;
+        return whisper_call(
+            client,
+            api_key,
+            data,
+            language_code,
+            whisper_prompt,
+            "direct",
+        )
+        .await;
+    }
+
+    let duration = crate::commands::audio::media_duration_seconds(file_path)
+        .await
+        .map_err(|e| format!("длительность аудио: {}", e))?;
+    if duration <= 0.0 {
+        return Err("нулевая длительность аудио".into());
+    }
+
+    let chunk_count =
+        ((file_size + WHISPER_CHUNK_TARGET_BYTES - 1) / WHISPER_CHUNK_TARGET_BYTES) as usize;
+    let chunk_count = chunk_count.max(2);
+    let chunk_seconds = (duration / chunk_count as f64).max(1.0);
+
+    println!(
+        "[whisper] direct: {:.1} MB, {} кусков по ~{:.1}s",
+        file_size as f64 / (1024.0 * 1024.0),
+        chunk_count,
+        chunk_seconds
+    );
+
+    let temp_dir = std::env::temp_dir().join(format!("whisper_chunks_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+
+    let mut all_segments: Vec<SubtitleSegment> = Vec::new();
+
+    for i in 0..chunk_count {
+        ai_cancel::check_ai_operation_cancelled()?;
+        let chunk_start = (i as f64) * chunk_seconds;
+        let chunk_path = temp_dir.join(format!("chunk_{:03}.mp3", i));
+
+        let progress = 0.35 + (i as f64 / chunk_count as f64) * 0.45;
+        let _ = progress_tx
+            .send(ProgressEvent::InProgress {
+                step: 2,
+                progress,
+                description: format!("Whisper: {} / {}", i + 1, chunk_count),
+            })
+            .await;
+
+        extract_audio_chunk(file_path, &chunk_path, chunk_start, chunk_seconds).await?;
+
+        let chunk_data = std::fs::read(&chunk_path)
+            .map_err(|e| format!("чтение куска {}: {}", i + 1, e))?;
+
+        let chunk_segments = whisper_call(
+            client,
+            api_key,
+            chunk_data,
+            language_code,
+            whisper_prompt,
+            &format!("direct {}/{}", i + 1, chunk_count),
+        )
+        .await?;
+
+        for mut seg in chunk_segments {
+            seg.start += chunk_start;
+            seg.end += chunk_start;
+            seg.duration = (seg.end - seg.start).max(0.05);
+            all_segments.push(seg);
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    for (i, seg) in all_segments.iter_mut().enumerate() {
+        seg.id = (i + 1) as u32;
+    }
+
+    Ok(all_segments)
+}
+
+async fn extract_audio_chunk(
     input_path: &Path,
     output_path: &Path,
-    start_time: f64,
-    end_time: f64,
+    start_seconds: f64,
+    duration_seconds: f64,
 ) -> Result<(), String> {
     use std::process::Stdio;
     use tokio::process::Command;
-    
-    let duration = end_time - start_time;
-    
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-i")
-        .arg(input_path)
+
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
+    cmd.arg("-y")
+        .arg("-loglevel")
+        .arg("error")
         .arg("-ss")
-        .arg(start_time.to_string())
+        .arg(format!("{:.3}", start_seconds))
         .arg("-t")
-        .arg(duration.to_string())
-        .arg("-acodec")
+        .arg(format!("{:.3}", duration_seconds))
+        .arg("-i")
+        .arg(input_path)
+        .arg("-c")
         .arg("copy")
         .arg(output_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    
-    let output = cmd.output().await
-        .map_err(|e| format!("Ошибка FFmpeg при извлечении сегмента: {}", e))?;
-    
-    if output.status.success() {
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
+    let status = cmd
+        .status()
+        .await
+        .map_err(|e| format!("ffmpeg: {}", e))?;
+
+    if status.success() {
         Ok(())
     } else {
-        Err("FFmpeg завершился с ошибкой при извлечении сегмента".to_string())
+        Err(format!(
+            "ffmpeg: не вырезал {:.3}+{:.3}",
+            start_seconds, duration_seconds
+        ))
     }
+}
+
+// vad кусок -> whisper, таймкоды + speech.start
+async fn transcribe_vad_speech_segments(
+    client: &reqwest::Client,
+    api_key: &str,
+    original_path: &Path,
+    speech_segments: &[vad::SpeechSegment],
+    language_code: &str,
+    whisper_prompt: Option<&str>,
+    progress_tx: &mpsc::Sender<ProgressEvent>,
+) -> Result<Vec<SubtitleSegment>, String> {
+    let total = speech_segments.len();
+    let temp_dir = std::env::temp_dir().join(format!("vad_whisper_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("temp dir: {}", e))?;
+
+    let mut all_segments: Vec<SubtitleSegment> = Vec::new();
+
+    println!(
+        "[whisper] режим VAD: {} кусков речи → {} запросов API (без склейки)",
+        total, total
+    );
+
+    for (i, speech) in speech_segments.iter().enumerate() {
+        ai_cancel::check_ai_operation_cancelled()?;
+        let chunk_index = i + 1;
+        let timeline_start = speech.start;
+        let duration = (speech.end - speech.start).max(0.05);
+
+        let progress = 0.30 + (i as f64 / total as f64) * 0.55;
+        let _ = progress_tx
+            .send(ProgressEvent::InProgress {
+                step: 2,
+                progress,
+                description: format!("Whisper: кусок {} из {}", chunk_index, total),
+            })
+            .await;
+
+        println!(
+            "[whisper] VAD-кусок {} из {} [{} - {}] ({:.1}s)",
+            chunk_index,
+            total,
+            vad::format_timestamp_hms(timeline_start),
+            vad::format_timestamp_hms(speech.end),
+            duration,
+        );
+
+        let chunk_path = temp_dir.join(format!("vad_{:04}.mp3", i));
+        vad::extract_segment_audio(original_path, &chunk_path, timeline_start, duration).await?;
+
+        let file_data = std::fs::read(&chunk_path)
+            .map_err(|e| format!("чтение VAD-куска {}: {}", chunk_index, e))?;
+        let file_size = file_data.len() as u64;
+
+        if file_size <= WHISPER_MAX_FILE_BYTES {
+            let label = format!("vad {}/{}", chunk_index, total);
+            let mut segs = whisper_call(
+                client,
+                api_key,
+                file_data,
+                language_code,
+                whisper_prompt,
+                &label,
+            )
+            .await?;
+            shift_segment_times(&mut segs, timeline_start);
+            snap_vad_chunk_lead_timing(&mut segs, timeline_start);
+            println!(
+                "[whisper] VAD-кусок {}: {} субтитр(ов)",
+                chunk_index,
+                segs.len()
+            );
+            all_segments.extend(segs);
+        } else {
+            let sub_count = ((file_size + WHISPER_CHUNK_TARGET_BYTES - 1)
+                / WHISPER_CHUNK_TARGET_BYTES) as usize;
+            let sub_count = sub_count.max(2);
+            let sub_seconds = duration / sub_count as f64;
+            println!(
+                "[whisper] VAD-кусок {} большой ({:.1} MB) — {} подкусков",
+                chunk_index,
+                file_size as f64 / (1024.0 * 1024.0),
+                sub_count
+            );
+            for j in 0..sub_count {
+                ai_cancel::check_ai_operation_cancelled()?;
+                let local_start = j as f64 * sub_seconds;
+                let sub_path = temp_dir.join(format!("vad_{:04}_sub{:03}.mp3", i, j));
+                vad::extract_segment_audio(
+                    original_path,
+                    &sub_path,
+                    timeline_start + local_start,
+                    sub_seconds,
+                )
+                .await?;
+                let sub_data = std::fs::read(&sub_path)
+                    .map_err(|e| format!("чтение подкуска {}: {}", j + 1, e))?;
+                let label = format!(
+                    "vad {}/{} sub {}/{}",
+                    chunk_index,
+                    total,
+                    j + 1,
+                    sub_count
+                );
+                let mut segs = whisper_call(
+                    client,
+                    api_key,
+                    sub_data,
+                    language_code,
+                    whisper_prompt,
+                    &label,
+                )
+                .await?;
+                let sub_timeline = timeline_start + local_start;
+                shift_segment_times(&mut segs, sub_timeline);
+                snap_vad_chunk_lead_timing(&mut segs, sub_timeline);
+                all_segments.extend(segs);
+                let _ = std::fs::remove_file(&sub_path);
+            }
+        }
+
+        let _ = std::fs::remove_file(&chunk_path);
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    for (idx, seg) in all_segments.iter_mut().enumerate() {
+        seg.id = (idx + 1) as u32;
+    }
+
+    println!(
+        "[whisper] итого {} субтитр(ов) из {} VAD-кусков",
+        all_segments.len(),
+        total
+    );
+
+    Ok(all_segments)
+}
+
+fn whisper_segment_dedup_key(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn sanitize_whisper_segments(segments: Vec<SubtitleSegment>) -> Vec<SubtitleSegment> {
+    if segments.len() < 2 {
+        return segments;
+    }
+    let mut out: Vec<SubtitleSegment> = Vec::with_capacity(segments.len());
+    let mut prev_key: Option<String> = None;
+    for seg in segments {
+        let key = whisper_segment_dedup_key(&seg.text);
+        if key.is_empty() {
+            out.push(seg);
+            prev_key = Some(key);
+            continue;
+        }
+        if prev_key.as_deref() == Some(key.as_str()) {
+            continue;
+        }
+        prev_key = Some(key);
+        out.push(seg);
+    }
+    for (i, seg) in out.iter_mut().enumerate() {
+        seg.id = (i + 1) as u32;
+    }
+    out
 }
 
 async fn auto_generate_glossary_from_segments(
@@ -512,15 +1169,17 @@ async fn auto_generate_glossary_from_segments(
     
     let selected_words: Vec<String> = frequent_words
         .into_iter()
-        .take(20) // Максимум 20 терминов
+        .take(20) // макс 20 слов
         .map(|(word, _)| word)
         .collect();
     
     if selected_words.is_empty() {
         return Ok(Vec::new());
     }
-    
-    // промпт для GPT
+
+    ai_cancel::check_ai_operation_cancelled()?;
+
+    // промпт глоссария
     let terms_list = selected_words.join(", ");
     let prompt = format!(
         "Ты эксперт по переводу. Ниже список терминов, которые встречаются в субтитрах.
@@ -534,7 +1193,7 @@ async fn auto_generate_glossary_from_segments(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
+            "model": CHAT_COMPLETION_MODEL,
             "messages": [
                 { "role": "system", "content": prompt },
                 { "role": "user", "content": terms_list }
@@ -557,9 +1216,10 @@ async fn auto_generate_glossary_from_segments(
     parse_glossary_response(response)
 }
 
-/// Сегментов за один запрос: иначе ответ упирается в лимит completion-токенов и JSON обрезается (EOF while parsing).
+// не слишком много сегментов за раз, json режется
 const TRANSLATION_CHUNK_SIZE: usize = 40;
 const TRANSLATION_MAX_TOKENS: u32 = 16384;
+const CHAT_COMPLETION_MODEL: &str = "gpt-5.4";
 
 async fn translate_segments_chunk(
     client: &reqwest::Client,
@@ -568,33 +1228,38 @@ async fn translate_segments_chunk(
     chunk: &[SubtitleSegment],
     log_label: &str,
 ) -> Result<Vec<crate::types::TranslationResult>, String> {
+    // в API уходит только акустический speaker_gender и текст
+    // адресата GPT сам определит по контексту диалога и блоку ПЕРСОНАЖИ
     let segments_text = serde_json::json!({
         "segments": chunk.iter().map(|s| {
             serde_json::json!({
                 "id": s.id,
                 "text": s.text,
                 "start": s.start,
-                "end": s.end
+                "end": s.end,
+                "speaker_gender": segment_speaker_gender_str(s),
             })
         }).collect::<Vec<_>>()
     });
 
     let user_content = serde_json::to_string(&segments_text).map_err(|e| e.to_string())?;
 
+    let segments_debug = format_segments_for_debug(chunk);
     log_debug_block(
         &format!("перевод [{log_label}]: запрос"),
         &format!(
-            "model: gpt-5.4-mini\n\
-            temperature: 0.3\n\
-            max_completion_tokens: {TRANSLATION_MAX_TOKENS}\n\
-            response_format: json_object\n\
-            \n\
-            --- system ---\n\
-            {prompt}\n\
-            \n\
-            --- user (JSON, {} симв.) ---\n\
-            {user_content}",
-            user_content.len()
+            "model: {CHAT_COMPLETION_MODEL}\n\
+temperature: 0.3\n\
+max_completion_tokens: {TRANSLATION_MAX_TOKENS}\n\
+response_format: json_object\n\
+сегментов в пакете: {}\n\
+\n\
+--- system ---\n\
+{prompt}\n\
+\n\
+--- user: сегменты (в API уходит JSON) ---\n\
+{segments_debug}",
+            chunk.len(),
         ),
     );
 
@@ -602,7 +1267,7 @@ async fn translate_segments_chunk(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
+            "model": CHAT_COMPLETION_MODEL,
             "messages": [
                 { "role": "system", "content": prompt },
                 { "role": "user", "content": user_content }
@@ -622,10 +1287,9 @@ async fn translate_segments_chunk(
     }
 
     let response: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let pretty = serde_json::to_string_pretty(&response).unwrap_or_else(|e| e.to_string());
     log_debug_block(
-        &format!("перевод [{log_label}]: ответ OpenAI"),
-        &pretty,
+        &format!("перевод [{log_label}]: ответ"),
+        &format_translation_response_for_debug(&response),
     );
     parse_translation_response(response)
 }
@@ -639,6 +1303,7 @@ pub async fn translate_batch(
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<crate::types::TranslationResult>, String> {
     println!("Перевод {} сегментов на {}...", segments.len(), target_language);
+    ai_cancel::reset_ai_operation_cancel();
 
     let api_key = get_api_key()?;
 
@@ -660,17 +1325,17 @@ pub async fn translate_batch(
         description: "Подготовка перевода".to_string() 
     }).await;
 
-    // Формируем промпт
+    // собираем промпт
     let _ = progress_tx.send(ProgressEvent::InProgress { 
         step: 1, 
         progress: 0.33, 
         description: "Генерация промпта".to_string() 
     }).await;
     
-    let glossary_text = if !glossary.is_empty() {
-        let entries = glossary
-            .iter()
-            .map(|e| {
+    let glossary_lines: Vec<String> = glossary
+        .iter()
+        .filter(|e| !e.source.trim().is_empty() && !e.target.trim().is_empty())
+        .map(|e| {
                 let mut notes = Vec::new();
                 if let Some(description) = e.description.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
                     notes.push(description.to_string());
@@ -683,36 +1348,145 @@ pub async fn translate_batch(
                 } else {
                     format!(" — {}", notes.join("; "))
                 };
-                format!("• \"{}\" → \"{}\"{}", e.source, e.target, notes_text)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+            format!("• \"{}\" → \"{}\"{}", e.source, e.target, notes_text)
+        })
+        .collect();
+
+    let glossary_text = if glossary_lines.is_empty() {
+        String::new()
+    } else {
         format!(
             "ГЛОССАРИЙ (обязательно соблюдать при переводе):\n{}\n\n",
-            entries
+            glossary_lines.join("\n")
         )
-    } else {
-        String::new()
     };
     
+    let target_iso = normalize_target_language_iso(&target_language);
+    let dialogue_hint = dialogue_context_translation_rules(&target_language);
+    let gender_hint = speaker_gender_translation_rules(&target_language);
+    if gender_hint.is_empty() {
+        println!(
+            "[translate] диалог+род: только базовый контекст (target={:?}, iso={:?})",
+            target_language, target_iso
+        );
+    } else {
+        println!(
+            "[translate] диалог+род: полный блок (target={}, iso={})",
+            target_language,
+            target_iso.as_deref().unwrap_or("?")
+        );
+    }
+
+    let mandatory_lines: Vec<String> = glossary
+        .iter()
+        .filter(|e| !e.source.trim().is_empty() && !e.target.trim().is_empty())
+        .filter(|e| {
+            e.description
+                .as_deref()
+                .map(|d| d.to_lowercase().contains("user prompt"))
+                .unwrap_or(false)
+        })
+        .map(|e| format!("• \"{}\" → \"{}\" (обязательно)", e.source.trim(), e.target.trim()))
+        .collect();
+    let mandatory_block = if mandatory_lines.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "ОБЯЗАТЕЛЬНЫЕ ПЕРЕВОДЫ ИЗ ИНСТРУКЦИИ ПОЛЬЗОВАТЕЛЯ:\n{}\n\n",
+            mandatory_lines.join("\n")
+        )
+    };
+
+    // персонажи с полом из глоссария - и для промпта, и для расчёта addressee_gender_hint
+    let character_genders = collect_character_genders(&glossary);
+    if !character_genders.is_empty() {
+        let preview: Vec<String> = character_genders
+            .iter()
+            .take(20)
+            .map(|(n, g)| format!("{}={}", n, g))
+            .collect();
+        println!("[translate] персонажи из глоссария: {}", preview.join(", "));
+        crate::debug_log::log_line(&format!(
+            "[translate] персонажи с полом из глоссария: {}",
+            preview.join(", ")
+        ));
+    }
+
+    let characters_block = if character_genders.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = character_genders
+            .iter()
+            .map(|(name, g)| format!("• {} — {}", name, g))
+            .collect();
+        format!(
+            "ПЕРСОНАЖИ И ИХ ПОЛ (из глоссария проекта — приоритет над speaker_gender из акустики):\n\
+             Если в реплике звучит имя из этого списка как обращение (\"Aelita, ...\", \"Ulrich!\", \"Hi, Jeremy\") — это пол АДРЕСАТА.\n\
+             Если реплику произносит этот персонаж (по контексту/диалогу) — это пол ГОВОРЯЩЕГО, даже когда speaker_gender=unknown или подозрительно противоречит сцене.\n\
+             {}\n\n",
+            lines.join("\n")
+        )
+    };
+
     let prompt = format!(
-        "Ты профессиональный переводчик субтитров. Переведи текст на {}.\n\n\
-        {}\
-        СТИЛЬ ПЕРЕВОДА: {}\n\n\
-        Требования к переводу:\n\
-        • Сохраняй естественность речи на целевом языке\n\
-        • Учитывай контекст диалога\n\
-        • Соблюдай глоссарий терминов (если указан)\n\
-        • Имена персонажей, прозвища, названия мест, организаций и другие имена собственные ПЕРЕВОДИ/ЛОКАЛИЗУЙ на целевой язык, а не оставляй автоматически в исходном написании\n\
-        • Если в глоссарии есть конкретная форма имени/термина, используй строго её (это приоритет над общим правилом)\n\
-        • Оставляй исходное написание только когда это осознанно необходимо по нормам языка/контекста (например, устоявшийся бренд без перевода)\n\
-        • Длина перевода должна быть сопоставима с оригиналом для синхронизации с видео\n\n\
-        Пример ожидаемого поведения: \"My name is Dipper.\" -> \"Меня зовут Диппер.\"\n\n\
-        Верни JSON-объект с ключом \"translations\": массив объектов \
-        {{\"id\": число, \"translated_text\": \"текст\"}} — по одному объекту на каждый сегмент из запроса.",
-        target_language,
-        glossary_text,
-        style_prompt
+        "Ты профессиональный переводчик субтитров. Переводишь на язык: {target_language}.\n\n\
+        ВХОД. На вход придёт JSON: {{\"segments\": [...]}}. У каждого элемента поля:\n\
+          - id            — числовой идентификатор реплики, его надо сохранить в ответе.\n\
+          - text          — оригинал реплики (это её и надо перевести).\n\
+          - start, end    — таймкоды в секундах (только для понимания порядка).\n\
+          - speaker_gender — пол того, кто произносит эту реплику: \"male\", \"female\" или \"unknown\".\n\
+                             Это акустическая оценка, иногда ошибается (особенно на детских/высоких голосах).\n\
+                             Если speaker_gender противоречит блоку ПЕРСОНАЖИ или явному контексту диалога — верь контексту, а не speaker_gender.\n\n\
+        {characters_block}\
+        КАК ОПРЕДЕЛЯТЬ КТО ГОВОРИТ И КТО АДРЕСАТ:\n\
+          - Адресат не дан в JSON. Определяй его самостоятельно по контексту: прямое обращение по имени в реплике (\"Aelita, ...\", \"Hi, Jeremy\", \"Ulrich!\"), смысл соседних реплик (вопрос -> ответ обычно между двумя разными персонажами), сюжет.\n\
+          - Если в реплике звучит имя из блока ПЕРСОНАЖИ как обращение — это пол АДРЕСАТА.\n\
+          - Если имени нет — смотри 1-2 соседних реплики; кто отвечает по смыслу, тот и адресат.\n\
+          - Не делай выводы только по speaker_gender соседей: акустика может ошибаться.\n\n\
+        СОГЛАСОВАНИЕ РОДА (для языков, где это важно — русский, украинский, польский и т.п.). ЭТО КРИТИЧНО:\n\
+          1. Первое лицо (я, мы, мой, одна/один) — по полу ГОВОРЯЩЕГО.\n\
+             Если ты однозначно определил говорящего по контексту/обращениям/именам — бери пол персонажа из блока ПЕРСОНАЖИ (приоритетнее speaker_gender).\n\
+             Иначе опирайся на speaker_gender.\n\
+             Пример (Jeremy=male): \"I saw it too\" → «Я тоже его видел».\n\
+             Пример (Aelita=female): \"I'm tired\" → «Я устала».\n\
+          2. Второе лицо (ты, твой, обращение к собеседнику) — по полу АДРЕСАТА.\n\
+             Это НЕ грамматический род существительного в оригинале и НЕ обязательно пол говорящего.\n\
+             Пример (Jeremy обращается к Aelita): \"Have you noticed anything?\" → «Ты что-нибудь заметила?».\n\
+             Пример (Aelita обращается к Ulrich): \"Are you ready?\" → «Ты готов?».\n\
+          3. В одной фразе формы говорящего и адресата могут отличаться:\n\
+             female говорит мужчине: \"I told you so\" → «Я тебе говорила».\n\
+          4. Если контекст не позволяет однозначно определить пол — переформулируй гендерно-нейтрально, не выбирай мужской род по умолчанию.\n\
+          5. Английское \"you saw\", \"you ready\" нейтральные — на русском род ВСЁ РАВНО проставляется, опирайся на контекст и ПЕРСОНАЖЕЙ.\n\n\
+        {mandatory_block}\
+        {glossary_text}\
+        СТИЛЬ ПЕРЕВОДА: {style_prompt}\n\n\
+        {dialogue_hint}\
+        ДОПОЛНИТЕЛЬНЫЕ ПРАВИЛА:\n\
+        - Естественная речь на целевом языке, как в дубляже.\n\
+        - Субтитры произносят вслух за время реплики — перевод не длиннее оригинала, если смысл сохраняется.\n\
+        - Одна мысль источника → одна компактная фраза. Не разбивай и не объединяй реплики.\n\
+        - Лишние вступления и междометия не добавляй; короткие синонимы предпочтительнее.\n\
+        - Соблюдай глоссарий: формы имён, термины, рекомендуемый пол персонажей в третьем лице — строго как указано.\n\
+        - speaker_gender может быть НЕВЕРНЫМ (акустика ошибается на высоких/детских голосах). При противоречии с контекстом диалога, обращениями по имени или блоком ПЕРСОНАЖИ — выбирай род по контексту, а не по speaker_gender. Пример: если male говорит female-персонажу, форма к адресату — женского рода («ты не такая смелая», не «не такой смелый»).\n\
+        - Имена собственные локализуй (\"Alex\" → \"Алекс\"); склонение по падежу и предлогу в реплике.\n\
+        - НОРМАЛИЗАЦИЯ ИМЁН: если в text встречается слово, которое очевидно вариант или опечатка термина из глоссария (Whisper мог исказить имя), переводи его так же, как переведён канонический термин. Пример: в глоссарии \"Griselda\" → \"Гризельда\", в text звучит \"Gritselda\" / \"Grizelda\" — всё равно переводи как «Гризельда».\n\
+        - {gender_hint_inline}\n\n\
+        ФОРМАТ ОТВЕТА. Верни СТРОГО JSON-объект:\n\
+        {{\"translations\": [{{\"id\": <число из входа>, \"translated_text\": \"<перевод реплики>\"}}, ...]}}\n\
+        Один элемент на каждый сегмент из запроса. id строго те же. Никакого текста вне JSON.",
+        target_language = target_language,
+        characters_block = characters_block,
+        mandatory_block = mandatory_block,
+        glossary_text = glossary_text,
+        style_prompt = style_prompt,
+        dialogue_hint = dialogue_hint,
+        // gender_hint у нас уже содержит подробные правила для конкретного языка
+        // вставляем его как один пункт списка, чтобы не дублировать большие блоки выше
+        gender_hint_inline = if gender_hint.trim().is_empty() {
+            String::from("Если язык перевода требует согласования по полу — следуй разделу СОГЛАСОВАНИЕ РОДА выше.")
+        } else {
+            gender_hint.trim().replace('\n', "\n  ")
+        },
     );
 
     let client = reqwest::Client::new();
@@ -722,6 +1496,7 @@ pub async fn translate_batch(
     let mut merged_by_id: HashMap<u32, String> = HashMap::new();
 
     for (i, chunk) in chunks.iter().enumerate() {
+        ai_cancel::check_ai_operation_cancelled()?;
         let progress = 0.55 + (i as f64 / total_chunks as f64) * 0.30;
         let _ = progress_tx
             .send(ProgressEvent::InProgress {
@@ -753,6 +1528,7 @@ pub async fn translate_batch(
     const RETRY_CHUNK_WAVES: &[usize] = &[14, 12, 10, 8, 6, 4, 3, 2, 1];
 
     for (wave_idx, &chunk_sz) in RETRY_CHUNK_WAVES.iter().enumerate() {
+        ai_cancel::check_ai_operation_cancelled()?;
         let missing: Vec<SubtitleSegment> = segments
             .iter()
             .filter(|s| !merged_by_id.contains_key(&s.id))
@@ -774,6 +1550,7 @@ pub async fn translate_batch(
         let sub_total = (missing.len() + actual_sz - 1) / actual_sz;
 
         for (j, subchunk) in missing.chunks(actual_sz).enumerate() {
+            ai_cancel::check_ai_operation_cancelled()?;
             let batch = translate_segments_chunk(
                 &client,
                 &api_key,
@@ -816,7 +1593,7 @@ pub async fn translate_batch(
         }
     }
 
-    // Обрабатываем результат
+    // в ответ
     let _ = progress_tx.send(ProgressEvent::InProgress { 
         step: 3, 
         progress: 0.9, 
@@ -835,17 +1612,17 @@ pub async fn translate_batch(
         });
     }
 
-    // Применяем глоссарий
+    // глоссарий поверх перевода
     if !glossary.is_empty() {
     for translation in &mut translations {
         if let Some(segment) = segments.iter().find(|s| s.id == translation.id) {
-            // Применяем глоссарий к оригиналу и переводу
             let original_with_glossary = apply_glossary(&segment.text, &glossary);
             translation.translated_text = apply_glossary(&translation.translated_text, &glossary);
             
-            // Логируем изменения для отладки
+            // дебаг если что поменялось
             if original_with_glossary != segment.text {
-                println!("ℹПрименён глоссарий к сегменту #{}: \"{}\" → \"{}\"", 
+                println!(
+                    "[translate] глоссарий сегмент #{}: \"{}\" -> \"{}\"",
                     segment.id, segment.text, original_with_glossary);
             }
         }
@@ -860,7 +1637,7 @@ pub async fn translate_batch(
     Ok(translations)
 }
 
-// Вспомогательные структуры для прогресса
+// прогресс в ui
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProgressPayload {
     pub operation_id: String,
@@ -882,45 +1659,353 @@ fn json_seconds(v: &serde_json::Value) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[derive(Clone)]
+struct WhisperWord {
+    text: String,
+    start: f64,
+    end: f64,
+}
+
+fn parse_word_entry(w: &serde_json::Value) -> Option<WhisperWord> {
+    let text = w["word"].as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let start = json_seconds(&w["start"]);
+    let end = json_seconds(&w["end"]);
+    if end <= start {
+        return None;
+    }
+    Some(WhisperWord {
+        text: text.to_string(),
+        start,
+        end,
+    })
+}
+
+fn parse_whisper_words(response: &serde_json::Value) -> Vec<WhisperWord> {
+    response["words"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(parse_word_entry).collect())
+        .unwrap_or_default()
+}
+
+fn parse_segment_words(seg: &serde_json::Value) -> Vec<WhisperWord> {
+    seg["words"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(parse_word_entry).collect())
+        .unwrap_or_default()
+}
+
+// mr. dr. и тп - точка не конец фразы
+const SENTENCE_END_EXCEPTIONS: &[&str] = &[
+    "mr", "mrs", "ms", "dr", "sr", "jr", "st", "prof", "capt", "lt",
+    "vs", "etc", "vol", "no", "fig",
+];
+
+// инициал или акроним - одна буква типа X. или цепочка с точками X.A.N.A.
+// тогда точка часть имени, не конец фразы
+fn looks_like_initial_or_acronym(word: &str) -> bool {
+    let trimmed = word.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let stem: String = trimmed.chars().filter(|c| c.is_alphabetic()).collect();
+    if stem.is_empty() {
+        return false;
+    }
+    // одна буква + точка - X. А.
+    if stem.chars().count() == 1 {
+        return true;
+    }
+    // X.A.N.A. - все заглавные и точек внутри >= 2
+    let dot_count = trimmed.chars().filter(|c| *c == '.').count();
+    let all_upper = stem.chars().all(|c| c.is_uppercase());
+    if all_upper && dot_count >= 2 && stem.chars().count() >= 2 {
+        return true;
+    }
+    false
+}
+
+// режем сегмент whisper по . ! ? (тайминги из words)
+fn split_segment_into_sentences(
+    seg_text: &str,
+    words: &[WhisperWord],
+) -> Option<Vec<(String, f64, f64)>> {
+    if words.is_empty() || seg_text.is_empty() {
+        return None;
+    }
+
+    let lower_text = seg_text.to_lowercase();
+
+    // если ß или подобные и lower другой длины - не лезем, упадём в fallback
+    if lower_text.len() != seg_text.len() {
+        return None;
+    }
+
+    let mut positions: Vec<(usize, usize)> = Vec::with_capacity(words.len());
+    let mut cursor = 0usize;
+    for word in words {
+        let needle = word.text.to_lowercase();
+        if needle.is_empty() {
+            continue;
+        }
+        let area = &lower_text[cursor..];
+        match area.find(&needle) {
+            Some(rel) => {
+                let start = cursor + rel;
+                let end = start + needle.len();
+                positions.push((start, end));
+                cursor = end;
+            }
+            None => return None,
+        }
+    }
+    if positions.is_empty() {
+        return None;
+    }
+
+    let is_terminal = |c: char| matches!(c, '.' | '!' | '?' | '…');
+    let is_closer = |c: char| matches!(c, '»' | '”' | '’' | ')' | ']' | '}');
+
+    let mut out: Vec<(String, f64, f64)> = Vec::new();
+    let mut sent_start_text = 0usize;
+    let mut sent_start_word = 0usize;
+
+    for i in 0..positions.len() {
+        let (_word_start, word_end) = positions[i];
+        let next_start = if i + 1 < positions.len() {
+            positions[i + 1].0
+        } else {
+            seg_text.len()
+        };
+        let between = &seg_text[word_end..next_start];
+
+        let Some(terminal_rel) = between.find(is_terminal) else {
+            continue;
+        };
+
+        let lw = words[i].text.to_lowercase();
+        let stem: String = lw.chars().filter(|c| c.is_alphabetic()).collect();
+        if SENTENCE_END_EXCEPTIONS.contains(&stem.as_str()) {
+            continue;
+        }
+
+        // инициалы и акронимы например X. A. N. A.
+        if looks_like_initial_or_acronym(&words[i].text) {
+            continue;
+        }
+        // следующее слово тоже инициал - значит идёт цепочка имени
+        if i + 1 < words.len() && looks_like_initial_or_acronym(&words[i + 1].text) {
+            continue;
+        }
+
+        // после точки еще ) ] » ок, кавычки не трогаем
+        let mut sentence_end = word_end + terminal_rel;
+        let first = seg_text[sentence_end..].chars().next().unwrap();
+        sentence_end += first.len_utf8();
+        while sentence_end < seg_text.len() {
+            let next = seg_text[sentence_end..].chars().next().unwrap();
+            if is_terminal(next) || is_closer(next) {
+                sentence_end += next.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        let sentence_text = seg_text[sent_start_text..sentence_end].trim().to_string();
+        if !sentence_text.is_empty()
+            && sentence_text.chars().any(|c| c.is_alphanumeric())
+        {
+            let start = words[sent_start_word].start;
+            let end = words[i].end;
+            out.push((sentence_text, start, end));
+        }
+        sent_start_text = sentence_end;
+        sent_start_word = i + 1;
+    }
+
+    if sent_start_word < positions.len() {
+        let sentence_text = seg_text[sent_start_text..].trim().to_string();
+        if !sentence_text.is_empty()
+            && sentence_text.chars().any(|c| c.is_alphanumeric())
+        {
+            let start = words[sent_start_word].start;
+            let end = words.last().unwrap().end;
+            out.push((sentence_text, start, end));
+        }
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+const MIN_SUBTITLE_DURATION: f64 = 0.05;
+// минимум сколько субтитр висит на экране, чтобы успеть прочесть короткое
+const MIN_SUBTITLE_DISPLAY_SEC: f64 = 1.25;
+// небольшой хвост после последнего слова whisper
+const SUBTITLE_END_PAD_SEC: f64 = 0.30;
+// средняя скорость чтения - для длинных реплик
+const SUBTITLE_CHARS_PER_SEC: f64 = 17.0;
+const SUBTITLE_MIN_GAP_SEC: f64 = 0.05;
+
+fn subtitle_min_display_duration(text: &str) -> f64 {
+    let chars = text.chars().filter(|c| !c.is_whitespace()).count();
+    let by_reading = if chars == 0 {
+        MIN_SUBTITLE_DISPLAY_SEC
+    } else {
+        (chars as f64 / SUBTITLE_CHARS_PER_SEC).max(MIN_SUBTITLE_DISPLAY_SEC)
+    };
+    by_reading
+}
+
+// удлиняем слишком короткие субтитры и чиним пересечения после whisper
+fn apply_subtitle_timing_postprocess(mut segments: Vec<SubtitleSegment>) -> Vec<SubtitleSegment> {
+    if segments.is_empty() {
+        return segments;
+    }
+    segments.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let n = segments.len();
+    for i in 0..n {
+        let min_dur = subtitle_min_display_duration(&segments[i].text);
+        let mut desired_end = segments[i].start + min_dur + SUBTITLE_END_PAD_SEC;
+        desired_end = desired_end.max(segments[i].end);
+        let cap = if i + 1 < n {
+            segments[i + 1].start - SUBTITLE_MIN_GAP_SEC
+        } else {
+            f64::INFINITY
+        };
+        if desired_end > cap {
+            desired_end = cap.max(segments[i].start + MIN_SUBTITLE_DURATION);
+        }
+        segments[i].end = desired_end.max(segments[i].start + MIN_SUBTITLE_DURATION);
+        segments[i].duration = segments[i].end - segments[i].start;
+    }
+
+    fix_overlapping_subtitles(&mut segments);
+
+    for (idx, seg) in segments.iter_mut().enumerate() {
+        seg.id = (idx + 1) as u32;
+    }
+    segments
+}
+
+fn fix_overlapping_subtitles(segments: &mut [SubtitleSegment]) {
+    if segments.len() < 2 {
+        return;
+    }
+    for i in 0..segments.len() - 1 {
+        let next_start = segments[i + 1].start;
+        let min_end = segments[i].start + MIN_SUBTITLE_DURATION;
+        if segments[i].end > next_start - SUBTITLE_MIN_GAP_SEC {
+            let new_end = (next_start - SUBTITLE_MIN_GAP_SEC).max(min_end);
+            if (segments[i].end - new_end).abs() > 0.001 {
+                println!(
+                    "[timing] overlap: сегмент #{} end {:.3} → {:.3} (след. start {:.3})",
+                    segments[i].id,
+                    segments[i].end,
+                    new_end,
+                    next_start
+                );
+            }
+            segments[i].end = new_end;
+            segments[i].duration = segments[i].end - segments[i].start;
+        }
+    }
+}
+
+fn make_subtitle_segment(text: String, start: f64, end: f64) -> SubtitleSegment {
+    let end = end.max(start + MIN_SUBTITLE_DURATION);
+    SubtitleSegment {
+        id: 0,
+        start,
+        end,
+        duration: end - start,
+        text,
+        translation: None,
+        speaker_gender: None,
+        flags: None,
+    }
+}
+
 fn parse_whisper_response(response: serde_json::Value) -> Result<Vec<SubtitleSegment>, String> {
     let segments = response["segments"]
         .as_array()
-        .ok_or("Нет сегментов в ответе".to_string())?;
-    
-    let result: Vec<SubtitleSegment> = segments
-        .iter()
-        .enumerate()
-        .map(|(i, seg)| {
-            let id = (i + 1) as u32;
-            let mut start = json_seconds(&seg["start"]);
-            let mut end = json_seconds(&seg["end"]);
-            let text = seg["text"].as_str().unwrap_or("").trim().to_string();
+        .ok_or("Нет сегментов в ответе Whisper".to_string())?;
 
-            if let Some(words) = seg["words"].as_array() {
-                if let (Some(first), Some(last)) = (words.first(), words.last()) {
-                    let ws = json_seconds(&first["start"]);
-                    let we = json_seconds(&last["end"]);
-                    if we > ws {
-                        start = ws;
-                        end = we;
-                    }
+    let all_words = parse_whisper_words(&response);
+    let mut result: Vec<SubtitleSegment> = Vec::new();
+
+    for seg in segments {
+        let seg_start = json_seconds(&seg["start"]);
+        let seg_end = json_seconds(&seg["end"]);
+        let seg_text = seg["text"].as_str().unwrap_or("").trim().to_string();
+        if seg_text.is_empty() || seg_end <= seg_start {
+            continue;
+        }
+
+        let nested = parse_segment_words(seg);
+        let words: Vec<WhisperWord> = if !nested.is_empty() {
+            nested
+        } else {
+            all_words
+                .iter()
+                .filter(|w| w.end > seg_start && w.start < seg_end)
+                .cloned()
+                .collect()
+        };
+
+        if words.is_empty() {
+            result.push(make_subtitle_segment(seg_text, seg_start, seg_end));
+            continue;
+        }
+
+        match split_segment_into_sentences(&seg_text, &words) {
+            Some(sentences) if sentences.len() > 1 => {
+                println!(
+                    "[whisper] сегмент [{:.3}..{:.3}] разрезан на {} предложений ({} слов)",
+                    seg_start,
+                    seg_end,
+                    sentences.len(),
+                    words.len(),
+                );
+                for (text, start, end) in sentences {
+                    result.push(make_subtitle_segment(text, start, end));
                 }
             }
-
-            let duration = (end - start).max(0.0);
-            
-            SubtitleSegment {
-                id,
-                start,
-                end,
-                duration,
-                text,
-                translation: None,
-                flags: None,
+            Some(_sentences) => {
+                // одно предложение - текст как есть, тайминги по словам
+                let start = words.first().map(|w| w.start).unwrap_or(seg_start);
+                let end = words.last().map(|w| w.end).unwrap_or(seg_end);
+                result.push(make_subtitle_segment(seg_text, start, end));
             }
-        })
-        .collect();
-    
+            None => {
+                // words не сматчились с текстом - целиком, не ломать
+                println!(
+                    "[whisper] alignment fallback: words={} не сматчились с текстом (сегмент [{:.3}..{:.3}])",
+                    words.len(),
+                    seg_start,
+                    seg_end,
+                );
+                let start = words.first().map(|w| w.start).unwrap_or(seg_start);
+                let end = words.last().map(|w| w.end).unwrap_or(seg_end);
+                result.push(make_subtitle_segment(seg_text, start, end));
+            }
+        }
+    }
+
+    for (i, seg) in result.iter_mut().enumerate() {
+        seg.id = (i + 1) as u32;
+    }
+
     Ok(result)
 }
 
@@ -935,10 +2020,7 @@ fn parse_translation_response(
     let parsed: serde_json::Value = serde_json::from_str(&normalized_content)
         .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
 
-    // Если структура ответа правильная (массив переводов либо id->text карта),
-    // отдаём то, что распарсилось, даже если внутри попались пустые
-    // translated_text — это валидный ответ модели, а не ошибка.
-    // Пустоты будут заменены оригиналом в translate_batch.
+    // json норм - отдаем; пустые строки потом в translate_batch
     if let Some(candidate_array) = find_translation_array(&parsed) {
         let mut results = parse_translation_items(candidate_array);
         results.sort_by_key(|item| item.id);
@@ -1078,6 +2160,7 @@ pub async fn auto_generate_glossary(
         max_terms: 50,
         target_language: "ru".to_string(),
         context_prompt: None,
+        meaning_context_language: None,
     });
     let _ = options.min_frequency;
 
@@ -1089,7 +2172,25 @@ pub async fn auto_generate_glossary(
     let api_key = get_api_key()?;
 
     let max_terms = options.max_terms.clamp(5, 80);
-    let target_lang = options.target_language.trim();
+    // нормализуем язык до iso-кода, иначе пришедшее "russian" / "Русский" не попадёт в match ниже
+    let target_lang_raw = options.target_language.trim().to_string();
+    let target_lang_iso = normalize_target_language_iso(&target_lang_raw).unwrap_or_else(|| target_lang_raw.clone());
+    let target_lang = target_lang_iso.as_str();
+    // язык meaning_context: если задан отдельный - берём его, иначе совпадает с target_lang
+    // нужно для wizard'а где target=исходный (имена не переводятся), а meaning_context должен быть на UI-языке
+    let meaning_lang_raw = options
+        .meaning_context_language
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(target_lang_raw.as_str())
+        .to_string();
+    let meaning_lang_iso = normalize_target_language_iso(&meaning_lang_raw).unwrap_or_else(|| meaning_lang_raw.clone());
+    let meaning_lang = meaning_lang_iso.as_str();
+    println!(
+        "[glossary] target_language raw=\"{}\" iso=\"{}\", meaning_context_language raw=\"{}\" iso=\"{}\"",
+        target_lang_raw, target_lang, meaning_lang_raw, meaning_lang
+    );
 
     let creator_notes = options
         .context_prompt
@@ -1101,6 +2202,42 @@ pub async fn auto_generate_glossary(
         "\n\nIf the user message includes a \"Creator / translator notes\" section above the subtitle text, treat names, spellings, factions, and lore listed there as authoritative. Prefer those exact spellings in \"source\" when they also appear (or clearly correspond) in the subtitle transcript. Merge hints from notes with terms found in the subtitles."
     } else {
         ""
+    };
+
+    // готовый текст meaning_context на языке UI проекта - тип + пол + склонение
+    // язык meaning_context отдельный от target_lang - в wizard'е target может быть исходным
+    // а meaning_context всё равно должен быть на языке проекта (target language)
+    let meaning_lang_hint = match meaning_lang {
+        "ru" => "Заполни поле meaning_context по-русски одной короткой фразой по шаблону:\n\
+                 - character: \"Персонаж, <мужской|женский|неизвестен> пол, <склоняется|не склоняется>\"\n\
+                 - location:  \"Локация, <склоняется|не склоняется>\"\n\
+                 - organization: \"Организация, <склоняется|не склоняется>\"\n\
+                 - concept/title/other: \"<Понятие|Название|Прочее>, <склоняется|не склоняется>\"\n\
+                 Пол по имени или роли (Aelita = женский, Jeremy = мужской, X.A.N.A. = неизвестен).\n\
+                 Склонение угадывай по форме target в русском (русские имена на -а/-я склоняются, иностранные неизменяемые - не склоняются).\n\
+                 НИКОГДА не пиши meaning_context на английском или французском - только по-русски.".to_string(),
+        "uk" => "Заповни поле meaning_context українською одним коротким рядком: <тип (Персонаж/Локація/Організація/Назва)>, <чоловічий|жіночий|невідомо> рід, <відмінюється|не відмінюється>.\n\
+                 ТІЛЬКИ українською мовою, не іншою.".to_string(),
+        "pl" => "Wypełnij pole meaning_context po polsku krótko: <typ (Postać/Lokacja/Organizacja/Nazwa)>, <męski|żeński|nieznany> rodzaj, <odmienia się|nie odmienia się>.\n\
+                 Tylko po polsku, nie innym językiem.".to_string(),
+        "en" => "Fill meaning_context in English as a short label: <type (Character/Location/Organization/Title/Concept)>, <male|female|unknown> gender if applicable.\n\
+                 Inflection in English is not relevant, omit it.\n\
+                 Write meaning_context ONLY in English, never in the source language of subtitles.".to_string(),
+        "fr" => "Remplis meaning_context en français, courte étiquette : <type (Personnage/Lieu/Organisation/Titre/Concept)>, <masculin|féminin|inconnu> si pertinent, <variable|invariable>.\n\
+                 Uniquement en français, jamais dans la langue d'origine.".to_string(),
+        "de" => "Fülle meaning_context auf Deutsch als kurze Beschreibung: <Typ (Figur/Ort/Organisation/Titel/Konzept)>, <männlich|weiblich|unbekannt> falls relevant, <flektiert|unveränderlich>.\n\
+                 Nur auf Deutsch, nicht in der Originalsprache.".to_string(),
+        "es" => "Rellena meaning_context en español breve: <tipo (Personaje/Lugar/Organización/Título/Concepto)>, <masculino|femenino|desconocido> si aplica, <se declina|invariable>.\n\
+                 Solo en español, no en el idioma original.".to_string(),
+        "it" => "Compila meaning_context in italiano breve: <tipo (Personaggio/Luogo/Organizzazione/Titolo/Concetto)>, <maschile|femminile|sconosciuto> se rilevante, <flesso|invariabile>.\n\
+                 Solo in italiano.".to_string(),
+        "pt" => "Preencha meaning_context em português curto: <tipo>, <masculino|feminino|desconhecido> se aplicável, <flexiona|invariável>.\n\
+                 Apenas em português.".to_string(),
+        _ => format!(
+            "Fill meaning_context as a short label written in the language with ISO 639-1 code \"{meaning_lang}\" (the UI / TARGET language of the project).\n\
+             Format: <type: character/location/organization/title/concept>, <gender if applicable>, <inflects: yes/no if applicable>.\n\
+             Write meaning_context ONLY in that language, never in any other language."
+        ),
     };
 
     let system_prompt = format!(
@@ -1119,16 +2256,19 @@ pub async fn auto_generate_glossary(
         - isolated frequent words; prefer multi-word names when relevant\n\
         If you are unsure whether something is a proper term for this show, omit it.\n\
         For each term, \"source\" must appear verbatim (or canonical capitalization) as in the text when possible.\n\
-        \"target\" must be the correct translation into the language identified by ISO 639-1 code: {}.\n\
+        \"target\" must be the correct translation into the language identified by ISO 639-1 code: {target_lang}.\n\
         \"target\" must be localized, not a blind copy of \"source\"; for names, provide natural localization/transliteration for the target language.\n\
         If \"target\" would be identical to \"source\" without a strong reason, choose a localized form.\n\
         \"category\" is one of: character | location | organization | concept | title | other.\n\
         \"confidence\" is 0.0-1.0 (how sure this is a glossary-worthy term for THIS material).\n\
-        Return a single JSON object: {{\"terms\":[{{\"source\":\"...\",\"target\":\"...\",\"confidence\":0.9,\"category\":\"character\"}},...]}}.\n\
-        At most {} terms, sorted by importance for consistency (most important first).{}",
-        target_lang,
-        max_terms,
-        notes_instruction
+        \"meaning_context\" — short human-readable description that the translator will see in the glossary UI:\n\
+        {meaning_lang_hint}\n\
+        Return a single JSON object: {{\"terms\":[{{\"source\":\"...\",\"target\":\"...\",\"confidence\":0.9,\"category\":\"character\",\"meaning_context\":\"...\"}},...]}}.\n\
+        At most {max_terms} terms, sorted by importance for consistency (most important first).{notes_instruction}",
+        target_lang = target_lang,
+        max_terms = max_terms,
+        notes_instruction = notes_instruction,
+        meaning_lang_hint = meaning_lang_hint,
     );
 
     let user_content = if let Some(notes) = creator_notes {
@@ -1149,7 +2289,7 @@ pub async fn auto_generate_glossary(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(&api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
+            "model": CHAT_COMPLETION_MODEL,
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": user_content }
@@ -1219,9 +2359,13 @@ fn parse_glossary_response(response: serde_json::Value) -> Result<Vec<GlossaryTe
         .or_else(|| parsed.get("terms").and_then(|v| v.as_array()))
         .or_else(|| parsed.get("glossary").and_then(|v| v.as_array()))
         .or_else(|| parsed.get("entries").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("result").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("results").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("items").and_then(|v| v.as_array()))
+        .or_else(|| parsed.get("data").and_then(|v| v.as_array()))
         .ok_or_else(|| {
             format!(
-                "Ожидается массив терминов или объект с ключом terms/glossary/entries. Ответ: {}",
+                "Ожидается массив терминов или объект с ключом terms/glossary/entries/result. Ответ: {}",
                 content.chars().take(600).collect::<String>()
             )
         })?;
@@ -1236,6 +2380,12 @@ fn parse_glossary_response(response: serde_json::Value) -> Result<Vec<GlossaryTe
             }
             let confidence = item["confidence"].as_f64().unwrap_or(0.5);
             let category = item["category"].as_str().map(|s| s.to_string());
+            let meaning_context = item["meaning_context"]
+                .as_str()
+                .or_else(|| item["context"].as_str())
+                .or_else(|| item["meaning"].as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
 
             Some(GlossaryTerm {
                 source,
@@ -1243,6 +2393,7 @@ fn parse_glossary_response(response: serde_json::Value) -> Result<Vec<GlossaryTe
                 frequency: 0,
                 confidence,
                 category,
+                meaning_context,
             })
         })
         .collect();
@@ -1293,7 +2444,7 @@ async fn localize_untranslated_glossary_terms(
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "gpt-5.4-mini",
+            "model": CHAT_COMPLETION_MODEL,
             "messages": [
                 { "role": "system", "content": prompt },
                 { "role": "user", "content": terms_list }
@@ -1324,12 +2475,12 @@ fn should_drop_glossary_candidate(source: &str, target: &str) -> bool {
     let source_lower = source.to_lowercase();
     let target_lower = target.to_lowercase();
     
-    // Слишком короткие термины
+    // слишком короткие слова
     if source.len() < 3 {
         return true;
     }
     
-    // Общие слова, которые не должны быть в глоссарии
+    // стоп-слова в глоссарий не надо
     let common_words = [
         "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
         "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do",
@@ -1344,5 +2495,334 @@ fn should_drop_glossary_candidate(source: &str, target: &str) -> bool {
     )
 }
 
-const KEYRING_SERVICE: &str = "subtitle-studio";
-const KEYRING_USER: &str = "openai-api-key";
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GlossaryTermInput {
+    pub source: String,
+    #[serde(default)]
+    pub context: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GlossaryTermTranslation {
+    pub source: String,
+    pub target: String,
+}
+
+// переводит / транслитерирует список терминов глоссария на target_language
+// гарантирует, что имена собственные транслитерируются (Griselda -> Гризельда), а не остаются на исходном языке
+// translate_batch для одиночных слов работал ненадёжно: gpt оставлял латинские имена как есть
+#[tauri::command]
+pub async fn translate_glossary_terms(
+    terms: Vec<GlossaryTermInput>,
+    target_language: String,
+    style_prompt: Option<String>,
+    _app_handle: tauri::AppHandle,
+) -> Result<Vec<GlossaryTermTranslation>, String> {
+    println!(
+        "[glossary-translate] терминов={}, target={}",
+        terms.len(),
+        target_language
+    );
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let cleaned: Vec<GlossaryTermInput> = terms
+        .into_iter()
+        .filter_map(|t| {
+            let src = t.source.trim().to_string();
+            if src.is_empty() {
+                None
+            } else {
+                Some(GlossaryTermInput {
+                    source: src,
+                    context: t.context.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()),
+                })
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let target_iso = normalize_target_language_iso(&target_language)
+        .unwrap_or_else(|| target_language.trim().to_lowercase());
+    // полное имя языка — модель лучше реагирует на «Russian», чем на «ru»
+    let target_full = match target_iso.as_str() {
+        "ru" => "Russian",
+        "en" => "English",
+        "es" => "Spanish",
+        "fr" => "French",
+        "de" => "German",
+        "it" => "Italian",
+        "pt" => "Portuguese",
+        "uk" => "Ukrainian",
+        "pl" => "Polish",
+        "tr" => "Turkish",
+        "zh" => "Chinese",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "ar" => "Arabic",
+        "hi" => "Hindi",
+        _ => target_language.trim(),
+    };
+
+    let api_key = get_api_key()?;
+
+    let style = style_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Natural subtitle translation");
+
+    let user_payload = serde_json::json!({
+        "target_language": target_full,
+        "target_iso": target_iso,
+        "style": style,
+        "terms": cleaned.iter().enumerate().map(|(i, t)| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".to_string(), serde_json::json!(i));
+            obj.insert("source".to_string(), serde_json::json!(t.source));
+            if let Some(ctx) = &t.context {
+                obj.insert("context".to_string(), serde_json::json!(ctx));
+            }
+            serde_json::Value::Object(obj)
+        }).collect::<Vec<_>>()
+    });
+
+    let system_prompt = format!(
+        "Ты переводчик глоссария субтитров. На входе JSON со списком терминов с исходного языка.\n\
+         Переведи КАЖДЫЙ термин на {target_full} (ISO {target_iso}).\n\
+         Правила:\n\
+         - Имена собственные (персонажи, локации, названия) — ТРАНСЛИТЕРИРУЙ согласно нормам языка перевода.\n\
+           Примеры (target=Russian): Griselda → Гризельда, Tecna → Текна, Callisto → Каллисто, Wizgiz → Визгиз, Stella → Стелла, Bloom → Блум, Riven → Ривен, Ares Prisma → Арес Призма, Big Eye Team → Команда «Большой глаз».\n\
+         - Многословные термины и фразы — переводи целиком, склонение и согласование по нормам target.\n\
+           Примеры (target=Russian): \"Sfera di Stasi\" → \"Сфера Стазиса\", \"scettro del potere\" → \"скипетр силы\", \"college delle fate di Alfea\" → \"колледж фей Алфеи\", \"maghi cavalieri di Fonterossa\" → \"маги-рыцари Фонтерроссы\".\n\
+         - Поле context (если есть) — подсказка о роде/значении, обязательно учитывай её.\n\
+         - КРИТИЧНО: target ОБЯЗАН быть на языке {target_full}, НЕ на латинице (если target кириллический). НЕ копируй source как target.\n\
+         - Никогда не оставляй target пустым. Если не уверен — транслитерируй буквы.\n\
+         - Выдавай форму lemma (именительный падеж, единственное число).\n\n\
+         Формат ответа — строго один JSON-объект, без markdown:\n\
+         {{\"translations\": [{{\"id\": <число>, \"source\": \"<оригинал>\", \"target\": \"<перевод>\"}}]}}\n\
+         id и source — те же, что во входе. По одной записи на каждый термин из входа.",
+        target_full = target_full,
+        target_iso = target_iso,
+    );
+
+    let user_content = serde_json::to_string(&user_payload).map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "model": "gpt-5.4",
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_content }
+        ],
+        "response_format": { "type": "json_object" },
+        "reasoning_effort": "medium",
+        "max_completion_tokens": 4096
+    });
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(&api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к OpenAI: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("OpenAI ответил {status}: {text}"));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "Пустой ответ OpenAI при переводе глоссария".to_string())?
+        .to_string();
+
+    println!(
+        "[glossary-translate] ответ модели ({} симв.): {}",
+        content.len(),
+        content.chars().take(500).collect::<String>()
+    );
+
+    #[derive(Deserialize)]
+    struct OneTr {
+        #[serde(default)]
+        id: Option<u32>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        target: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        translations: Vec<OneTr>,
+    }
+
+    let parsed: Resp = serde_json::from_str(&content)
+        .map_err(|e| format!("Глоссарий: невалидный JSON ({e}): {content}"))?;
+
+    let mut by_idx: HashMap<u32, String> = HashMap::new();
+    let mut by_src: HashMap<String, String> = HashMap::new();
+    for t in parsed.translations {
+        let tgt = t.target.as_deref().map(str::trim).unwrap_or("").to_string();
+        if tgt.is_empty() {
+            continue;
+        }
+        if let Some(idx) = t.id {
+            by_idx.insert(idx, tgt.clone());
+        }
+        if let Some(src) = t.source.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            by_src.insert(src.to_lowercase(), tgt);
+        }
+    }
+
+    let mut out: Vec<GlossaryTermTranslation> = Vec::with_capacity(cleaned.len());
+    let mut not_found = 0;
+    for (i, term) in cleaned.iter().enumerate() {
+        let tgt = by_idx
+            .get(&(i as u32))
+            .cloned()
+            .or_else(|| by_src.get(&term.source.to_lowercase()).cloned());
+        match tgt {
+            Some(t) => out.push(GlossaryTermTranslation {
+                source: term.source.clone(),
+                target: t,
+            }),
+            None => {
+                not_found += 1;
+                // фоллбэк - возвращаем source чтобы фронт видел этот термин в ответе
+                // (но потом фронт отфильтрует target=source как «не переведено»)
+                out.push(GlossaryTermTranslation {
+                    source: term.source.clone(),
+                    target: term.source.clone(),
+                });
+            }
+        }
+    }
+    println!(
+        "[glossary-translate] вернули переводов: {} (не нашлось в ответе модели: {})",
+        out.len(),
+        not_found
+    );
+    Ok(out)
+}
+
+// генерирует краткий пересказ эпизода (3-4 предложения) на языке target_language
+// нужен агенту чтобы понимать о чём эпизод без полной выгрузки реплик в промпт
+// берёт перевод если он есть, иначе оригинал
+#[tauri::command]
+pub async fn summarize_episode(
+    segments: Vec<SubtitleSegment>,
+    target_language: Option<String>,
+    _app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    println!(
+        "[summary] генерируем пересказ эпизода: {} сегментов, target={}",
+        segments.len(),
+        target_language.as_deref().unwrap_or("?")
+    );
+    if segments.is_empty() {
+        return Ok(String::new());
+    }
+
+    let lines: Vec<String> = segments
+        .iter()
+        .filter_map(|s| {
+            let translated = s
+                .translation
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty());
+            let text_trim = s.text.trim();
+            let payload = translated.unwrap_or(text_trim);
+            if payload.is_empty() {
+                None
+            } else {
+                Some(payload.to_string())
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return Ok(String::new());
+    }
+
+    // ограничиваем размер чтобы не выйти за лимит контекста
+    // 80k символов хватит даже на двойной эпизод
+    const MAX_CHARS: usize = 80_000;
+    let mut corpus = String::new();
+    for line in &lines {
+        if corpus.len() + line.len() + 1 > MAX_CHARS {
+            break;
+        }
+        if !corpus.is_empty() {
+            corpus.push('\n');
+        }
+        corpus.push_str(line);
+    }
+
+    // нормализуем язык: на фронте таргет может быть как "ru" так и "russian" / "Русский"
+    let target_raw = target_language
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("ru")
+        .to_string();
+    let target_iso = normalize_target_language_iso(&target_raw).unwrap_or_else(|| target_raw.clone());
+    let target = target_iso.as_str();
+
+    let api_key = get_api_key()?;
+
+    let system_prompt = format!(
+        "Ты помощник по субтитрам. Прочитай транскрипт серии и напиши КРАТКИЙ пересказ из 3-5 предложений.\n\
+         Пиши пересказ на языке с кодом ISO 639-1 \"{target}\".\n\
+         В пересказе укажи: где происходит действие, кто главные персонажи и что они делают, \
+         основной конфликт/событие, чем эпизод заканчивается. Без оценок, без \"в этой серии мы видим\".\n\
+         Без вступлений. Только сам пересказ как обычный абзац текста. Никакого JSON, никакого markdown."
+    );
+
+    let body = serde_json::json!({
+        "model": "gpt-5.4",
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": corpus }
+        ],
+        "reasoning_effort": "low",
+        "max_completion_tokens": 1024
+    });
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(&api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к OpenAI: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("OpenAI ответил {status}: {text}"));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "Пустой ответ OpenAI при пересказе".to_string())?
+        .trim()
+        .to_string();
+
+    println!(
+        "[summary] готов пересказ ({} симв.): {}",
+        content.chars().count(),
+        content.lines().next().unwrap_or("").chars().take(120).collect::<String>()
+    );
+
+    Ok(content)
+}

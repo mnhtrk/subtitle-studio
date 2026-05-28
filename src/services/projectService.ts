@@ -1,10 +1,24 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export const AI_OPERATION_CANCELLED = 'AI_OPERATION_CANCELLED';
+
+export function isAiOperationCancelled(error: unknown): boolean {
+  const msg =
+    typeof error === 'string'
+      ? error
+      : error instanceof Error
+        ? error.message
+        : '';
+  return msg === AI_OPERATION_CANCELLED || msg.includes(AI_OPERATION_CANCELLED);
+}
+
 export interface RecentProject {
   path: string;
   name: string;
   last_opened: string;
 }
+
+export type SpeakerGender = 'male' | 'female' | 'unknown';
 
 export interface SubtitleSegment {
   id: number;
@@ -13,6 +27,7 @@ export interface SubtitleSegment {
   duration: number;
   text: string;
   translation?: string | null;
+  speaker_gender?: SpeakerGender | null; // авто после транскрибации
 }
 
 export interface ProjectFile {
@@ -22,8 +37,9 @@ export interface ProjectFile {
   path: string;
   duration?: number | null;
   subtitle_segments?: SubtitleSegment[] | null;
-  /** Связанный файл эпизода: у субтитров id видео, у видео id субтитров. */
-  linked_file_id?: string | null;
+  linked_file_id?: string | null; // видео <-> саб
+  // краткий пересказ эпизода (3-4 предложения), нужен агенту для контекста
+  summary?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -48,14 +64,14 @@ export interface ProjectData {
   updated_at: string;
 }
 
-/** Ответ `auto_generate_glossary` (черновые термины перед слиянием в проект). */
+// черновик глоссария от auto_generate
 export interface GlossaryTermGenerated {
   source: string;
   target: string;
   frequency: number;
   confidence: number;
-  /** character | location | organization | concept | title | other */
   category?: string;
+  meaning_context?: string | null;
 }
 
 export interface AutoGlossaryOptions {
@@ -63,6 +79,8 @@ export interface AutoGlossaryOptions {
   max_terms?: number;
   target_language: string;
   contextPrompt?: string;
+  // язык поля meaning_context (если не задан - совпадает с target_language)
+  meaningContextLanguage?: string;
 }
 
 export interface TranslationResult {
@@ -86,17 +104,17 @@ export const projectService = {
     return await invoke('save_api_key', { key });
   },
 
-  // Get recent projects for welcome modal
+  // недавние проекты
   getRecent: async (): Promise<RecentProject[]> => {
     return await invoke('list_recent_projects');
   },
 
-  // Open existing project
+  // открыть проект
   open: async (path: string): Promise<ProjectData> => {
     return await invoke('open_project', { path });
   },
 
-  // Create new project
+  // новый проект
   create: async (name: string, path: string, targetLanguage: string) => {
     return await invoke('create_project', { 
       name, 
@@ -130,9 +148,23 @@ export const projectService = {
     filePath: string,
     language?: string,
     prompt?: string,
-    glossary?: GlossaryEntry[]
+    glossary?: GlossaryEntry[],
+    skipVad?: boolean
   ): Promise<SubtitleSegment[]> => {
-    return await invoke('transcribe_audio', { filePath, language, prompt, glossary });
+    return await invoke('transcribe_audio', { filePath, language, prompt, glossary, skipVad });
+  },
+
+  transcribeAudioGpt4o: async (
+    filePath: string,
+    language?: string,
+    prompt?: string,
+    glossary?: GlossaryEntry[]
+  ): Promise<string> => {
+    return await invoke('transcribe_audio_gpt4o', { filePath, language, prompt, glossary });
+  },
+
+  cancelAiOperation: async (): Promise<void> => {
+    await invoke('cancel_ai_operation');
   },
 
   importExistingSubtitles: async (
@@ -159,6 +191,14 @@ export const projectService = {
     return await invoke('remove_file_from_project', { projectPath, fileId, deletePhysicalFile });
   },
 
+  renameProjectFile: async (
+    projectPath: string,
+    fileId: string,
+    newBaseName: string
+  ): Promise<ProjectData> => {
+    return await invoke('rename_project_file', { projectPath, fileId, newBaseName });
+  },
+
   deleteProjectFileArtifact: async (
     projectPath: string,
     relativePath: string
@@ -174,7 +214,7 @@ export const projectService = {
     return await invoke('update_glossary', { projectPath, entries });
   },
 
-  /** Черновой глоссарий по частым словам + GPt */
+  // черновик глоссария (gpt)
   autoGenerateGlossary: async (
     segments: SubtitleSegment[],
     options: AutoGlossaryOptions
@@ -187,8 +227,37 @@ export const projectService = {
         target_language: options.target_language,
         ...(options.contextPrompt?.trim()
           ? { context_prompt: options.contextPrompt.trim() }
+          : {}),
+        ...(options.meaningContextLanguage?.trim()
+          ? { meaning_context_language: options.meaningContextLanguage.trim() }
           : {})
       }
+    });
+  },
+
+  // пересказ эпизода (3-4 предложения) на target language
+  // нужен агенту чтобы не выгружать полный текст эпизода в каждый запрос
+  summarizeEpisode: async (
+    segments: SubtitleSegment[],
+    targetLanguage: string | null
+  ): Promise<string> => {
+    return await invoke('summarize_episode', {
+      segments,
+      targetLanguage: targetLanguage ?? null
+    });
+  },
+
+  // явный перевод/транслитерация терминов глоссария
+  // translate_batch на одиночных словах оставлял имена в латинице, отдельная команда надёжнее
+  translateGlossaryTerms: async (
+    terms: { source: string; context?: string | null }[],
+    targetLanguage: string,
+    stylePrompt?: string | null
+  ): Promise<{ source: string; target: string }[]> => {
+    return await invoke('translate_glossary_terms', {
+      terms,
+      targetLanguage,
+      stylePrompt: stylePrompt ?? null
     });
   },
 
@@ -246,6 +315,18 @@ export const projectService = {
     return await invoke('export_subtitles', { projectPath, fileId, format, outputPath });
   },
 
+  getCachedWaveform: async (
+    mediaPath: string,
+    cacheJsonPath: string,
+    cachePngPath: string
+  ): Promise<{ peaks: number[]; sample_rate: number; duration: number } | null> => {
+    return await invoke('get_cached_waveform', {
+      mediaPath,
+      cacheJsonPath,
+      cachePngPath
+    });
+  },
+
   generateWaveform: async (
     audioPath: string,
     outputPath: string,
@@ -272,9 +353,17 @@ export const projectService = {
     return await invoke('probe_media_duration', { mediaPath });
   },
 
+  extractVideoPreviewFrame: async (videoPath: string, timeSecs: number): Promise<string> => {
+    return await invoke('extract_video_preview_frame', { videoPath, timeSecs });
+  },
+
+  ensureFaststartPlaybackProxy: async (videoPath: string): Promise<string> => {
+    return await invoke('ensure_faststart_playback_proxy', { videoPath });
+  },
+
   listProjectDirectoryFiles: async (
     projectPath: string
-  ): Promise<{ relative_path: string; name: string }[]> => {
+  ): Promise<{ relative_path: string; name: string; is_dir?: boolean }[]> => {
     return await invoke('list_project_directory_files', { projectPath });
   }
 };

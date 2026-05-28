@@ -1,6 +1,6 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap');
 @import "tailwindcss";
 @tailwind utilities;
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap');
 
 @theme {
   /* ����� */
@@ -168,7 +168,29 @@
   background: var(--color-surface-bg);
 }
 
+.chat-agent-scroll {
+  scrollbar-gutter: stable;
+}
 
+/* Поле ввода агента: дорожка скролла только при переполнении */
+.chat-composer-input::-webkit-scrollbar-corner {
+  background: var(--color-surface-secondary);
+}
+
+.dark .chat-composer-input::-webkit-scrollbar-corner {
+  background: var(--color-surface-secondary);
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
 
 /* ������� ����������� ����� � ����������� ������ ������� */
 .resizer {
@@ -199,6 +221,7 @@
 .timeline-pan-no-scrollbar {
   scrollbar-width: none;
   -ms-overflow-style: none;
+  touch-action: pan-x;
 }
 .timeline-pan-no-scrollbar::-webkit-scrollbar {
   display: none;
@@ -256,7 +279,7 @@
   border: none;
 }
 
-/* Чекбоксы в окне экспорта — цвет как у кнопки Export files (primary-main) */
+/* чекбоксы экспорта = primary */
 .export-modal-checkbox {
   -webkit-appearance: none;
   appearance: none;
@@ -284,7 +307,7 @@
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='3.5' y='7.25' width='9' height='1.5' fill='white' rx='0.75'/%3E%3C/svg%3E");
 }
 
-/* Радиокнопки в окне Find and Replace — цвет text-primary */
+/* радио find/replace */
 .find-replace-radio {
   -webkit-appearance: none;
   appearance: none;
@@ -302,4 +325,22 @@
   border-color: var(--color-text-primary);
   background-color: var(--color-secondary-main);
   box-shadow: inset 0 0 0 4px var(--color-text-primary);
+}
+
+/* select в dark - иначе на win белый дропдаун */
+.dark select {
+  color-scheme: dark;
+  background-color: var(--color-secondary-main);
+  color: var(--color-text-primary);
+}
+
+.dark select option {
+  background-color: var(--color-secondary-main);
+  color: var(--color-text-primary);
+}
+
+.dark select option:checked,
+.dark select option:hover {
+  background-color: var(--color-primary-main);
+  color: var(--color-text-primary);
 }

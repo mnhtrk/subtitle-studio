@@ -3,16 +3,18 @@
   windows_subsystem = "windows"
 )]
 
-use tauri::Manager; 
-
 mod commands;
-mod cache;
 mod project;
 mod types;
 mod subtitle_parser; 
 mod postprocessing;
-mod audio_preprocessing;
 mod agent;
+mod debug_log;
+mod gender_detection;
+mod speaker_gender_rules;
+mod ml_sidecar;
+mod ffmpeg_util;
+mod vad;
 
 use tauri_plugin_sql::{Migration, MigrationKind};
 
@@ -47,7 +49,9 @@ fn main() {
             commands::ai::save_api_key,
             commands::ai::get_api_key_status,
             commands::ai::transcribe_audio,
+            commands::ai::transcribe_audio_gpt4o,
             commands::ai::translate_batch,
+            commands::ai::cancel_ai_operation,
             commands::project::create_project,
             commands::project::get_project_structure,
             commands::project::get_glossary,
@@ -63,32 +67,42 @@ fn main() {
             commands::project::delete_subtitle_segment,
             commands::project::get_project_statistics,
             commands::project::find_and_replace_in_subtitles,
+            commands::audio::get_cached_waveform,
             commands::audio::generate_waveform,
             commands::audio::generate_waveform_png,
             commands::audio::probe_media_duration,
+            commands::audio::extract_video_preview_frame,
+            commands::audio::ensure_faststart_playback_proxy,
             commands::files::list_project_directory_files,
             commands::files::import_existing_subtitles,
             commands::files::parse_subtitle_file,
             commands::files::delete_episode_from_project,
+            commands::files::rename_project_file,
             commands::files::delete_project_file_artifact,
             commands::sync::sync_subtitles_with_video,
             commands::quality::check_translation_quality,
             commands::ai::auto_generate_glossary,
+            commands::ai::summarize_episode,
+            commands::ai::translate_glossary_terms,
             commands::files::backup_project,
             commands::notifications::show_notification,
             commands::notifications::log_message,
             commands::ai::validate_api_key,
             commands::agent::chat_with_agent,
+            commands::agent::classify_agent_intent_command,
         ])
         
         .setup(|app| {
-            let app_data_dir = app.path().app_data_dir().unwrap();
-            let cache_dir = app_data_dir.join("cache");
-            std::fs::create_dir_all(&cache_dir).ok();
-            
-            let cache = cache::Cache::new(cache_dir);
-            app.manage(cache);
-            
+            use tauri::Manager;
+            // иконка для таскбара
+            if let Ok(icon) =
+                tauri::image::Image::from_bytes(include_bytes!("../icons/icon.ico"))
+            {
+                let icon = icon.to_owned();
+                for window in app.webview_windows().values() {
+                    let _ = window.set_icon(icon.clone());
+                }
+            }
             println!("Subtitle Studio запущен");
             Ok(())
         })

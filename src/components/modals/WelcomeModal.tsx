@@ -42,47 +42,47 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ onClose, onNewProjec
 	return (
     <DraggableModalShell
       width={780}
-      className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col gap-[24px] select-none"
+      className="h-[424px] bg-surface-secondary border border-border-default rounded-[20px] shadow-2xl p-8 flex flex-col select-none"
     >
-
-        <div className="flex justify-end gap-[16px]">
-          <button onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-          </button>
-        </div>
+      <div className="flex flex-col gap-[24px] flex-1 min-h-0 h-full w-full">
+        {(loading || recentProjects.length > 0) && (
+          <div className="flex justify-end gap-[16px] shrink-0">
+            <button onClick={onClose} className="text-text-secondary hover:opacity-70 transition-opacity">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-[32px] flex-1 min-h-0">
           <div className="flex flex-col">
             <h1 className="text-[24px] font-semibold tracking-[-0.01em] leading-[20px] text-text-primary mb-[24px]">{t('welcome.title')}</h1>
 
-            <div className="flex flex-col">
-              <h3 className="text-body-reg text-text-secondary mb-[8px]">{t('welcome.recentProjects')}</h3>
+            {(loading || recentProjects.length > 0) && (
+              <div className="flex flex-col">
+                <h3 className="text-body-reg text-text-secondary mb-[8px]">{t('welcome.recentProjects')}</h3>
 
-              <div className="flex flex-col gap-[4px]">
-                {loading ? (
-									<div className="text-body-reg text-text-secondary/50 px-[8px]">{t('welcome.loading')}</div>
-								) : recentProjects.length > 0 ? (
-									recentProjects.map((project) => (
-										<button
-											key={project.path}
-											onClick={() => onSelectProject(project.path)}
-											className="w-full text-left px-[8px] py-[4px] rounded-[5px] bg-secondary-main hover:bg-secondary-hover transition-colors flex flex-col gap-[4px]"
-										>
-											<div className="text-body-reg text-text-primary leading-[18px]">
-												{project.name}
-											</div>
-											<div className="text-caption text-text-secondary leading-[14px]">
-												{project.last_opened}
-											</div>
-										</button>
-									))
-								) : (
-									<div className="text-body-reg text-text-secondary px-[8px] leading-[18px]">
-										✕
-									</div>
-								)}
+                <div className="flex flex-col gap-[4px]">
+                  {loading ? (
+                    <div className="text-body-reg text-text-secondary/50 px-[8px]">{t('welcome.loading')}</div>
+                  ) : (
+                    recentProjects.map((project) => (
+                      <button
+                        key={project.path}
+                        onClick={() => onSelectProject(project.path)}
+                        className="w-full text-left px-[8px] py-[4px] rounded-[5px] bg-secondary-main hover:bg-secondary-hover transition-colors flex flex-col gap-[4px]"
+                      >
+                        <div className="text-body-reg text-text-primary leading-[18px]">
+                          {project.name}
+                        </div>
+                        <div className="text-caption text-text-secondary leading-[14px]">
+                          {project.last_opened}
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
           <div className="flex flex-col gap-[4px]">
@@ -110,6 +110,7 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ onClose, onNewProjec
 						</button>
           </div>
         </div>
+      </div>
     </DraggableModalShell>
   );
 };

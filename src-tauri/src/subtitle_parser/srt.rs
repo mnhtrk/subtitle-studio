@@ -6,27 +6,27 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
     
-    // Компилируем регулярное выражение для времени
+    // регулярка под таймкоды
     let time_regex = Regex::new(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})")
         .map_err(|e| format!("Ошибка компиляции регулярного выражения: {}", e))?;
     
     while i < lines.len() {
         let line = lines[i].trim();
         
-        // Пропускаем пустые строки
+        // пустые строки скипаем
         if line.is_empty() {
             i += 1;
             continue;
         }
         
-        // Проверяем, является ли строка номером сегмента
+        // если строка - номер сегмента, парсим дальше
         if line.parse::<u32>().is_ok() {
             i += 1;
             if i >= lines.len() {
                 break;
             }
             
-            // Следующая строка должна содержать время
+            // следующая строка должна быть таймкодом
             let time_line = lines[i].trim();
             if let Some(captures) = time_regex.captures(time_line) {
                 let start_hours = captures[1].parse::<u32>().unwrap_or(0);
@@ -52,7 +52,7 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
                 i += 1;
                 let mut text_lines = Vec::new();
                 
-                // Собираем текст сегмента (до пустой строки или конца)
+                // собираем текст сегмента до пустой строки или конца
                 while i < lines.len() && !lines[i].trim().is_empty() {
                     text_lines.push(lines[i]);
                     i += 1;
@@ -68,16 +68,17 @@ pub fn parse(content: &str) -> Result<Vec<SubtitleSegment>, String> {
                     duration: end - start,
                     text,
                     translation: None,
+                    speaker_gender: None,
                     flags: None,
                 });
             } else {
-                // Если строка времени не распознана, пропускаем сегмент
+                // если таймкод кривой - скипаем весь сегмент
                 while i < lines.len() && !lines[i].trim().is_empty() {
                     i += 1;
                 }
             }
         } else {
-            // Если строка не является номером, пропускаем её
+            // если не номер - просто идём дальше
             i += 1;
         }
     }

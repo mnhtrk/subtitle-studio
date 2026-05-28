@@ -5,8 +5,8 @@ use crate::project::SubtitleSegment;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncOptions {
-    pub max_drift: f64, // Максимальный дрейф в секундах
-    pub auto_correct: bool, // Автоматическая коррекция
+    pub max_drift: f64,
+    pub auto_correct: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,13 +35,13 @@ pub async fn sync_subtitles_with_video(
         auto_correct: true,
     });
     
-    // Получаем аудио дорожку из видео
+    // достаём аудио из видео
     let audio_path = extract_audio_for_sync(video_path_buf, &app_handle).await?;
     
-    // Анализируем аудио для обнаружения речи
+    // ищем где речь
     let speech_timestamps = detect_speech_timestamps(&audio_path).await?;
     
-    // Вычисляем дрейф
+    // считаем сдвиг
     let drift = calculate_drift(&segments, &speech_timestamps)?;
     
     let mut corrected_segments = segments.clone();
@@ -49,7 +49,7 @@ pub async fn sync_subtitles_with_video(
     
     if drift.abs() > options.max_drift {
         if options.auto_correct {
-            // Применяем коррекцию
+            // двигаем таймкоды
             corrected_segments = apply_drift_correction(segments, drift);
             corrections_applied = corrected_segments.len() as u32;
             println!("Применена коррекция дрейфа: {} сек", drift);
@@ -59,7 +59,7 @@ pub async fn sync_subtitles_with_video(
         }
     }
     
-    // Очищаем временный аудиофайл
+    // удаляем временный wav
     let _ = std::fs::remove_file(&audio_path);
     
     Ok(SyncResult {
@@ -76,28 +76,29 @@ async fn extract_audio_for_sync(
     use std::process::Stdio;
     use tokio::process::Command;
     
-    // Создаём временный путь для аудио
+    // временный wav
     let temp_dir = app_handle.path().temp_dir()
         .map_err(|e| e.to_string())?;
     
     let audio_path = temp_dir.join("sync_temp_audio.wav");
     let audio_path_str = audio_path.to_string_lossy().to_string();
     
-    // Извлекаем аудио через FFmpeg
-    let mut cmd = Command::new("ffmpeg");
+    // ffmpeg достаёт дорожку
+    let mut cmd = Command::new(crate::ffmpeg_util::ffmpeg_program());
     cmd.arg("-i")
         .arg(video_path)
         .arg("-vn")
         .arg("-acodec")
         .arg("pcm_s16le")
         .arg("-ar")
-        .arg("16000") // 16kHz для анализа речи
+        .arg("16000")
         .arg("-ac")
-        .arg("1") // Моно
+        .arg("1")
         .arg(&audio_path_str)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    
+    crate::ffmpeg_util::hide_console_window(&mut cmd);
+
     let output = cmd.output().await
         .map_err(|e| format!("Ошибка FFmpeg при извлечении аудио: {}", e))?;
     
@@ -122,25 +123,26 @@ async fn detect_speech_timestamps(audio_path: &str) -> Result<Vec<(f64, f64)>, S
     file.read_to_end(&mut buffer)
         .map_err(|e| format!("Ошибка чтения аудиофайла: {}", e))?;
     
-    // Простой алгоритм: находим сегменты с амплитудой выше порога
+    // если громкость выше порога считаем что речь
     const SAMPLE_RATE: u32 = 16000;
-    const BYTES_PER_SAMPLE: usize = 2; // 16-bit
+    const BYTES_PER_SAMPLE: usize = 2; // 16 бит
     
     let samples: Vec<i16> = buffer
         .chunks_exact(BYTES_PER_SAMPLE)
         .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
         .collect();
     
-    let threshold = 500i16; // Порог амплитуды
-    let min_silence = SAMPLE_RATE as usize / 2; // Минимум 0.5 сек тишины между сегментами
+    let threshold = 500i16;
+    let min_silence = SAMPLE_RATE as usize / 2; // полсекунды тишины между кусками
     
     let mut speech_segments = Vec::new();
     let mut in_speech = false;
     let mut start_sample = 0;
     let mut silence_count = 0usize;
     
+    let threshold_u = threshold as u16;
     for (i, &sample) in samples.iter().enumerate() {
-        if sample.abs() > threshold {
+        if sample.unsigned_abs() > threshold_u {
             if !in_speech {
                 in_speech = true;
                 start_sample = i;
@@ -162,7 +164,7 @@ async fn detect_speech_timestamps(audio_path: &str) -> Result<Vec<(f64, f64)>, S
         }
     }
     
-    // Завершаем последний сегмент если нужно
+    // закрываем хвост если речь не успела закончиться
     if in_speech {
         let end_sample = samples.len();
         if end_sample > start_sample {
@@ -183,14 +185,14 @@ fn calculate_drift(
         return Ok(0.0);
     }
     
-    // Находим первые и последние совпадающие сегменты
+    // первый и последний матч
     let first_subtitle = subtitle_segments[0].start;
     let last_subtitle = subtitle_segments.last().unwrap().end;
     
     let first_speech = speech_timestamps[0].0;
     let last_speech = speech_timestamps.last().unwrap().1;
     
-    // Вычисляем дрейф как среднее от начального и конечного смещения
+    // средний сдвиг по началу и по концу
     let start_drift = first_subtitle - first_speech;
     let end_drift = last_subtitle - last_speech;
     
@@ -207,7 +209,7 @@ fn apply_drift_correction(
         seg.start -= drift;
         seg.end -= drift;
         seg.duration = seg.end - seg.start;
-        // Убеждаемся, что время не отрицательное
+        // start не должен уйти в минус
         if seg.start < 0.0 {
             seg.start = 0.0;
             seg.duration = seg.end;
