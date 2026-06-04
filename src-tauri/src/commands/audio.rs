@@ -214,7 +214,7 @@ pub async fn generate_waveform_png(
         return Err(format!("ffmpeg showwavespic: {}", err.trim()));
     }
 
-    println!("✅ waveform PNG: {}", output_png_path);
+    println!("[waveform] PNG saved: {}", output_png_path);
     Ok(())
 }
 

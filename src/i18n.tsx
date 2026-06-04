@@ -159,7 +159,9 @@ const enMessages = {
 		pause: 'Pause',
 		stop: 'Stop',
 		unmute: 'Unmute',
-		mute: 'Mute'
+		mute: 'Mute',
+		onSecondMonitor: 'Video is displayed on the second monitor',
+		viewerWindowTitle: 'Subtitle Studio — Video'
 	},
 	timeline: {
 		insert: 'Insert',
@@ -216,6 +218,7 @@ const enMessages = {
 		saveErrorTitle: 'Save error',
 		saveBeforeSwitch: 'The project has unsaved changes. Save before continuing?',
 		saveBeforeExit: 'Save changes before closing the project?',
+		saveBeforeCloseApp: 'Save changes before closing the application?',
 		importTitle: 'Import',
 		openProjectFirst: 'Open or create a project first.',
 		importOriginalFailed: 'Could not import subtitles: {detail}',
@@ -508,7 +511,9 @@ const ruMessages: Messages = {
 		pause: 'Пауза',
 		stop: 'Стоп',
 		unmute: 'Включить звук',
-		mute: 'Выключить звук'
+		mute: 'Выключить звук',
+		onSecondMonitor: 'Видео отображается на втором мониторе',
+		viewerWindowTitle: 'Subtitle Studio — Видео'
 	},
 	timeline: {
 		insert: 'Вставить',
@@ -566,6 +571,7 @@ const ruMessages: Messages = {
 		saveErrorTitle: 'Ошибка сохранения',
 		saveBeforeSwitch: 'В проекте есть несохранённые изменения. Сохранить перед продолжением?',
 		saveBeforeExit: 'Сохранить изменения перед закрытием проекта?',
+		saveBeforeCloseApp: 'Сохранить изменения перед закрытием приложения?',
 		importTitle: 'Импорт',
 		openProjectFirst: 'Сначала откройте или создайте проект.',
 		importOriginalFailed: 'Не удалось импортировать субтитры: {detail}',

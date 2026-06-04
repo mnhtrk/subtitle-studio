@@ -25,6 +25,7 @@ import {
 	visibleTimelineSegments,
 	visibleTimeRangeFromScroll
 } from './visibleSegments';
+import { sidebarIconMaskStyle } from '../../utils/iconMask';
 
 const TIMELINE_ZOOM_BTN_CLASS =
 	'flex h-[22px] w-[22px] shrink-0 items-center justify-center border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary-main/40';
@@ -36,16 +37,6 @@ const TIMELINE_ZOOM_IN_ICON_CLASS =
 	'pointer-events-none inline-block h-[22px] w-[22px] shrink-0 origin-center bg-text-primary transition-transform duration-200 ease-out will-change-transform group-hover/tzoomin:scale-110 group-active/tzoomin:scale-[0.92]';
 
 const VISIBLE_OVERSCAN_SEC = 4;
-
-function sidebarIconMaskStyle(src: string): React.CSSProperties {
-	return {
-		maskImage: `url(${src})`,
-		WebkitMaskImage: `url(${src})`,
-		maskSize: 'contain',
-		maskRepeat: 'no-repeat',
-		maskPosition: 'center'
-	};
-}
 
 export type TimelinePanelProps = {
 	wheelRef: RefObject<HTMLDivElement | null>;
