@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/capabilities-schema/schema.json",
   "identifier": "default-capabilities",
   "description": "Default capabilities for Subtitle Studio",
-  "windows": ["main"],
+  "windows": ["main", "viewer-window"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",
@@ -10,7 +10,10 @@
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:window:allow-toggle-maximize",
-    
+    "core:window:allow-set-focus",
+    "core:window:allow-set-title",
+    "core:webview:allow-create-webview-window",
+
     "fs:default",
     "fs:allow-read-file",
     "fs:allow-write-file",

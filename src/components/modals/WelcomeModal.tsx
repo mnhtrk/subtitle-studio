@@ -1,19 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { projectService, RecentProject } from '../../services/projectService';
 import { useI18n } from '../../i18n';
-import iconNewProject from '../../assets/icons/new-project.svg';
-import iconOpenProject from '../../assets/icons/open-project.svg';
+import { iconNewProject, iconOpenProject } from '../../assets/iconUrls';
+import { sidebarIconMaskStyle } from '../../utils/iconMask';
 import { DraggableModalShell } from './DraggableModalShell';
-
-function welcomeIconMaskStyle(src: string): React.CSSProperties {
-	return {
-		maskImage: `url(${src})`,
-		WebkitMaskImage: `url(${src})`,
-		maskSize: 'contain',
-		maskRepeat: 'no-repeat',
-		maskPosition: 'center'
-	};
-}
 
 interface WelcomeModalProps {
   onClose: () => void;
@@ -93,7 +83,7 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ onClose, onNewProjec
 							<span className="text-h1-heading font-semibold tracking-[-0.01em] text-text-primary">{t('welcome.newProject')}</span>
 							<span
 								className="inline-block h-7 w-7 shrink-0 bg-text-primary"
-								style={welcomeIconMaskStyle(iconNewProject)}
+								style={sidebarIconMaskStyle(iconNewProject)}
 								aria-hidden
 							/>
 						</button>
@@ -104,7 +94,7 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({ onClose, onNewProjec
 							<span className="text-h1-heading font-semibold tracking-[-0.01em] text-text-primary">{t('welcome.openProject')}</span>
 							<span
 								className="inline-block h-7 w-7 shrink-0 bg-text-primary"
-								style={welcomeIconMaskStyle(iconOpenProject)}
+								style={sidebarIconMaskStyle(iconOpenProject)}
 								aria-hidden
 							/>
 						</button>

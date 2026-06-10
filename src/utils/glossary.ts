@@ -29,7 +29,6 @@ export function resolveIsoLanguage(languageOrCode: string): string | null {
 }
 
 // человекочитаемое описание для колонки context
-// предпочитаем то что GPT написал в meaning_context, а старая авто-метка - запасной вариант
 function termContextLabel(t: GlossaryTermGenerated): string {
 	const meaning = (t.meaning_context ?? '').trim();
 	if (meaning.length > 0) return meaning;
@@ -187,7 +186,6 @@ export function mergePromptHintsIntoGlossary(
 	return next;
 }
 
-// @deprecated whisper prompt теперь на rust
 export function buildTranscriptionPrompt(
 	userPrompt: string,
 	_glossary: GlossaryEntry[]
@@ -290,7 +288,7 @@ export async function applyAutoGlossaryToProject(
 		contextPrompt?: string;
 		fillTranslation?: boolean;
 		// язык для поля meaning_context (если не задан = targetLanguageIso)
-		// в wizard'е target=исходный, но meaning_context надо писать на ui-языке проекта
+		// в мастере target=исходный, но meaning_context надо писать на ui-языке проекта
 		meaningContextLanguageIso?: string;
 	}
 ): Promise<ProjectData> {

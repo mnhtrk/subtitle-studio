@@ -137,7 +137,7 @@ function VideoPlayerInner({
 					className="absolute inset-0 z-0 h-full w-full object-contain [transform:translateZ(0)] [backface-visibility:hidden]"
 					style={{ willChange: 'contents' }}
 					playsInline
-					muted={muted}
+					// muted ставим в useEffect а не тут иначе ловится баг с залипанием mute
 					preload="auto"
 					disablePictureInPicture
 					onLoadedMetadata={(e) => {

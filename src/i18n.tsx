@@ -148,7 +148,9 @@ const enMessages = {
 		charsPerSec: 'Chars/sec',
 		prev: '< Prev',
 		next: 'Next >',
-		askAgent: 'Ask agent'
+		askAgent: 'Ask agent',
+		attachToChat: 'Attach to chat',
+		attachRangeToChat: 'Attach range to chat ({count})'
 	},
 	video: {
 		preview: 'Video Preview',
@@ -157,7 +159,9 @@ const enMessages = {
 		pause: 'Pause',
 		stop: 'Stop',
 		unmute: 'Unmute',
-		mute: 'Mute'
+		mute: 'Mute',
+		onSecondMonitor: 'Video is displayed on the second monitor',
+		viewerWindowTitle: 'Subtitle Studio — Video'
 	},
 	timeline: {
 		insert: 'Insert',
@@ -214,6 +218,7 @@ const enMessages = {
 		saveErrorTitle: 'Save error',
 		saveBeforeSwitch: 'The project has unsaved changes. Save before continuing?',
 		saveBeforeExit: 'Save changes before closing the project?',
+		saveBeforeCloseApp: 'Save changes before closing the application?',
 		importTitle: 'Import',
 		openProjectFirst: 'Open or create a project first.',
 		importOriginalFailed: 'Could not import subtitles: {detail}',
@@ -320,7 +325,7 @@ const enMessages = {
 		skipAll: 'Skip all',
 		loading: 'Checking spelling…',
 		scanning: 'Checking subtitles…',
-		scanningHint: 'Translation column only. Progress is also printed to the dev console.',
+		scanningHint: 'Translation column only.',
 		scanProgress: '{done} / {total} lines · {found} typo(s)',
 		close: 'Close',
 		noIssues: 'Spell check complete: 0 typos found.',
@@ -495,7 +500,9 @@ const ruMessages: Messages = {
 		charsPerSec: 'Симв/сек',
 		prev: '< Назад',
 		next: 'Вперёд >',
-		askAgent: 'Спросить агента'
+		askAgent: 'Спросить агента',
+		attachToChat: 'Прикрепить к чату',
+		attachRangeToChat: 'Прикрепить диапазон к чату ({count})'
 	},
 	video: {
 		preview: 'Просмотр видео',
@@ -504,7 +511,9 @@ const ruMessages: Messages = {
 		pause: 'Пауза',
 		stop: 'Стоп',
 		unmute: 'Включить звук',
-		mute: 'Выключить звук'
+		mute: 'Выключить звук',
+		onSecondMonitor: 'Видео отображается на втором мониторе',
+		viewerWindowTitle: 'Subtitle Studio — Видео'
 	},
 	timeline: {
 		insert: 'Вставить',
@@ -562,6 +571,7 @@ const ruMessages: Messages = {
 		saveErrorTitle: 'Ошибка сохранения',
 		saveBeforeSwitch: 'В проекте есть несохранённые изменения. Сохранить перед продолжением?',
 		saveBeforeExit: 'Сохранить изменения перед закрытием проекта?',
+		saveBeforeCloseApp: 'Сохранить изменения перед закрытием приложения?',
 		importTitle: 'Импорт',
 		openProjectFirst: 'Сначала откройте или создайте проект.',
 		importOriginalFailed: 'Не удалось импортировать субтитры: {detail}',
@@ -669,7 +679,7 @@ const ruMessages: Messages = {
 		skipAll: 'Пропустить все',
 		loading: 'Проверка орфографии…',
 		scanning: 'Проверка субтитров…',
-		scanningHint: 'Только колонка перевода. Прогресс также в консоли (терминал dev).',
+		scanningHint: 'Проверяется только колонка перевода.',
 		scanProgress: '{done} / {total} строк · опечаток: {found}',
 		close: 'Закрыть',
 		noIssues: 'Проверка завершена: опечаток не найдено (0).',

@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { DraggableModalShell } from './DraggableModalShell';
 import { GlossaryModal } from './GlossaryModal';
@@ -13,7 +13,6 @@ import {
 } from '../../services/projectService';
 import {
   applyAutoGlossaryToProject,
-  clearGlossaryTargetsInProject,
   mergePromptHintsIntoGlossary,
   parseTranslationHintsFromPrompt,
   resolveIsoLanguage,
@@ -114,6 +113,15 @@ const whisperLanguageCodes: Record<string, string> = {
   Ukrainian: 'uk'
 };
 
+function resolveLanguageLabel(codeOrName: string): string {
+  const raw = codeOrName.trim();
+  if (!raw) return 'English';
+  const byName = languageOptions.find((l) => l.toLowerCase() === raw.toLowerCase());
+  if (byName) return byName;
+  const byIso = languageOptions.find((l) => whisperLanguageCodes[l] === raw.toLowerCase());
+  return byIso ?? raw;
+}
+
 export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, onComplete }) => {
   const { t } = useI18n();
   const [currentStep, setCurrentStep] = useState(1);
@@ -137,6 +145,25 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
   const glossaryPromiseRef = useRef<Promise<GlossaryEntry[]> | null>(null);
   const totalSteps = 7;
   const cancelRef = useRef(false);
+
+  // целевой язык шага перевода = язык проекта из project.json
+  useEffect(() => {
+    if (!projectPath) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const opened = await projectService.open(projectPath);
+        if (cancelled) return;
+        const label = resolveLanguageLabel(opened.target_language ?? 'English');
+        setTargetLanguage(label);
+      } catch (e) {
+        console.warn('[Wizard] load project target_language failed', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath]);
 
   const isFileMode = sourceType === 'file';
 
@@ -681,35 +708,7 @@ export const WizardModal: React.FC<WizardModalProps> = ({ onClose, projectPath, 
             <label className="text-caption text-text-primary">{t('wizard.targetLanguage')}</label>
             <select
               value={targetLanguage}
-              onChange={(e) => {
-                const next = e.target.value;
-                setTargetLanguage(next);
-                // меняем target - старые переводы уже не актуальны
-                // источник + meaning_context остаются, очищаем только колонку перевод и пере-генерим её
-                if (!projectPath) return;
-                glossaryPromiseRef.current = null;
-                void (async () => {
-                  setIsPreparingGlossary(true);
-                  try {
-                    const cleared = await clearGlossaryTargetsInProject(projectPath);
-                    setGlossaryReady(cleared.glossary ?? []);
-                    const combinedPrompt = [translationPrompt, contextPrompt]
-                      .map((s) => s.trim())
-                      .filter(Boolean)
-                      .join('\n\n');
-                    const updated = await translateGlossaryTargetsInProject(
-                      projectPath,
-                      next,
-                      combinedPrompt
-                    );
-                    setGlossaryReady(updated.glossary ?? []);
-                  } catch (err) {
-                    console.warn('[Wizard] retranslate glossary on lang change failed', err);
-                  } finally {
-                    setIsPreparingGlossary(false);
-                  }
-                })();
-              }}
+              onChange={(e) => setTargetLanguage(e.target.value)}
               className="w-full h-[42px] px-3 bg-secondary-main border border-border-default rounded-[12px] text-body-reg text-text-primary"
             >
               {languageOptions.map((lang) => (

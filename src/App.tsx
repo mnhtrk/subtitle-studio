@@ -1,7 +1,28 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { emitTo, listen, TauriEvent, type UnlistenFn } from '@tauri-apps/api/event';
 import { ask, open, message } from '@tauri-apps/plugin-dialog';
+import {
+	VIEWER_WINDOW_LABEL,
+	VIEWER_EVENT_STATE,
+	VIEWER_EVENT_TICK,
+	VIEWER_EVENT_OVERLAY,
+	VIEWER_EVENT_SEEK,
+	VIEWER_EVENT_READY,
+	VIEWER_CMD_PLAY_PAUSE,
+	VIEWER_CMD_STOP,
+	VIEWER_CMD_SEEK,
+	VIEWER_CMD_VOLUME,
+	VIEWER_CMD_MUTE_TOGGLE,
+	type ViewerStatePayload,
+	type ViewerSeekCmdPayload,
+	type ViewerVolumeCmdPayload,
+	type ViewerOverlayPayload,
+	type ViewerSeekPayload,
+	type ViewerTickPayload
+} from './utils/dualMonitorTypes';
 import {
 	ChevronRight,
 	ChevronDown
@@ -28,10 +49,16 @@ import {
 } from './utils/fileName';
 import { useI18n } from './i18n';
 import { TimelinePanel } from './components/timeline/TimelinePanel';
-import { SubtitleTable } from './components/subtitles/SubtitleTable';
+import { SubtitleTable, type SubtitleCellCommitValue } from './components/subtitles/SubtitleTable';
 import { EditorVideoPane } from './components/video/EditorVideoPane';
 import { sidebarIconMaskStyle } from './utils/iconMask';
 import { formatPlaybackClock } from './utils/playbackClock';
+import {
+	SUBTITLE_CLIPBOARD_MARKER,
+	formatSubtitleClipboardPlainText,
+	insertTextAtTextareaSelection,
+	isSubtitleClipboardSystemText
+} from './utils/subtitleClipboard';
 
 const appWindow = getCurrentWindow();
 
@@ -84,28 +111,27 @@ import {
 import { installVideoEditorKeyboardHandlers, isEditableKeyboardTarget } from './utils/videoKeyboard';
 import { clampContextMenuToViewport } from './utils/contextMenuPosition';
 
-import iconNewProject from './assets/icons/new-project.svg';
-// import iconNewFile from './assets/icons/new-file.svg';
-import iconOpenProject from './assets/icons/open-project.svg';
-import iconSave from './assets/icons/save.svg';
-import iconWizard from './assets/icons/wizard.svg';
-import iconExport from './assets/icons/export.svg';
-import iconGlossary from './assets/icons/glossary.svg';
-import iconSearch from './assets/icons/search.svg';
-// import iconNewFolder from './assets/icons/new-folder.svg';
-import iconAdd from './assets/icons/add.svg';
-// import iconMore from './assets/icons/more.svg';
-import iconArrowUp from './assets/icons/arrow-up.svg';
-import iconArrowDown from './assets/icons/arrow-down.svg';
-import iconSend from './assets/icons/send.svg';
-import iconZoomIn from './assets/icons/zoom-in.svg';
-import iconZoomOut from './assets/icons/zoom-out.svg';
-import iconPlay from './assets/icons/play.svg';
-import iconPause from './assets/icons/pause.svg';
-import iconStop from './assets/icons/stop.svg';
-import iconVolume from './assets/icons/volume.svg';
-import iconVolumeMute from './assets/icons/volume-mute.svg';
-import appLogo from './assets/app-logo.svg';
+import {
+	appLogo,
+	iconAdd,
+	iconArrowDown,
+	iconArrowUp,
+	iconExport,
+	iconGlossary,
+	iconNewProject,
+	iconOpenProject,
+	iconPause,
+	iconPlay,
+	iconSave,
+	iconSearch,
+	iconSend,
+	iconStop,
+	iconVolume,
+	iconVolumeMute,
+	iconWizard,
+	iconZoomIn,
+	iconZoomOut
+} from './assets/iconUrls';
 
 const SIDEBAR_ICON_CLASS =
 	'pointer-events-none inline-block h-7 w-7 shrink-0 origin-center transition-transform duration-200 ease-out will-change-transform group-hover:scale-110 group-active:scale-[0.92]';
@@ -444,6 +470,11 @@ export default function App() {
 		translation?: string | null;
 		speaker_gender?: SpeakerGender | null;
 	};
+	type ChatAttachedRange = {
+		first: ChatAttachedSegment;
+		last: ChatAttachedSegment;
+		segments: ChatAttachedSegment[];
+	};
 	type ChatEditDiff = {
 		fileId: string;
 		fileName: string;
@@ -479,6 +510,7 @@ export default function App() {
 				role: 'user';
 				text: string;
 				attachedSegment?: ChatAttachedSegment;
+				attachedRange?: ChatAttachedRange;
 		  }
 		| {
 				id: string;
@@ -496,6 +528,18 @@ export default function App() {
 	const [chatInput, setChatInput] = useState('');
 	const [chatInputHasScrollbar, setChatInputHasScrollbar] = useState(false);
 	const [pendingAttachedSegment, setPendingAttachedSegment] = useState<ChatAttachedSegment | null>(null);
+	const [pendingAttachedRange, setPendingAttachedRange] = useState<ChatAttachedRange | null>(null);
+	const [subtitleTableContextMenu, setSubtitleTableContextMenu] = useState<{
+		x: number;
+		y: number;
+		index: number;
+	} | null>(null);
+	const subtitleTableContextMenuRef = useRef<HTMLDivElement>(null);
+	const subtitleClipboardRef = useRef<
+		| { kind: 'segment'; segment: ChatAttachedSegment }
+		| { kind: 'range'; range: ChatAttachedRange }
+		| null
+	>(null);
 	const [isAgentBusy, setIsAgentBusy] = useState(false);
 	const [agentBatchProgress, setAgentBatchProgress] = useState<{
 		current: number;
@@ -662,6 +706,18 @@ export default function App() {
 		readShowOriginalVideoSubtitles
 	);
 	const [dualMonitorMode, setDualMonitorMode] = useState(false);
+	const dualMonitorModeRef = useRef(false);
+	const viewerReadyRef = useRef(false);
+	const lastTickEmitRef = useRef(0);
+	const lastOverlayEmitRef = useRef('');
+	const viewerWindowRef = useRef<WebviewWindow | null>(null);
+	const viewerClosingRef = useRef(false);
+	const lastOverlayPayloadRef = useRef<ViewerOverlayPayload>({
+		translation: '',
+		original: '',
+		showOriginal: true
+	});
+	dualMonitorModeRef.current = dualMonitorMode;
 	const [isVideoPlaying, setIsVideoPlaying] = useState(false);
 	const [waveformPeaks, setWaveformPeaks] = useState<number[] | null>(null);
 	const [waveformImageSrc, setWaveformImageSrc] = useState<string | null>(null);
@@ -672,7 +728,7 @@ export default function App() {
 		[]
 	);
 	const [probedMediaDuration, setProbedMediaDuration] = useState<number | null>(null);
-	// controlled - иначе delete + blur пишет мусор
+
 	const [segEditorTranslation, setSegEditorTranslation] = useState('');
 	const [segEditorOriginal, setSegEditorOriginal] = useState('');
 	const [segEditorStart, setSegEditorStart] = useState('');
@@ -721,6 +777,7 @@ export default function App() {
 	>(null);
 
 	const projectDirtyRef = useRef(false);
+	const closePromptInFlightRef = useRef(false);
 	const markProjectDirty = useCallback(() => {
 		projectDirtyRef.current = true;
 	}, []);
@@ -735,6 +792,8 @@ export default function App() {
 		);
 		setChatInput('');
 		setPendingAttachedSegment(null);
+		setPendingAttachedRange(null);
+		subtitleClipboardRef.current = null;
 		setExpandedDiffIds(new Set());
 		setIsAgentBusy(false);
 	}, []);
@@ -758,6 +817,16 @@ export default function App() {
 					if (msg.attachedSegment) {
 						const seg = msg.attachedSegment;
 						content = `${content}\n\nПрикрепленная реплика:\n#${seg.id} [${formatChatTimecode(seg.start)}]\nOriginal: ${seg.text}\nTranslation: ${seg.translation ?? ''}`.trim();
+					}
+					if (msg.attachedRange) {
+						const range = msg.attachedRange;
+						const lines = range.segments
+							.map(
+								(s) =>
+									`#${s.id} [${formatChatTimecode(s.start)}]\nOriginal: ${s.text}\nTranslation: ${s.translation ?? ''}`
+							)
+							.join('\n\n');
+						content = `${content}\n\nПрикрепленный диапазон реплик #${range.first.id}-${range.last.id}:\n${lines}`.trim();
 					}
 					if (content) turns.push({ role: 'user', content });
 				} else if (msg.role === 'assistant') {
@@ -962,6 +1031,11 @@ export default function App() {
 					commitState: opts?.updateState !== false,
 					followTimeline: opts?.followTimeline !== false
 				});
+				if (dualMonitorModeRef.current && viewerReadyRef.current) {
+					void emitTo(VIEWER_WINDOW_LABEL, VIEWER_EVENT_SEEK, {
+						time: nextTime
+					} satisfies ViewerSeekPayload);
+				}
 			};
 
 			if (opts?.throttle) {
@@ -1006,12 +1080,29 @@ export default function App() {
 		(translation: string, original: string, sig: string, force = false) => {
 			if (!force && sig === lastPlaybackOverlaySigRef.current) return;
 			lastPlaybackOverlaySigRef.current = sig;
-		const trEl = videoTranslationOverlayRef.current;
-		if (trEl) trEl.textContent = translation.trim() || '\u00A0';
-		if (showOriginalVideoSubtitlesRef.current) {
-			const origEl = videoOriginalOverlayRef.current;
-			if (origEl) origEl.textContent = original.trim() || '\u00A0';
-		}
+			const trEl = videoTranslationOverlayRef.current;
+			if (trEl) trEl.textContent = translation.trim() || '\u00A0';
+			const showOrig = showOriginalVideoSubtitlesRef.current;
+			if (showOrig) {
+				const origEl = videoOriginalOverlayRef.current;
+				if (origEl) origEl.textContent = original.trim() || '\u00A0';
+			}
+			lastOverlayPayloadRef.current = {
+				translation,
+				original,
+				showOriginal: showOrig
+			};
+			if (dualMonitorModeRef.current && viewerReadyRef.current) {
+				const overlaySig = `${sig}|${showOrig ? 1 : 0}`;
+				if (force || overlaySig !== lastOverlayEmitRef.current) {
+					lastOverlayEmitRef.current = overlaySig;
+					void emitTo(VIEWER_WINDOW_LABEL, VIEWER_EVENT_OVERLAY, {
+						translation,
+						original,
+						showOriginal: showOrig
+					} satisfies ViewerOverlayPayload);
+				}
+			}
 		},
 		[]
 	);
@@ -1075,12 +1166,15 @@ export default function App() {
 	segEditorOriginalRef.current = segEditorOriginal;
 
 	useEffect(() => {
+		// сбрасываем dedupe чтобы overlay перерисовался
+		lastPlaybackOverlaySigRef.current = '';
+		lastOverlayEmitRef.current = '';
 		const v = videoRef.current;
 		const t =
 			v && Number.isFinite(v.currentTime) ? v.currentTime : currentPlaybackTimeRef.current;
 		syncSubtitleOverlayRef.current(t, true);
 		applyPlaybackUiRef.current(t, { commitState: !isPlayingRef.current });
-	}, [generatedSegments, showOriginalVideoSubtitles]);
+	}, [generatedSegments, showOriginalVideoSubtitles, dualMonitorMode]);
 
 	useEffect(() => {
 		syncSubtitleOverlayRef.current(currentPlaybackTimeRef.current, true);
@@ -1197,11 +1291,31 @@ export default function App() {
 		const seg = segmentsRef.current[selectedSegmentIndex];
 		if (!seg) return;
 
-		const st = parseSrtTime(segEditorStart);
-		const baseStart = st !== null ? st : seg.start;
-		const d = parseFloat(segEditorDuration.replace(',', '.'));
-		const end =
-			Number.isFinite(d) && d >= 0 ? baseStart + d : seg.end;
+		const stParsed = parseSrtTime(segEditorStart);
+		const dParsed = parseFloat(segEditorDuration.replace(',', '.'));
+		const stValid = stParsed !== null;
+		const dValid = Number.isFinite(dParsed) && dParsed >= 0;
+		const startTouched = stValid && Math.abs((stParsed as number) - seg.start) > 1e-6;
+		const durTouched = dValid && Math.abs(dParsed - (seg.end - seg.start)) > 1e-6;
+
+		let baseStart = seg.start;
+		let end = seg.end;
+		if (startTouched && durTouched) {
+			baseStart = stParsed as number;
+			end = baseStart + dParsed;
+		} else if (startTouched) {
+			baseStart = stParsed as number;
+		} else if (durTouched) {
+			end = seg.start + dParsed;
+		}
+		if (baseStart < 0) baseStart = 0;
+		if (end - baseStart < MIN_SEGMENT_DURATION) {
+			if (startTouched && !durTouched) {
+				baseStart = Math.max(0, end - MIN_SEGMENT_DURATION);
+			} else {
+				end = baseStart + MIN_SEGMENT_DURATION;
+			}
+		}
 
 		const text = segEditorOriginal;
 		const translation = segEditorTranslation;
@@ -1368,6 +1482,7 @@ export default function App() {
 		setSelectedSegmentIds(new Set());
 		setTimelineRubberRange(null);
 		setTimelineContextMenu(null);
+		setSubtitleTableContextMenu(null);
 		hydrateAgentChatFromProject(null);
 		undoSegmentsStackRef.current = [];
 		redoSegmentsStackRef.current = [];
@@ -1377,6 +1492,63 @@ export default function App() {
 		setActiveMenu(null);
 		setActiveModal(null);
 	}, [handleSaveProject, clearProjectDirty, flushSubtitleEditorToProject, hydrateAgentChatFromProject, t]);
+
+	// закрытие окна — один слушатель на всё приложение (refs чтобы не плодить ask-диалоги)
+	const flushSubtitleEditorToProjectRef = useRef(flushSubtitleEditorToProject);
+	flushSubtitleEditorToProjectRef.current = flushSubtitleEditorToProject;
+	const handleSaveProjectRef = useRef(handleSaveProject);
+	handleSaveProjectRef.current = handleSaveProject;
+	const clearProjectDirtyRef = useRef(clearProjectDirty);
+	clearProjectDirtyRef.current = clearProjectDirty;
+	const tRef = useRef(t);
+	tRef.current = t;
+
+	useEffect(() => {
+		let cancelled = false;
+		let unlisten: (() => void) | undefined;
+		void (async () => {
+			const un = await appWindow.onCloseRequested(async (event) => {
+				flushSubtitleEditorToProjectRef.current();
+				if (!currentProjectRef.current || !projectDirtyRef.current) return;
+
+				if (closePromptInFlightRef.current) {
+					event.preventDefault();
+					return;
+				}
+
+				event.preventDefault();
+				closePromptInFlightRef.current = true;
+				try {
+					let saveFirst: boolean;
+					try {
+						saveFirst = await ask(tRef.current('dialog.saveBeforeCloseApp'), {
+							title: tRef.current('dialog.appTitle'),
+							kind: 'warning'
+						});
+					} catch {
+						saveFirst = window.confirm(tRef.current('dialog.saveBeforeCloseApp'));
+					}
+					if (saveFirst) {
+						const ok = await handleSaveProjectRef.current();
+						if (!ok) return;
+					}
+					clearProjectDirtyRef.current();
+					await appWindow.destroy();
+				} finally {
+					closePromptInFlightRef.current = false;
+				}
+			});
+			if (cancelled) {
+				un();
+			} else {
+				unlisten = un;
+			}
+		})();
+		return () => {
+			cancelled = true;
+			unlisten?.();
+		};
+	}, []);
 
 	const pushSubtitleHistorySnapshot = useCallback(() => {
 		if (!activeSubtitleFileId) return;
@@ -2450,6 +2622,7 @@ export default function App() {
 		setChatMessages([]);
 		setChatInput('');
 		setPendingAttachedSegment(null);
+		setPendingAttachedRange(null);
 		setExpandedDiffIds(new Set());
 		setAgentBatchProgress(null);
 	}, [isAgentBusy]);
@@ -2607,8 +2780,144 @@ export default function App() {
 			translation: seg.translation ?? null,
 			speaker_gender: seg.speaker_gender ?? null
 		});
+		setPendingAttachedRange(null);
 		requestAnimationFrame(() => chatInputRef.current?.focus());
 	}, [generatedSegments, selectedSegmentIndex]);
+
+	const buildAttachedSegmentFromSeg = useCallback(
+		(seg: SubtitleSegment): ChatAttachedSegment => ({
+			id: seg.id,
+			start: seg.start,
+			end: seg.end,
+			text: seg.text,
+			translation: seg.translation ?? null,
+			speaker_gender: seg.speaker_gender ?? null
+		}),
+		[]
+	);
+
+	const buildAttachedRangeFromIds = useCallback(
+		(ids: Set<number>): ChatAttachedRange | null => {
+			if (ids.size < 2) return null;
+			const segs = segmentsRef.current.filter((s) => ids.has(s.id));
+			if (segs.length < 2) return null;
+			segs.sort((a, b) => {
+				if (a.start !== b.start) return a.start - b.start;
+				return a.id - b.id;
+			});
+			const first = buildAttachedSegmentFromSeg(segs[0]);
+			const last = buildAttachedSegmentFromSeg(segs[segs.length - 1]);
+			return {
+				first,
+				last,
+				segments: segs.map(buildAttachedSegmentFromSeg)
+			};
+		},
+		[buildAttachedSegmentFromSeg]
+	);
+
+	const attachCurrentSubtitleSelectionToChat = useCallback((): boolean => {
+		const ids = selectedSegmentIdsRef.current;
+		if (ids.size >= 2) {
+			const range = buildAttachedRangeFromIds(ids);
+			if (!range) return false;
+			setPendingAttachedSegment(null);
+			setPendingAttachedRange(range);
+			requestAnimationFrame(() => chatInputRef.current?.focus());
+			return true;
+		}
+		const idx = selectedSegmentIndexRef.current;
+		const seg = segmentsRef.current[idx];
+		if (!seg) return false;
+		setPendingAttachedSegment(buildAttachedSegmentFromSeg(seg));
+		setPendingAttachedRange(null);
+		requestAnimationFrame(() => chatInputRef.current?.focus());
+		return true;
+	}, [buildAttachedRangeFromIds, buildAttachedSegmentFromSeg]);
+
+	const copyCurrentSubtitleSelectionToClipboard = useCallback((): boolean => {
+		const ids = selectedSegmentIdsRef.current;
+		if (ids.size >= 2) {
+			const range = buildAttachedRangeFromIds(ids);
+			if (!range) return false;
+			subtitleClipboardRef.current = { kind: 'range', range };
+			return true;
+		}
+		const idx = selectedSegmentIndexRef.current;
+		const seg = segmentsRef.current[idx];
+		if (!seg) return false;
+		subtitleClipboardRef.current = {
+			kind: 'segment',
+			segment: buildAttachedSegmentFromSeg(seg)
+		};
+		return true;
+	}, [buildAttachedRangeFromIds, buildAttachedSegmentFromSeg]);
+
+	const pasteSubtitleClipboardToChat = useCallback((): boolean => {
+		const clip = subtitleClipboardRef.current;
+		if (!clip) return false;
+		if (clip.kind === 'segment') {
+			setPendingAttachedSegment(clip.segment);
+			setPendingAttachedRange(null);
+		} else {
+			setPendingAttachedSegment(null);
+			setPendingAttachedRange(clip.range);
+		}
+		return true;
+	}, []);
+
+	const handleSegmentEditorPaste = useCallback(
+		(
+			e: React.ClipboardEvent<HTMLTextAreaElement>,
+			column: 'translation' | 'text',
+			setValue: (v: string) => void,
+			valueRef: React.MutableRefObject<string>
+		) => {
+			const txt = e.clipboardData?.getData('text') ?? '';
+			if (txt !== SUBTITLE_CLIPBOARD_MARKER) return;
+			const plain = formatSubtitleClipboardPlainText(subtitleClipboardRef.current, column);
+			if (!plain) {
+				e.preventDefault();
+				return;
+			}
+			e.preventDefault();
+			const { next, caret } = insertTextAtTextareaSelection(
+				e.currentTarget,
+				valueRef.current,
+				plain
+			);
+			setValue(next);
+			valueRef.current = next;
+			requestAnimationFrame(() => {
+				e.currentTarget.setSelectionRange(caret, caret);
+			});
+			syncSubtitleOverlayRef.current(currentPlaybackTimeRef.current, true);
+		},
+		[]
+	);
+
+	const handleSubtitleMultiSelectChange = useCallback(
+		(next: Set<number>) => {
+			setSelectedSegmentIds(next);
+		},
+		[]
+	);
+
+	const handleSubtitleRowContextMenu = useCallback(
+		(e: React.MouseEvent, index: number) => {
+			e.preventDefault();
+			const seg = segmentsRef.current[index];
+			if (!seg) return;
+			const multi = selectedSegmentIdsRef.current;
+			if (!multi.has(seg.id) && selectedSegmentIndexRef.current !== index) {
+				setSelectedSegmentIds(new Set());
+				selectSegmentAndSeek(index);
+			}
+			setSubtitleTableContextMenu({ x: e.clientX, y: e.clientY, index });
+		},
+		[selectSegmentAndSeek]
+	);
+
 
 	const mergeGlossaryAgentUpdates = useCallback(
 		(
@@ -2998,24 +3307,37 @@ ${pairsBlock}
 		if (!text || isAgentBusy) return;
 
 		const attached = pendingAttachedSegment;
+		const attachedRange = pendingAttachedRange;
 		const userMsg: ChatMessage = {
 			id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
 			role: 'user',
 			text,
-			attachedSegment: attached ?? undefined
+			attachedSegment: attached ?? undefined,
+			attachedRange: attachedRange ?? undefined
 		};
 		setChatMessages((prev) => [...prev, userMsg]);
 		setChatInput('');
 		setPendingAttachedSegment(null);
+		setPendingAttachedRange(null);
 		setIsAgentBusy(true);
 		setAgentBatchProgress(null);
 
 		try {
 			const project = currentProjectRef.current;
 			if (!project) return;
-			const messageForAgent = attached
-				? `${text}\n\nПрикрепленная реплика:\n#${attached.id} [${formatChatTimecode(attached.start)}] speaker_gender=${formatSpeakerGenderForAgent(attached.speaker_gender)}\nOriginal: ${attached.text}\nTranslation: ${attached.translation ?? ''}`
-				: text;
+			let messageForAgent = text;
+			if (attached) {
+				messageForAgent = `${messageForAgent}\n\nПрикрепленная реплика:\n#${attached.id} [${formatChatTimecode(attached.start)}] speaker_gender=${formatSpeakerGenderForAgent(attached.speaker_gender)}\nOriginal: ${attached.text}\nTranslation: ${attached.translation ?? ''}`;
+			}
+			if (attachedRange) {
+				const lines = attachedRange.segments
+					.map(
+						(s) =>
+							`#${s.id} [${formatChatTimecode(s.start)}] speaker_gender=${formatSpeakerGenderForAgent(s.speaker_gender)}\nOriginal: ${s.text}\nTranslation: ${s.translation ?? ''}`
+					)
+					.join('\n\n');
+				messageForAgent = `${messageForAgent}\n\nПрикрепленный диапазон реплик #${attachedRange.first.id}-${attachedRange.last.id}:\n${lines}`;
+			}
 
 			const history = buildAgentConversationHistory(chatMessages);
 			const intent: AgentIntent = await agentService.classifyIntent(text, {
@@ -3025,7 +3347,7 @@ ${pairsBlock}
 
 			const editScope: AgentEditScope = resolveAgentEditScope({
 				message: text,
-				hasAttachedSegment: !!attached,
+				hasAttachedSegment: !!attached || !!attachedRange,
 				intent
 			});
 
@@ -3117,7 +3439,7 @@ ${pairsBlock}
 					targetLanguage: projectForAgent.target_language ?? null,
 					sessionId: agentSessionIdRef.current,
 					conversationHistory: history,
-					hasAttachedSegment: !!attached,
+					hasAttachedSegment: !!attached || !!attachedRange,
 					focusSegmentId: attached?.id ?? null,
 					onBatchProgress: (c, t) => {
 						if (!showBatchProgress) return;
@@ -3202,6 +3524,7 @@ ${pairsBlock}
 		chatInput,
 		isAgentBusy,
 		pendingAttachedSegment,
+		pendingAttachedRange,
 		chatMessages,
 		activeSubtitleFileId,
 		formatChatTimecode,
@@ -3242,7 +3565,7 @@ ${pairsBlock}
 
 	useLayoutEffect(() => {
 		syncChatInputHeight();
-	}, [chatInput, pendingAttachedSegment, syncChatInputHeight]);
+	}, [chatInput, pendingAttachedSegment, pendingAttachedRange, syncChatInputHeight]);
 
 	const hasOriginalText = useMemo(
 		() => generatedSegments.some((s) => (s.text ?? '').trim().length > 0),
@@ -3269,6 +3592,17 @@ ${pairsBlock}
 			setTimelineContextMenu((prev) => (prev ? { ...prev, x, y } : null));
 		}
 	}, [timelineContextMenu]);
+
+	useLayoutEffect(() => {
+		const menu = subtitleTableContextMenu;
+		const el = subtitleTableContextMenuRef.current;
+		if (!menu || !el) return;
+		const { width, height } = el.getBoundingClientRect();
+		const { x, y } = clampContextMenuToViewport(menu.x, menu.y, width, height);
+		if (x !== menu.x || y !== menu.y) {
+			setSubtitleTableContextMenu((prev) => (prev ? { ...prev, x, y } : null));
+		}
+	}, [subtitleTableContextMenu]);
 
 	const handleOpenSpellCheck = useCallback(async () => {
 		if (!currentProjectRef.current || generatedSegments.length === 0) return;
@@ -3471,6 +3805,40 @@ ${pairsBlock}
 		[activeSubtitleFileId, pushSubtitleHistorySnapshot, markProjectDirty]
 	);
 
+	const handleSubtitleCellCommit = useCallback(
+		(index: number, payload: SubtitleCellCommitValue) => {
+			const seg = segmentsRef.current[index];
+			if (!seg) return;
+			if (payload.field === 'start') {
+				const t = parseSrtTime(payload.valueText);
+				if (t == null) return;
+				const maxStart = Math.max(0, seg.end - MIN_SEGMENT_DURATION);
+				const nextStart = Math.max(0, Math.min(t, maxStart));
+				if (Math.abs(nextStart - seg.start) < 1e-6) return;
+				updateSegmentAtIndex(index, { start: nextStart });
+			} else if (payload.field === 'end') {
+				const t = parseSrtTime(payload.valueText);
+				if (t == null) return;
+				const minEnd = seg.start + MIN_SEGMENT_DURATION;
+				const nextEnd = Math.max(minEnd, t);
+				if (Math.abs(nextEnd - seg.end) < 1e-6) return;
+				updateSegmentAtIndex(index, { end: nextEnd });
+			} else if (payload.field === 'duration') {
+				const raw = payload.valueText.replace(',', '.');
+				const d = parseFloat(raw);
+				if (!Number.isFinite(d) || d <= 0) return;
+				updateSegmentAtIndex(index, { end: seg.start + Math.max(MIN_SEGMENT_DURATION, d) });
+			} else if (payload.field === 'translation') {
+				if ((seg.translation ?? '') === payload.valueText) return;
+				updateSegmentAtIndex(index, { translation: payload.valueText });
+			} else if (payload.field === 'text') {
+				if (seg.text === payload.valueText) return;
+				updateSegmentAtIndex(index, { text: payload.valueText });
+			}
+		},
+		[updateSegmentAtIndex]
+	);
+
 	const applyFindReplaceSegments = useCallback(
 		(nextList: SubtitleSegment[]) => {
 			if (!activeSubtitleFileId) return;
@@ -3513,8 +3881,10 @@ ${pairsBlock}
 		if (t === null) return;
 		const seg = generatedSegments[selectedSegmentIndex];
 		if (!seg) return;
-		const dur = seg.end - seg.start;
-		void updateSegmentAtIndex(selectedSegmentIndex, { start: t, end: t + dur });
+		const maxStart = Math.max(0, seg.end - MIN_SEGMENT_DURATION);
+		const nextStart = Math.max(0, Math.min(t, maxStart));
+		if (Math.abs(nextStart - seg.start) < 1e-6) return;
+		void updateSegmentAtIndex(selectedSegmentIndex, { start: nextStart });
 	}, [selectedSegmentIndex, segEditorStart, generatedSegments, updateSegmentAtIndex]);
 
 	const commitSegEditorDuration = useCallback(() => {
@@ -4318,6 +4688,7 @@ ${pairsBlock}
 			setSelectedSegmentIds(new Set());
 			setTimelineRubberRange(null);
 			setTimelineContextMenu(null);
+			setSubtitleTableContextMenu(null);
 			setSelectedTreeItem(null);
 			setProjectFileMenu(null);
 			timelineRangeSelectDragRef.current = null;
@@ -4325,6 +4696,45 @@ ${pairsBlock}
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
 	}, []);
+
+	useEffect(() => {
+		const onContextMenu = (e: MouseEvent) => {
+			if (isEditableKeyboardTarget(e.target)) return;
+			e.preventDefault();
+		};
+		window.addEventListener('contextmenu', onContextMenu);
+		return () => window.removeEventListener('contextmenu', onContextMenu);
+	}, []);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.code !== 'KeyC') return;
+			if (!(e.ctrlKey || e.metaKey)) return;
+			if (e.shiftKey || e.altKey) return;
+			if (activeModal !== null) return;
+			if (isEditableKeyboardTarget(e.target)) return;
+			const target = e.target;
+			if (target instanceof Element && target.closest('[data-ai-agent-panel]')) return;
+			const selectedText = window.getSelection()?.toString().trim() ?? '';
+			if (selectedText.length > 0) return;
+			const hasMulti = selectedSegmentIdsRef.current.size > 0;
+			const hasSingle = selectedSegmentIndexRef.current >= 0;
+			if (!hasMulti && !hasSingle) return;
+			if (!copyCurrentSubtitleSelectionToClipboard()) return;
+			e.preventDefault();
+			const clip = subtitleClipboardRef.current;
+			const plain = formatSubtitleClipboardPlainText(clip);
+			try {
+				void navigator.clipboard
+					?.writeText(plain || SUBTITLE_CLIPBOARD_MARKER)
+					.catch(() => {});
+			} catch {
+				/* noop */
+			}
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	}, [activeModal, copyCurrentSubtitleSelectionToClipboard]);
 
 	useEffect(() => {
 		if (!selectedTreeItem) return;
@@ -4675,6 +5085,21 @@ ${pairsBlock}
 					}
 				}
 			}
+
+			// тики во вьюер примерно раз в 60мс
+			if (
+				dualMonitorModeRef.current &&
+				viewerReadyRef.current &&
+				isPlayingRef.current &&
+				now - lastTickEmitRef.current >= 60
+			) {
+				lastTickEmitRef.current = now;
+				void emitTo(VIEWER_WINDOW_LABEL, VIEWER_EVENT_TICK, {
+					time: t,
+					duration: td,
+					playing: true
+				} satisfies ViewerTickPayload);
+			}
 		},
 		[syncTimelineScrollbarThumb, syncSubtitleOverlayAtTime]
 	);
@@ -4770,13 +5195,16 @@ ${pairsBlock}
 			if (!v) return;
 			const rect = bar.getBoundingClientRect();
 			const r = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-			v.volume = r;
+			const dual = dualMonitorModeRef.current;
+			if (!dual) {
+				v.volume = r;
+			}
 			setVolume(r);
 			if (r < 1e-4) {
-				v.muted = true;
+				if (!dual) v.muted = true;
 				setVideoMuted(true);
 			} else {
-				v.muted = false;
+				if (!dual) v.muted = false;
 				setVideoMuted(false);
 			}
 		};
@@ -4957,6 +5385,64 @@ ${pairsBlock}
 		[t]
 	);
 
+	const viewerWindowTitle = t('video.viewerWindowTitle');
+
+	const buildViewerState = useCallback((): ViewerStatePayload => {
+		return {
+			src: videoSrc,
+			sourceKey: playbackVideoPath ?? activeVideoAbsolutePath,
+			time: currentPlaybackTimeRef.current,
+			duration: timelineTotalDurationRef.current,
+			playing: isPlayingRef.current,
+			volume,
+			muted: videoMuted,
+			showOriginal: showOriginalVideoSubtitles,
+			preparing: playbackPreparing,
+			overlay: lastOverlayPayloadRef.current,
+			labels: {
+				preparing: editorVideoLabels.preparing,
+				preview: editorVideoLabels.preview,
+				play: editorVideoLabels.play,
+				pause: editorVideoLabels.pause,
+				stop: editorVideoLabels.stop,
+				mute: editorVideoLabels.mute,
+				unmute: editorVideoLabels.unmute,
+				emptyTitle: viewerWindowTitle
+			}
+		};
+	}, [
+		videoSrc,
+		playbackVideoPath,
+		activeVideoAbsolutePath,
+		volume,
+		videoMuted,
+		showOriginalVideoSubtitles,
+		playbackPreparing,
+		editorVideoLabels,
+		viewerWindowTitle
+	]);
+
+	const buildViewerStateRef = useRef<() => ViewerStatePayload>(buildViewerState);
+	buildViewerStateRef.current = buildViewerState;
+
+	useEffect(() => {
+		if (!dualMonitorMode) return;
+		if (!viewerReadyRef.current) return;
+		void emitTo(VIEWER_WINDOW_LABEL, VIEWER_EVENT_STATE, buildViewerStateRef.current());
+	}, [
+		dualMonitorMode,
+		videoSrc,
+		playbackVideoPath,
+		activeVideoAbsolutePath,
+		isVideoPlaying,
+		volume,
+		videoMuted,
+		showOriginalVideoSubtitles,
+		playbackPreparing,
+		editorVideoLabels,
+		viewerWindowTitle
+	]);
+
 	const handleVideoPlayPauseClick = useCallback(() => {
 		const v = videoRef.current;
 		if (!v) return;
@@ -4973,26 +5459,251 @@ ${pairsBlock}
 
 	const handleVideoMuteToggleClick = useCallback(() => {
 		const v = videoRef.current;
-		if (!v) return;
+		const dual = dualMonitorModeRef.current;
+		const curVolume = v && Number.isFinite(v.volume) ? v.volume : volume;
 		const next = !videoMuted;
 		if (next) {
-			volumeBeforeMuteRef.current = v.volume;
-			v.volume = 0;
+			volumeBeforeMuteRef.current = curVolume > 1e-3 ? curVolume : volumeBeforeMuteRef.current;
+			if (v && !dual) {
+				v.volume = 0;
+				v.muted = true;
+			}
 			setVolume(0);
-			v.muted = true;
 			setVideoMuted(true);
 		} else {
 			const restore = Math.max(1e-3, volumeBeforeMuteRef.current);
-			v.volume = restore;
+			if (v && !dual) {
+				v.volume = restore;
+				v.muted = false;
+			}
 			setVolume(restore);
-			v.muted = false;
 			setVideoMuted(false);
 		}
-	}, [videoMuted]);
+	}, [videoMuted, volume]);
 
 	const handleVideoError = useCallback(() => {
 		console.error('Video load/playback error', activeVideoAbsolutePath, videoSrc);
 	}, [activeVideoAbsolutePath, videoSrc]);
+
+	// рефы на хендлеры для глобальных listen
+	const seekVideoRef = useRef(seekVideo);
+	seekVideoRef.current = seekVideo;
+	const handleVideoPlayPauseClickRef = useRef(handleVideoPlayPauseClick);
+	handleVideoPlayPauseClickRef.current = handleVideoPlayPauseClick;
+	const handleVideoStopClickRef = useRef(handleVideoStopClick);
+	handleVideoStopClickRef.current = handleVideoStopClick;
+	const handleVideoMuteToggleClickRef = useRef(handleVideoMuteToggleClick);
+	handleVideoMuteToggleClickRef.current = handleVideoMuteToggleClick;
+
+	// слушаем команды от вьюера
+	useEffect(() => {
+		const unlisteners: UnlistenFn[] = [];
+		let cancelled = false;
+		void (async () => {
+			const onReady = await listen(VIEWER_EVENT_READY, () => {
+				viewerReadyRef.current = true;
+				if (dualMonitorModeRef.current) {
+					void emitTo(VIEWER_WINDOW_LABEL, VIEWER_EVENT_STATE, buildViewerStateRef.current());
+				}
+			});
+			const onPlayPause = await listen(VIEWER_CMD_PLAY_PAUSE, () => {
+				handleVideoPlayPauseClickRef.current();
+			});
+			const onStop = await listen(VIEWER_CMD_STOP, () => {
+				handleVideoStopClickRef.current();
+			});
+			const onSeek = await listen<ViewerSeekCmdPayload>(VIEWER_CMD_SEEK, (event) => {
+				const dur = timelineTotalDurationRef.current;
+				if (!Number.isFinite(dur) || dur <= 0) return;
+				const ratio = Math.max(0, Math.min(1, event.payload.ratio));
+				const targetTime = ratio * dur;
+				const v = videoRef.current;
+				if (event.payload.final) {
+					seekVideoRef.current(targetTime, {
+						force: true,
+						updateState: true,
+						followTimeline: false
+					});
+				} else {
+					if (v && !v.paused) {
+						try {
+							v.pause();
+						} catch {
+							/* noop */
+						}
+					}
+					seekVideoRef.current(targetTime, {
+						force: true,
+						updateState: false,
+						followTimeline: false,
+						throttle: true
+					});
+				}
+			});
+			const onVolume = await listen<ViewerVolumeCmdPayload>(VIEWER_CMD_VOLUME, (event) => {
+				const r = Math.max(0, Math.min(1, event.payload.volume));
+				if (r > 1e-3) volumeBeforeMuteRef.current = r;
+				setVolume(r);
+				setVideoMuted(r < 1e-4);
+			});
+			const onMute = await listen(VIEWER_CMD_MUTE_TOGGLE, () => {
+				handleVideoMuteToggleClickRef.current();
+			});
+			if (cancelled) {
+				onReady();
+				onPlayPause();
+				onStop();
+				onSeek();
+				onVolume();
+				onMute();
+				return;
+			}
+			unlisteners.push(onReady, onPlayPause, onStop, onSeek, onVolume, onMute);
+		})();
+		return () => {
+			cancelled = true;
+			for (const u of unlisteners) {
+				try {
+					u();
+				} catch {
+					/* noop */
+				}
+			}
+		};
+	}, []);
+
+	// создание/закрытие при переключении dualMonitorMode
+	useEffect(() => {
+		let cancelled = false;
+		let unlistenDestroyed: UnlistenFn | null = null;
+		const cleanupListener = () => {
+			if (unlistenDestroyed) {
+				try {
+					unlistenDestroyed();
+				} catch {
+					/* noop */
+				}
+				unlistenDestroyed = null;
+			}
+		};
+		if (dualMonitorMode) {
+			viewerReadyRef.current = false;
+			viewerClosingRef.current = false;
+			lastTickEmitRef.current = 0;
+			lastOverlayEmitRef.current = '';
+			void (async () => {
+				let wv: WebviewWindow | null = null;
+				try {
+					const existing = await WebviewWindow.getByLabel(VIEWER_WINDOW_LABEL);
+					if (existing) {
+						wv = existing;
+					}
+				} catch {
+					/* noop */
+				}
+				if (cancelled) {
+					if (wv) {
+						viewerClosingRef.current = true;
+						void wv.close().catch(() => {});
+					}
+					return;
+				}
+				if (!wv) {
+					try {
+						wv = new WebviewWindow(VIEWER_WINDOW_LABEL, {
+							url: 'viewer.html',
+							title: viewerWindowTitle,
+							width: 1100,
+							height: 680,
+							minWidth: 420,
+							minHeight: 260,
+							resizable: true,
+							decorations: true,
+							focus: true,
+							visible: true
+						});
+						wv.once('tauri://error', (e) => {
+							console.error('Viewer window error', e);
+							if (viewerWindowRef.current === wv) {
+								viewerWindowRef.current = null;
+							}
+							viewerReadyRef.current = false;
+							if (!cancelled) setDualMonitorMode(false);
+						});
+					} catch (e) {
+						console.error('Failed to create viewer window', e);
+						if (!cancelled) setDualMonitorMode(false);
+						return;
+					}
+				}
+				if (cancelled || !wv) {
+					if (wv) {
+						viewerClosingRef.current = true;
+						void wv.close().catch(() => {});
+					}
+					return;
+				}
+				viewerWindowRef.current = wv;
+				try {
+					const u = await wv.listen(TauriEvent.WINDOW_DESTROYED, () => {
+						viewerReadyRef.current = false;
+						if (viewerWindowRef.current === wv) {
+							viewerWindowRef.current = null;
+						}
+						if (!viewerClosingRef.current) {
+							setDualMonitorMode(false);
+						}
+					});
+					if (cancelled) {
+						try {
+							u();
+						} catch {
+							/* noop */
+						}
+						if (viewerWindowRef.current === wv) {
+							viewerWindowRef.current = null;
+						}
+						viewerClosingRef.current = true;
+						void wv.close().catch(() => {});
+					} else {
+						unlistenDestroyed = u;
+					}
+				} catch {
+					/* noop */
+				}
+			})();
+		} else {
+			const wv = viewerWindowRef.current;
+			if (wv) {
+				viewerClosingRef.current = true;
+				viewerWindowRef.current = null;
+				viewerReadyRef.current = false;
+				void wv.close().catch(() => {});
+			}
+		}
+		return () => {
+			cancelled = true;
+			cleanupListener();
+		};
+	}, [dualMonitorMode, viewerWindowTitle]);
+
+	// закрыть вьюер если закрыли главное окно
+	useEffect(() => {
+		const closeViewerIfOpen = () => {
+			const wv = viewerWindowRef.current;
+			if (wv) {
+				viewerClosingRef.current = true;
+				viewerWindowRef.current = null;
+				viewerReadyRef.current = false;
+				void wv.close().catch(() => {});
+			}
+		};
+		window.addEventListener('beforeunload', closeViewerIfOpen);
+		return () => {
+			window.removeEventListener('beforeunload', closeViewerIfOpen);
+			closeViewerIfOpen();
+		};
+	}, []);
 
   return (
     <div className="flex flex-col h-screen w-full overflow-hidden bg-surface-bg select-none">
@@ -5565,6 +6276,7 @@ ${pairsBlock}
 
 				{/* ПАНЕЛЬ ИИ-АГЕНТА */}
 				<div 
+					data-ai-agent-panel
 					style={{ 
 						width: `${aiAgentWidth || 320}px`, 
 						minWidth: `${LIMITS.AI_AGENT.MIN}px`,
@@ -5648,6 +6360,28 @@ ${pairsBlock}
 														<div className="min-h-[22px] bg-panel-header rounded-[2px] p-[4px] flex items-center">
 															<span className="text-caption text-text-primary font-inter break-words">
 																{msg.attachedSegment.text}
+															</span>
+														</div>
+													</div>
+												</div>
+											)}
+											{msg.attachedRange && (
+												<div className="mt-3 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] w-full">
+													<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+														<span className="whitespace-nowrap">
+															#{msg.attachedRange.first.id}-{msg.attachedRange.last.id}
+														</span>
+														<div className="flex-1 h-[1px] bg-border-default" />
+													</div>
+													<div className="flex flex-col gap-[4px]">
+														<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+															<span className="text-caption text-text-primary font-inter break-words">
+																{msg.attachedRange.first.translation || t('aiAgent.noTranslation')}
+															</span>
+														</div>
+														<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+															<span className="text-caption text-text-primary font-inter break-words">
+																{msg.attachedRange.last.translation || t('aiAgent.noTranslation')}
 															</span>
 														</div>
 													</div>
@@ -5943,6 +6677,37 @@ ${pairsBlock}
 								</div>
 							)}
 
+							{pendingAttachedRange && (
+								<div className="mx-3 mt-3 mb-1 bg-inline-bg rounded-[10px] p-[8px] flex flex-col gap-[8px] shrink-0">
+									<div className="flex items-center gap-[14px] text-caption font-inter text-text-primary/60">
+										<span className="whitespace-nowrap">
+											#{pendingAttachedRange.first.id}-{pendingAttachedRange.last.id}
+										</span>
+										<div className="flex-1 h-[1px] bg-border-default" />
+										<button
+											type="button"
+											title={t('aiAgent.removeAttachment')}
+											onClick={() => setPendingAttachedRange(null)}
+											className="text-caption font-inter text-text-secondary hover:text-text-primary transition-colors"
+										>
+											{t('aiAgent.remove')}
+										</button>
+									</div>
+									<div className="flex flex-col gap-[4px]">
+										<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+											<span className="text-caption text-text-primary font-inter break-words">
+												{pendingAttachedRange.first.translation || t('aiAgent.noTranslation')}
+											</span>
+										</div>
+										<div className="min-h-[22px] bg-surface-secondary rounded-[2px] p-[4px] flex items-center">
+											<span className="text-caption text-text-primary font-inter break-words">
+												{pendingAttachedRange.last.translation || t('aiAgent.noTranslation')}
+											</span>
+										</div>
+									</div>
+								</div>
+							)}
+
 							<textarea
 								ref={chatInputRef}
 								value={chatInput}
@@ -5951,6 +6716,15 @@ ${pairsBlock}
 									requestAnimationFrame(syncChatInputHeight);
 								}}
 								onKeyDown={handleChatInputKeyDown}
+								onPaste={(e) => {
+									const clip = subtitleClipboardRef.current;
+									if (!clip) return;
+									const txt = e.clipboardData?.getData('text') ?? '';
+									if (!isSubtitleClipboardSystemText(txt, clip)) return;
+									if (pasteSubtitleClipboardToChat()) {
+										e.preventDefault();
+									}
+								}}
 								disabled={isAgentBusy}
 								placeholder={t('aiAgent.placeholder')}
 								rows={3}
@@ -6008,25 +6782,33 @@ ${pairsBlock}
 					>
 						{/* ЛЕВАЯ КОЛОНКА Таблица + Панель редактирования одного субтитра */}
 						<div 
-							style={{ width: `${tablePanelWidth}px` }}
-							className="flex flex-col bg-surface-secondary relative min-w-[300px] border-r border-border-default overflow-hidden shrink-0"
+							style={dualMonitorMode ? undefined : { width: `${tablePanelWidth}px` }}
+							className={`flex flex-col bg-surface-secondary relative min-w-[300px] overflow-hidden ${
+								dualMonitorMode ? 'flex-1' : 'border-r border-border-default shrink-0'
+							}`}
 						>
 							<SubtitleTable
 								scrollRef={subtitleTableScrollRef}
 								colWidths={colWidths}
 								segments={generatedSegments}
 								selectedSegmentIndex={selectedSegmentIndex}
+								selectedSegmentIds={selectedSegmentIds}
 								findHighlight={findHighlight}
 								onSelectRow={selectSegmentAndSeek}
+								onMultiSelectChange={handleSubtitleMultiSelectChange}
 								onColResizeStart={startColResize}
+								onCellCommit={handleSubtitleCellCommit}
+								onRowContextMenu={handleSubtitleRowContextMenu}
 								labels={subtitleTableLabels}
 							/>
 
-							{/* РЕСАЙЗЕРЫ */}
-							<div 
-									onMouseDown={(e) => startTablePanelResizing('right', e)}
-									className="absolute right-[-2px] top-0 w-[5px] h-full cursor-col-resize z-50 hover:bg-primary-main/40 transition-colors"
-							/>
+							{/* ресайзер не нужен в дуал режиме */}
+							{!dualMonitorMode && (
+								<div 
+										onMouseDown={(e) => startTablePanelResizing('right', e)}
+										className="absolute right-[-2px] top-0 w-[5px] h-full cursor-col-resize z-50 hover:bg-primary-main/40 transition-colors"
+								/>
+							)}
 
 							{/* один субтитр */}
 							<div
@@ -6136,6 +6918,14 @@ ${pairsBlock}
 													translation: segEditorTranslation
 												});
 											}}
+											onPaste={(e) =>
+												handleSegmentEditorPaste(
+													e,
+													'translation',
+													setSegEditorTranslation,
+													segEditorTranslationRef
+												)
+											}
 										/>
 									</div>
 									{/* Вертикальная статистика */}
@@ -6176,6 +6966,14 @@ ${pairsBlock}
 												if (selectedSegmentIndex < 0) return;
 												void updateSegmentAtIndex(selectedSegmentIndex, { text: segEditorOriginal });
 											}}
+											onPaste={(e) =>
+												handleSegmentEditorPaste(
+													e,
+													'text',
+													setSegEditorOriginal,
+													segEditorOriginalRef
+												)
+											}
 										/>
 									</div>
 									{/* Вертикальная статистика */}
@@ -6222,9 +7020,16 @@ ${pairsBlock}
 							iconVolume={iconVolume}
 							iconVolumeMute={iconVolumeMute}
 							labels={editorVideoLabels}
+							dualMonitorMode={dualMonitorMode}
+							hiddenVolumeOverride={dualMonitorMode ? 0 : undefined}
+							hiddenMutedOverride={dualMonitorMode ? true : undefined}
 							onDuration={setVideoDuration}
 							onPlayingChange={handleVideoPlayingChange}
 							onVolumeFromElement={(vol) => {
+								if (dualMonitorModeRef.current) return;
+								// если элемент ещё mute и vol 0 это переходный момент - не трогаем
+								const el = videoRef.current;
+								if (el?.muted && vol < 1e-4) return;
 								setVolume(vol);
 								if (vol < 1e-4) setVideoMuted(true);
 							}}
@@ -6556,6 +7361,13 @@ ${pairsBlock}
 				const canRetranscribe = hasRange && Boolean(activeVideoAbsolutePath);
 				const selectedCount = selectedSegmentIds.size;
 				const canDelete = Boolean(activeSubtitleFileId) && (selectedCount > 0 || selectedSegmentIndex >= 0);
+				const canAttach =
+					selectedCount >= 1 ||
+					(selectedSegmentIndex >= 0 && selectedSegmentIndex < generatedSegments.length);
+				const attachLabel =
+					selectedCount >= 2
+						? t('table.attachRangeToChat', { count: selectedCount })
+						: t('table.attachToChat');
 				const deleteLabel =
 					selectedCount > 1
 						? t('timeline.deleteCount', { count: selectedCount })
@@ -6615,6 +7427,18 @@ ${pairsBlock}
 							</button>
 							<button
 								type="button"
+								disabled={!canAttach}
+								onClick={() => {
+									if (!canAttach) return;
+									setTimelineContextMenu(null);
+									attachCurrentSubtitleSelectionToChat();
+								}}
+								className="block text-left whitespace-nowrap px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
+							>
+								{attachLabel}
+							</button>
+							<button
+								type="button"
 								disabled={!canDelete}
 								onClick={() => {
 									if (!canDelete) return;
@@ -6631,6 +7455,45 @@ ${pairsBlock}
 								}
 							>
 								{deleteLabel}
+							</button>
+						</div>
+					</>
+				);
+			})()}
+
+			{subtitleTableContextMenu && (() => {
+				const m = subtitleTableContextMenu;
+				const hasSelection =
+					selectedSegmentIds.size >= 1 ||
+					(selectedSegmentIndex >= 0 && selectedSegmentIndex < generatedSegments.length);
+				const canAttach = hasSelection;
+				const attachLabel =
+					selectedSegmentIds.size >= 2
+						? t('table.attachRangeToChat', { count: selectedSegmentIds.size })
+						: t('table.attachToChat');
+				return (
+					<>
+						<div
+							className="fixed inset-0 z-[10500]"
+							onMouseDown={() => setSubtitleTableContextMenu(null)}
+							onContextMenu={(e) => { e.preventDefault(); setSubtitleTableContextMenu(null); }}
+						/>
+						<div
+							ref={subtitleTableContextMenuRef}
+							className="fixed z-[10501] w-max max-w-[min(100vw-16px,24rem)] py-1 bg-surface-secondary border border-border-default rounded-[8px] shadow-2xl"
+							style={{ left: m.x, top: m.y }}
+							onMouseDown={(e) => e.stopPropagation()}
+						>
+							<button
+								type="button"
+								disabled={!canAttach}
+								onClick={() => {
+									setSubtitleTableContextMenu(null);
+									attachCurrentSubtitleSelectionToChat();
+								}}
+								className="block text-left whitespace-nowrap px-3 py-[6px] text-body-reg text-text-primary hover:bg-secondary-hover disabled:opacity-40 disabled:pointer-events-none"
+							>
+								{attachLabel}
 							</button>
 						</div>
 					</>

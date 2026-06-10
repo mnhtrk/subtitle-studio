@@ -82,8 +82,8 @@
 
   --color-border-default: #2a3140;
 
-  --color-primary-main: #47537e;
-  --color-primary-hover: #aab3d1;
+  --color-primary-main: #4060a3;
+  --color-primary-hover: rgb(90, 118, 189);
   --color-primary-surface: #1d2432;
   --color-primary-disabled: #5b6273;
 

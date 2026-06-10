@@ -40,11 +40,11 @@ pub async fn log_message(
 ) -> Result<(), String> {
     // печатаем в консоль
     match level.as_str() {
-        "info" => println!("ℹ️ {}", message),
-        "warn" => println!("⚠️ {}", message),
-        "error" => println!("❌ {}", message),
-        "debug" => println!("🐛 {}", message),
-        _ => println!("📝 {}", message),
+        "info" => println!("[info] {}", message),
+        "warn" => println!("[warn] {}", message),
+        "error" => println!("[error] {}", message),
+        "debug" => println!("[debug] {}", message),
+        _ => println!("[log] {}", message),
     }
     
     // и шлём событие во фронт чтобы показать

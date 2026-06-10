@@ -248,7 +248,6 @@ export const projectService = {
   },
 
   // явный перевод/транслитерация терминов глоссария
-  // translate_batch на одиночных словах оставлял имена в латинице, отдельная команда надёжнее
   translateGlossaryTerms: async (
     terms: { source: string; context?: string | null }[],
     targetLanguage: string,
